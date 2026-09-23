@@ -153,7 +153,7 @@ fn modes(ui: &Ui) -> String {
     // line saying `[inner]` would be honest and useless.
     out.push(format!(
         "[{}]",
-        gmuse_library::next::scope_named(ui.playback.scope, ui.levels)
+        gmuse_library::next::scope_named(ui.playback.scope, ui.levels())
     ));
     if ui.playback.shuffle {
         out.push("[shuffle]".into());

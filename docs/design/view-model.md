@@ -204,6 +204,26 @@ That is a real refactor with a real payoff, and it is the thing in this proposal
 against. It is also the prerequisite for §3's shared focus being worth anything: two panes that cannot hold different
 projections have nothing to share a focus _between_.
 
+### Built — 2026-09-23, #275
+
+`Windows` owns the panes; `Window` owns `view`, `levels` and `previous`. `ui.view` and `ui.levels` are accessors onto
+the focused one, so the 54 production sites that read them still read the focused window and did not have to learn
+anything.
+
+Three things fell out that the plan did not predict:
+
+- **`Pane` was taken.** `tree::Pane` already means which _half of one view_ has the keys — the list or the tracks. The
+  windows a body divides into are `Window`, vim's word, so the two ideas keep their own (`domain-model.md` §8).
+- **`^w w` used to shuffle the screen.** The focused pane was always drawn first, so swapping focus swapped which view
+  was where. With windows in a list, focus moves and the windows stay — which is what `^w w` does in vim, and was not a
+  decision anyone made before.
+- **The shared projection was keyed to the focused window**, so grouped-beside-flat worked or broke depending on which
+  half your keys were in: a flat window asks for no grouping, and rebuilding for it left the other window drawing a tree
+  with nothing to group by. `Windows::grouping` builds for the first window that wants a grouping instead. **Two windows
+  grouped differently still share one projection** — that needs a projection each, and is #279.
+
+What is _not_ done is retiring view 4 (§6), which needs the panel to hold focus rather than a window to hold a view.
+
 ---
 
 ## 9. The milestone: one focus, several windows

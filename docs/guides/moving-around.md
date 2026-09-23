@@ -45,12 +45,16 @@ view `4` shows, drawn small — one cursor between them, so moving in one moves 
     ^w w     move the focus
     ^w o     back to one pane
 
-The second pane starts on wherever you were before, which is what `g<Tab>` would have taken you to — so `g<Tab>` then
+The second window starts on wherever you were before, which is what `g<Tab>` would have taken you to — so `g<Tab>` then
 `^wv` puts the two lists you have been going between on screen together.
 
-Keys go to the **focused** pane, and only that one is highlighted. Splitting the same view twice is not offered: two
-panes on one list is what `g<Tab>` already gives you, and the cursors are shared per list rather than per pane, so both
-halves would move together.
+Keys go to the **focused** window, and only that one is highlighted. `^w w` moves the keys; the windows stay where they
+are. Splitting the same view twice is not offered: two windows on one list is what `g<Tab>` already gives you, and the
+cursors are shared per list rather than per window, so both halves would move together.
+
+**Each window groups the tree its own way.** `:view 1` on one side and `:view 2` on the other gives you the albums to
+open on one half and the flat track list on the other, of the same library. Two windows grouped _differently_ — by
+artist on one side and genre on the other — is not there yet: they will both show the first one's grouping.
 
 `5` is unbound. It was a file browser, and gmuse navigates the library rather than a filesystem.
 

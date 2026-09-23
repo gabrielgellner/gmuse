@@ -169,11 +169,156 @@ pub enum Axis {
     Horizontal,
 }
 
-/// The second pane.
+/// One window's own projection — what it shows, and how (#275).
+///
+/// **The state that used to be `Ui`'s and is a pane's.** `ui.view()` was "the
+/// focused pane", which is what made splits cost nothing: every match in this
+/// file went to the right place without knowing a split existed. The price was
+/// that two panes could not differ in anything but which view they were on, so
+/// "the tree on the left, the same tree flat on the right" was unsayable —
+/// `levels` was one field for both.
+///
+/// `previous` is here for the same reason: `g<Tab>` means "back to what *this*
+/// pane was showing", and one shared field would hand it the other pane's
+/// history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Split {
-    pub other: View,
-    pub axis: Axis,
+pub struct Window {
+    pub view: View,
+    /// How the tree is grouped, when this pane is showing it.
+    pub levels: crate::shelf::Levels,
+    /// What `g<Tab>` returns to, in this pane.
+    pub previous: View,
+}
+
+/// The windows the body is divided into, and which one has the keys.
+///
+/// **`Window`, not `Pane`** — `tree::Pane` is already a name here, and it means
+/// something else: which *half of one view* has the keys, the list or the
+/// tracks. vim calls the things a body divides into windows, so this does too,
+/// and the two ideas keep their own words (`domain-model.md` §8).
+///
+/// **One or two, enforced by construction**: there is no `push`. `^w s`/`^w v`
+/// go to two, `^w o` back to one, and that is what the keymap offers — going to
+/// _n_ would mean deciding how `^w w` cycles and how splits nest, which is a
+/// keymap question and not this one. It is also why `body_height` is one number
+/// for every pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Windows {
+    /// Always one or two. Private, so nothing can make it three.
+    windows: Vec<Window>,
+    /// Index into `panes`, always in range.
+    focused: usize,
+    /// Which way the body divides. Meaningless with one pane, and kept rather
+    /// than cleared so `^w o` then `^w s` splits the way you split last.
+    axis: Axis,
+}
+
+impl Windows {
+    pub fn new(view: View, levels: crate::shelf::Levels) -> Self {
+        Self {
+            windows: vec![Window {
+                view,
+                levels,
+                previous: view,
+            }],
+            focused: 0,
+            axis: Axis::Vertical,
+        }
+    }
+
+    /// The pane the keys go to. **This is what `ui.view()` used to be.**
+    pub fn focused(&self) -> &Window {
+        &self.windows[self.focused]
+    }
+
+    pub fn focused_mut(&mut self) -> &mut Window {
+        &mut self.windows[self.focused]
+    }
+
+    /// Every pane, in layout order — the focused one is not necessarily first.
+    pub fn all(&self) -> &[Window] {
+        &self.windows
+    }
+
+    /// How many windows there are: one or two.
+    ///
+    /// **`count`, not `len`** — clippy asks anything with a `len` for an
+    /// `is_empty`, and this can never be empty, so the pair would be a method
+    /// that always answers `false`. The name says a quantity rather than a
+    /// length, which is what it is.
+    pub fn count(&self) -> usize {
+        self.windows.len()
+    }
+
+    pub fn is_split(&self) -> bool {
+        self.windows.len() > 1
+    }
+
+    pub fn axis(&self) -> Axis {
+        self.axis
+    }
+
+    /// The grouping the **shared** library projection has to be built for.
+    ///
+    /// **Not the focused window's**, which is what it was and what made this
+    /// wrong: the projection carries the tree, one per `Ui`, and a flat window
+    /// asks for no grouping at all. So focusing the flat half of a
+    /// grouped-beside-flat split rebuilt the projection ungrouped and left the
+    /// *other* window drawing a tree with nothing to group by — a split that
+    /// worked or broke depending on which side your keys were in.
+    ///
+    /// The rule is the first window that actually wants a grouping. Flat windows
+    /// read `sorted()` and are unaffected, so grouped-beside-flat is correct in
+    /// either focus order.
+    ///
+    /// **Two windows grouped *differently* still share the first one's terms**,
+    /// because there is one projection to build. That wants a projection per
+    /// window and is deferred to #279.
+    pub fn grouping(&self) -> crate::shelf::Levels {
+        self.windows
+            .iter()
+            .find(|w| w.view == View::Tree && !w.levels.is_flat())
+            .map(|w| w.levels)
+            .unwrap_or_else(|| self.focused().levels)
+    }
+
+    /// Whether this pane has the keys, which is what draws its border lit.
+    pub fn has_focus(&self, index: usize) -> bool {
+        index == self.focused
+    }
+
+    /// Divide, putting `other` in the new pane. Refuses when already split.
+    pub fn split(&mut self, axis: Axis, other: Window) -> bool {
+        if self.is_split() {
+            return false;
+        }
+        self.axis = axis;
+        self.windows.push(other);
+        true
+    }
+
+    /// Back to one pane: the focused one, wherever it was on screen.
+    pub fn only(&mut self) -> bool {
+        if !self.is_split() {
+            return false;
+        }
+        let keep = self.windows[self.focused];
+        self.windows = vec![keep];
+        self.focused = 0;
+        true
+    }
+
+    /// Move the keys to the next pane. **The panes stay where they are** — only
+    /// which one is lit changes. The old model swapped the two views instead,
+    /// because the focused one was always drawn first; that made `^w w` shuffle
+    /// the screen rather than move the cursor, which is not what it does in vim.
+    pub fn other(&mut self) -> bool {
+        if !self.is_split() {
+            return false;
+        }
+        self.focused = (self.focused + 1) % self.windows.len();
+        true
+    }
 }
 
 /// What the open prompt line is collecting.
@@ -294,7 +439,9 @@ pub struct PlaylistRow {
 
 /// Everything the UI draws and navigates.
 pub struct Ui {
-    pub view: View,
+    /// The windows, and which one has the keys — **what `view`, `levels`,
+    /// `split` and `previous_view` became** (#275).
+    pub windows: Windows,
     pub tree: TreeState,
     pub sorted: usize,
     pub playlist_sel: usize,
@@ -398,7 +545,6 @@ pub struct Ui {
     pub which_key_delay: Duration,
     pub count: Option<usize>,
     /// The view before the current one, for `g<Tab>`.
-    pub previous_view: View,
     /// Show a relative-distance gutter beside list rows.
     pub relative_numbers: bool,
     /// Session log. Disabled unless `--log` was given.
@@ -589,14 +735,6 @@ pub struct Ui {
     /// looking at the library — vim's `:copen`, where the quickfix window
     /// appears without the buffer you were editing going anywhere.
     pub queue_panel: bool,
-    /// The second pane, when there is one (#97).
-    ///
-    /// **`ui.view` is the focused pane**, which is why every other match in
-    /// this file needs no notion of a split: the keys already go where they
-    /// should. Swapping focus swaps the two.
-    pub split: Option<Split>,
-    /// How the tree is grouped — **a field on the view** (#97).
-    pub levels: crate::shelf::Levels,
     /// The fuzzy picker, while it is open (#54).
     pub picker: Option<crate::ui::picker::Picker>,
     /// The path the info panel has taken — #126, made a stack by #127.
@@ -698,8 +836,6 @@ impl Ui {
         Self {
             stop: None,
             queue_panel: false,
-            split: None,
-            levels: crate::shelf::Levels::default(),
             picker: None,
             focus: Vec::new(),
             info_sel: 0,
@@ -712,7 +848,7 @@ impl Ui {
                 .into_iter()
                 .collect(),
             view_problem: None,
-            view: View::Tree,
+            windows: Windows::new(View::Tree, crate::shelf::Levels::default()),
             tree: TreeState::default(),
             tree_scroll: Scroll::default(),
             sorted_scroll: Scroll::default(),
@@ -746,7 +882,6 @@ impl Ui {
             help_view: std::cell::Cell::new((0, 0)),
             which_key_delay: Duration::from_millis(DEFAULT_WHICH_KEY_DELAY_MS),
             count: None,
-            previous_view: View::Tree,
             relative_numbers: false,
             pending_next: None,
             session_path: None,
@@ -892,6 +1027,27 @@ impl Ui {
         self.quit
     }
 
+    /// What the focused pane is showing. **Was the `view` field** (#275).
+    pub fn view(&self) -> View {
+        self.windows.focused().view
+    }
+
+    /// How the focused pane groups the tree. **Was the `levels` field.**
+    pub fn levels(&self) -> crate::shelf::Levels {
+        self.windows.focused().levels
+    }
+
+    /// Point the focused pane at a view, with no history — `switch_view` is the
+    /// one that remembers where you were, because only a movement a person made
+    /// should be somewhere `g<Tab>` returns to.
+    pub fn set_view(&mut self, view: View) {
+        self.windows.focused_mut().view = view;
+    }
+
+    pub fn set_levels(&mut self, levels: crate::shelf::Levels) {
+        self.windows.focused_mut().levels = levels;
+    }
+
     pub fn queue_version(&self) -> u64 {
         self.queue_version
     }
@@ -946,7 +1102,7 @@ impl Ui {
     /// keys mean playback" is true whichever list you happen to be looking at.
     pub fn context(&self) -> crate::cmd::Context {
         match self.mode {
-            crate::cmd::Mode::Normal => self.view.context(),
+            crate::cmd::Mode::Normal => self.view().context(),
             crate::cmd::Mode::Transport => crate::cmd::Context::Transport,
         }
     }
@@ -963,11 +1119,13 @@ impl Ui {
 
     /// The track the cursor is on in the current view, if any.
     pub fn selected_track(&self, _ctx: &Context<'_>) -> Option<CopyId> {
-        match self.view {
+        match self.view() {
             // The row itself when it is a track, and otherwise the first
             // track underneath — so `x` on a closed album plays it from the
             // top rather than doing nothing.
-            View::Tree if self.levels.is_flat() => self.library.sorted().get(self.sorted).copied(),
+            View::Tree if self.levels().is_flat() => {
+                self.library.sorted().get(self.sorted).copied()
+            }
             View::Tree => self
                 .tree
                 .selected_track(&self.library)
@@ -1967,7 +2125,7 @@ pub fn capture_session(ui: &Ui, ctx: &Context<'_>) -> crate::session::Session {
             .filter_map(|id| recording_of(ctx, *id))
             .collect(),
         open_playlist: ui.open.as_ref().map(|o| o.name().to_string()),
-        view: Some(ui.view as u8),
+        view: Some(ui.view() as u8),
         // The copy too, so resuming reopens the file that was open rather
         // than whichever the canonical rule would pick now.
         current: ui
@@ -2082,7 +2240,7 @@ pub fn restore_session(
     {
         switch_view(ui, view);
         // Landing somewhere with no history of having been anywhere else.
-        ui.previous_view = view;
+        ui.windows.focused_mut().previous = view;
     }
 
     // **A view attached to a running engine restores nothing about playback** —
@@ -2740,7 +2898,7 @@ fn choose_from_picker(ui: &mut Ui, ctx: &Context<'_>) {
         Chosen::Track(id) => {
             // Flat, because a picked track is a row rather than a place in a
             // tree — and `levels` is what says flat now (#97).
-            ui.levels = crate::shelf::Levels::Flat;
+            ui.set_levels(crate::shelf::Levels::Flat);
             switch_view(ui, View::Tree);
             if let Some(at) = ui.library.sorted().iter().position(|r| *r == id) {
                 point_sorted_at(ui, at);
@@ -3012,13 +3170,13 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             recentre(ui);
         }
         Command::PaneNext => {
-            if ui.view == View::Guide {
+            if ui.view() == View::Guide {
                 ui.guide_pane = match ui.guide_pane {
                     Pane::Tree => Pane::Tracks,
                     Pane::Tracks => Pane::Tree,
                 };
             }
-            if ui.view == View::Playlist {
+            if ui.view() == View::Playlist {
                 ui.playlist_pane = match ui.playlist_pane {
                     Pane::Tree => Pane::Tracks,
                     Pane::Tracks => Pane::Tree,
@@ -3029,7 +3187,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // is what `o` means on a checkbox, which is the one form that has a
         // sensible reading outside a tree.
         Command::Fold(what) => {
-            if ui.view != View::Tree {
+            if ui.view() != View::Tree {
                 // **The saved-view list was view 6 and is the picker now**
                 // (#97, #119), so there is nothing here to toggle.
                 return;
@@ -3084,19 +3242,19 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         Command::Go(motion) => {
             // **Flat is not a tree**, and the structural motions read the
             // album dividers instead — the same idea seen edge-on (#31, #97).
-            if ui.view == View::Tree && !ui.levels.is_flat() {
+            if ui.view() == View::Tree && !ui.levels().is_flat() {
                 ui.tree.go(&ui.library, motion, n);
             } else if let Some(at) = flat_step(ui, ctx, motion, n) {
                 set_cursor(ui, at);
             }
         }
         Command::Playing => go_to_playing(ui, ctx),
-        Command::PaneLeft => match ui.view {
+        Command::PaneLeft => match ui.view() {
             View::Playlist => ui.playlist_pane = Pane::Tree,
             View::Guide => ui.guide_pane = Pane::Tree,
             _ => {}
         },
-        Command::PaneRight => match ui.view {
+        Command::PaneRight => match ui.view() {
             View::Playlist => ui.playlist_pane = Pane::Tracks,
             View::Guide => ui.guide_pane = Pane::Tracks,
             _ => {}
@@ -3111,14 +3269,14 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             };
             // View 3 is the only two-pane view now that the library tree
             // holds all three levels in one.
-            if ui.view != View::Playlist {
+            if ui.view() != View::Playlist {
                 return;
             }
             let focused = std::mem::replace(&mut ui.playlist_pane, want);
             execute_counted(ui, ctx, *cmd, count);
             ui.playlist_pane = focused;
         }
-        Command::Activate => match ui.view {
+        Command::Activate => match ui.view() {
             // Enter follows the link under the cursor, or folds the section
             // header it is on — both are "act on this row", which is what
             // Enter means in every other view here.
@@ -3212,38 +3370,46 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             None => offer_crates(ui, ctx),
         },
         Command::Find(source) => open_picker(ui, ctx, source),
-        // **The other pane starts on something else**, because a split
-        // showing the same list twice is what `g<Tab>` already gives you and
-        // is not what anybody splits for. The cursors are per view *kind*, so
-        // two panes on different views have their own; two on the same view
-        // would share one, which is why this does not offer that.
+        // **The new window starts on something else**, because a split showing
+        // the same list twice is what `g<Tab>` already gives you and is not what
+        // anybody splits for. The cursors are per view *kind* (#97), so two
+        // windows on different views have their own and two on the same view
+        // would share one — which is still why this does not offer that.
         Command::Split(axis) => {
-            let other = ui.previous_view;
-            if other == ui.view {
-                ui.notify("nothing else to put in the other pane — `g<Tab>` first");
+            let here = *ui.windows.focused();
+            if here.previous == here.view {
+                ui.notify("nothing else to put in the other window — `g<Tab>` first");
                 return;
             }
-            ui.split = Some(Split { other, axis });
-            ui.notify(format!("split: {} | {}", ui.view.title(), other.title()));
+            // The new window inherits this one's `levels`: it is a different
+            // view, so the grouping is not what distinguishes them, and
+            // starting it on the default would be a second surprise.
+            let other = Window {
+                view: here.previous,
+                levels: here.levels,
+                previous: here.view,
+            };
+            let title = other.view.title();
+            if ui.windows.split(axis, other) {
+                ui.notify(format!("split: {} | {}", here.view.title(), title));
+            }
         }
         Command::Only => {
-            if ui.split.take().is_some() {
-                ui.notify(format!("one pane: {}", ui.view.title()));
+            if ui.windows.only() {
+                ui.notify(format!("one window: {}", ui.view().title()));
             }
         }
-        // Focus swaps by swapping which view is `ui.view` — so every key in
-        // this file goes to the focused pane without knowing a split exists.
-        Command::OtherPane => match ui.split {
-            Some(split) => {
-                ui.split = Some(Split {
-                    other: ui.view,
-                    ..split
-                });
-                ui.view = split.other;
-                ui.notify(format!("pane: {}", ui.view.title()));
+        // **Focus moves; the windows stay put.** The old model swapped the two
+        // views, because the focused one was always drawn first — so `^w w`
+        // shuffled the screen instead of moving the cursor, which is not what it
+        // does in vim. Now `Windows` knows where each one is.
+        Command::OtherPane => {
+            if ui.windows.other() {
+                ui.notify(format!("window: {}", ui.view().title()));
+            } else {
+                ui.notify("only one window".to_string());
             }
-            None => ui.notify("only one pane"),
-        },
+        }
         Command::Export(path) => export(ui, ctx, &path),
         Command::Freeze(name) => freeze(ui, ctx, &name),
 
@@ -3253,13 +3419,13 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // one key, the first of which is what `c` already does.
         Command::Play => match ui.selected_track(ctx) {
             Some(id) => {
-                ui.playback.active = match ui.view {
+                ui.playback.active = match ui.view() {
                     View::Playlist => ActiveSource::Playlist,
                     _ => ActiveSource::Library,
                 };
                 // The queue is consumed as it plays, so playing from it takes
                 // the entry rather than leaving a copy behind.
-                if ui.view == View::Queue {
+                if ui.view() == View::Queue {
                     ui.queue.pop_front();
                 }
                 play(ui, ctx, id);
@@ -3404,9 +3570,9 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 _ => None,
             };
             if let Some(levels) = wanted
-                && levels != ui.levels
+                && levels != ui.levels()
             {
-                ui.levels = levels;
+                ui.set_levels(levels);
                 rebuild_library(ui, ctx);
             }
             switch_view(ui, View::from_id(id));
@@ -3418,14 +3584,14 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                     switch_view(ui, View::from_id(id));
                 }
             }
-            None => switch_view(ui, ui.view.next()),
+            None => switch_view(ui, ui.view().next()),
         },
-        Command::ViewPrev => switch_view(ui, ui.view.prev()),
+        Command::ViewPrev => switch_view(ui, ui.view().prev()),
         // A count repeats here and selects on `gt` — see `Command::ViewForward`.
-        Command::ViewForward => switch_view(ui, ui.view.forward(n)),
-        Command::ViewBack => switch_view(ui, ui.view.back(n)),
+        Command::ViewForward => switch_view(ui, ui.view().forward(n)),
+        Command::ViewBack => switch_view(ui, ui.view().back(n)),
         // **No `switch_view`.** The panel is not a projection, so opening it
-        // must not touch `ui.view` — that is the whole distinction #274 draws,
+        // must not touch `ui.view()` — that is the whole distinction #274 draws,
         // and calling `switch_view` here would quietly make it a view again.
         Command::QueuePanel => {
             ui.queue_panel = !ui.queue_panel;
@@ -3445,7 +3611,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 };
             }
         }
-        Command::ViewLast => switch_view(ui, ui.previous_view),
+        Command::ViewLast => switch_view(ui, ui.windows.focused().previous),
         Command::Search { pattern, dir } => {
             if pattern.is_empty() {
                 return;
@@ -3526,7 +3692,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                         ));
                         return;
                     }
-                    ui.levels = levels;
+                    ui.set_levels(levels);
                     // **The drawing follows the value, never the other way**
                     // (#97). Views 1 and 2 are one set drawn two ways, so
                     // `levels` decides which and the two cannot disagree —
@@ -3994,7 +4160,7 @@ fn playlist_key(ui: &Ui) -> Option<crate::undo::Key> {
 
 /// Which list `u` and `^r` act on: the one you are looking at.
 fn undo_key(ui: &Ui) -> Option<crate::undo::Key> {
-    match ui.view {
+    match ui.view() {
         View::Playlist => playlist_key(ui),
         View::Queue => Some(crate::undo::Key::Queue),
         _ => None,
@@ -4104,13 +4270,13 @@ fn step_history(ui: &mut Ui, ctx: &Context<'_>, back: bool) {
 
 /// The rows `n` from the cursor covers, in whichever list is focused.
 fn rows_at_cursor(ui: &Ui, n: usize) -> Vec<CopyId> {
-    let (entries, at) = match ui.view {
+    let (entries, at) = match ui.view() {
         View::Playlist if ui.playlist_pane == Pane::Tracks => {
             (ui.playlist.entries().to_vec(), ui.playlist_sel)
         }
         View::Playlist => return Vec::new(),
         View::Queue => (ui.queue.entries().copied().collect(), ui.queue_sel),
-        View::Tree if ui.levels.is_flat() => (ui.library.sorted().to_vec(), sorted_cursor(ui)),
+        View::Tree if ui.levels().is_flat() => (ui.library.sorted().to_vec(), sorted_cursor(ui)),
         // **A node is everything under it**, as `a` and `e` already read the tree: `yy` on
         // an artist yanks the artist. The count is a number of *rows*, and a closed node is
         // one row however many tracks it covers, so it does not multiply here.
@@ -4159,7 +4325,7 @@ fn put_rows(ui: &mut Ui, ctx: &Context<'_>, before: bool, times: usize) {
         .collect();
     let count = rows.len();
 
-    match ui.view {
+    match ui.view() {
         View::Playlist if ui.playlist_pane == Pane::Tree => {
             ui.notify("put into the tracks — `tab` moves there")
         }
@@ -4240,7 +4406,7 @@ fn put_rows(ui: &mut Ui, ctx: &Context<'_>, before: bool, times: usize) {
 /// bounds-checks and returns `None`, so an overrunning count is already safe;
 /// the `break` only saves spinning through a large one.
 fn remove_rows(ui: &mut Ui, ctx: &Context<'_>, n: usize) {
-    match ui.view {
+    match ui.view() {
         View::Playlist if ui.playlist_pane == Pane::Tree => {
             ui.notify("that removes a track — `:playlist delete` is not a thing yet")
         }
@@ -4832,7 +4998,7 @@ fn freeze_open_rule(ui: &mut Ui, ctx: &Context<'_>, name: &str, rule: &str) {
 /// The word says what it was, for the confirmation: "filed Aphex Twin in Dance" is what
 /// a person did; "filed 40 in Dance" is what the library recorded, and both are said.
 fn subjects_here(ui: &Ui, ctx: &Context<'_>) -> Result<(Vec<Id<Recording>>, String), String> {
-    if ui.view == View::Info {
+    if ui.view() == View::Info {
         let Some(focus) = ui.focus.last().copied() else {
             return Err("nothing in focus".to_string());
         };
@@ -4846,8 +5012,8 @@ fn subjects_here(ui: &Ui, ctx: &Context<'_>) -> Result<(Vec<Id<Recording>>, Stri
         let name = crate::model::rows::Listing::label_of(ctx.library, focus);
         return Ok((covered, name));
     }
-    let ids: Vec<CopyId> = match ui.view {
-        View::Tree if !ui.levels.is_flat() => ui.tree.tracks_for(&ui.library),
+    let ids: Vec<CopyId> = match ui.view() {
+        View::Tree if !ui.levels().is_flat() => ui.tree.tracks_for(&ui.library),
         _ => rows_at_cursor(ui, 1),
     };
     let songs = recordings_of(ctx, &ids);
@@ -5155,7 +5321,9 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
             ui.reader.as_ref(),
             crate::ui::holding_remote::Showing {
                 view: (!ui.composed.is_empty()).then(|| ui.composed.label()),
-                levels: Some(match ui.levels.pair() {
+                // **The windows' grouping, not the focused window's** — see
+                // `Windows::grouping` (#275).
+                levels: Some(match ui.windows.grouping().pair() {
                     None => Vec::new(),
                     Some((outer, inner)) => vec![outer.written(), inner.written()],
                 }),
@@ -5218,7 +5386,7 @@ fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
         ctx.library.whole(),
         ui.reader.clone(),
         members,
-        ui.levels,
+        ui.levels(),
         ui.smart_artist_sort,
     );
 
@@ -5253,10 +5421,10 @@ fn switch_view(ui: &mut Ui, view: View) {
     if view == View::Playlist {
         refresh_playlist_rows(ui);
     }
-    if view != ui.view {
-        ui.previous_view = ui.view;
+    if view != ui.view() {
+        ui.windows.focused_mut().previous = ui.view();
     }
-    ui.view = view;
+    ui.set_view(view);
     ui.status.clear();
 }
 
@@ -5322,11 +5490,11 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
 
 /// `a`/`y`/`e`: put the selection somewhere.
 fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
-    let ids: Vec<crate::model::rows::CopyId> = match ui.view {
+    let ids: Vec<crate::model::rows::CopyId> = match ui.view() {
         // From the tree, add everything the cursor covers — an album or an
         // artist — which is the whole point of adding from a tree. A flat list
         // has no subtree: the cursor is one row, which the fallthrough gives.
-        View::Tree if !ui.levels.is_flat() => ui.tree.tracks_for(&ui.library),
+        View::Tree if !ui.levels().is_flat() => ui.tree.tracks_for(&ui.library),
         _ => ui.selected_track(ctx).into_iter().collect(),
     };
     // **Whether a view can be edited does not depend on the cursor** (#96).
@@ -5925,8 +6093,8 @@ fn sole_authored_field(
 /// Returns a **track** index, which is what every flat view's cursor counts.
 fn flat_step(ui: &Ui, ctx: &Context<'_>, motion: Motion, count: usize) -> Option<usize> {
     let owned;
-    let ids: &[crate::model::rows::CopyId] = match ui.view {
-        View::Tree if ui.levels.is_flat() => ui.library.sorted(),
+    let ids: &[crate::model::rows::CopyId] = match ui.view() {
+        View::Tree if ui.levels().is_flat() => ui.library.sorted(),
         View::Playlist if ui.playlist_pane == Pane::Tracks => ui.playlist.entries(),
         View::Queue => {
             owned = ui.queue.entries().copied().collect::<Vec<_>>();
@@ -6037,8 +6205,8 @@ fn half_page_height(ui: &Ui) -> usize {
 }
 
 fn focused_scroll(ui: &Ui) -> Option<&Scroll> {
-    Some(match ui.view {
-        View::Tree if ui.levels.is_flat() => &ui.sorted_scroll,
+    Some(match ui.view() {
+        View::Tree if ui.levels().is_flat() => &ui.sorted_scroll,
         View::Tree => &ui.tree_scroll,
         View::Playlist if ui.playlist_pane == Pane::Tracks => &ui.playlist_scroll,
         View::Queue => &ui.queue_scroll,
@@ -6057,8 +6225,8 @@ fn go_to_playing(ui: &mut Ui, _ctx: &Context<'_>) {
         ui.notify("nothing is playing");
         return;
     };
-    let found = match ui.view {
-        View::Tree if ui.levels.is_flat() => {
+    let found = match ui.view() {
+        View::Tree if ui.levels().is_flat() => {
             match ui.library.sorted().iter().position(|t| *t == id) {
                 Some(at) => {
                     point_sorted_at(ui, at);
@@ -6207,7 +6375,7 @@ fn hunt(
 /// Whether the current view is the folded tree, which is the one that searches
 /// rows it is not showing.
 fn in_the_tree(ui: &Ui) -> bool {
-    ui.view == View::Tree && !ui.levels.is_flat()
+    ui.view() == View::Tree && !ui.levels().is_flat()
 }
 
 /// Where the cursor is, in the coordinates the search runs in — #131.
@@ -6235,8 +6403,8 @@ fn search_rows(ui: &Ui, ctx: &Context<'_>) -> Vec<crate::text::Haystack> {
             })
             .unwrap_or_else(|| crate::text::Haystack::of(""))
     };
-    match ui.view {
-        View::Tree if ui.levels.is_flat() => ui.library.sorted().iter().map(describe).collect(),
+    match ui.view() {
+        View::Tree if ui.levels().is_flat() => ui.library.sorted().iter().map(describe).collect(),
         // Artists, albums and tracks are all rows now, so `/` searches the
         // lot — which is what a single buffer should do.
         // **The tree does not come through here** (#131). Its haystack is
@@ -6346,8 +6514,8 @@ pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<crate::model::about::Abo
 }
 
 fn current_len(ui: &Ui, ctx: &Context<'_>) -> usize {
-    match ui.view {
-        View::Tree if ui.levels.is_flat() => ui.library.sorted().len(),
+    match ui.view() {
+        View::Tree if ui.levels().is_flat() => ui.library.sorted().len(),
         View::Tree => ui.tree.total(&ui.library),
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlist_rows.len(),
@@ -6407,8 +6575,8 @@ fn sorted_cursor(ui: &Ui) -> usize {
 }
 
 fn current_cursor(ui: &Ui) -> usize {
-    match ui.view {
-        View::Tree if ui.levels.is_flat() => sorted_cursor(ui),
+    match ui.view() {
+        View::Tree if ui.levels().is_flat() => sorted_cursor(ui),
         View::Tree => ui.tree.selected,
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlists_sel,
@@ -6432,9 +6600,9 @@ fn point_sorted_at(ui: &mut Ui, next: usize) {
 }
 
 fn set_cursor(ui: &mut Ui, next: usize) {
-    match ui.view {
+    match ui.view() {
         View::Info => ui.info_sel = next,
-        View::Tree if ui.levels.is_flat() => point_sorted_at(ui, next),
+        View::Tree if ui.levels().is_flat() => point_sorted_at(ui, next),
         View::Tree => ui.tree.selected = next,
         View::Playlist => match ui.playlist_pane {
             Pane::Tree => ui.playlists_sel = next,
@@ -6627,7 +6795,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
                 &format!(
                     "{} — keys that work here",
                     match ui.mode {
-                        crate::cmd::Mode::Normal => ui.view.title(),
+                        crate::cmd::Mode::Normal => ui.view().title(),
                         crate::cmd::Mode::Transport => "transport",
                     }
                 ),
@@ -6645,7 +6813,7 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         }
     }
 
-    frame.render_widget(statusline::tabs(&ui.theme, ui.view), tabs);
+    frame.render_widget(statusline::tabs(&ui.theme, ui.view()), tabs);
     match &ui.prompt {
         Some(prompt) => {
             frame.render_widget(statusline::prompt_line(&ui.theme, prompt), status);
@@ -6661,27 +6829,29 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
 
     // A rule-owned list says whose rule it is, so "why can I not delete this
     // row" has an answer on screen rather than only in the refusal message.
-    // **Two panes when there is a split, and the keys go to the focused one**
-    // (#97). `ui.view` *is* the focused pane, so nothing else in this file
-    // needs to know a split exists — which is the whole reason the state is
-    // "the other one" rather than a list of panes with an index.
-    match ui.split {
-        None => draw_body(frame, body, ui, ctx, ui.view, true),
-        Some(split) => {
-            let halves = match split.axis {
-                Axis::Vertical => {
-                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                }
-                Axis::Horizontal => {
-                    Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                }
+    //
+    // **Each window draws itself, from its own `Window`** (#275). It used to be
+    // `ui.view` for the first half and `split.other` for the second, which is
+    // why the focused one was always on the left: the state had no place to put
+    // *where* a window is. A window carries its own `levels` too, so a body
+    // drawn here never reads the focused window's grouping for a window that is
+    // not focused — the bug that shape could not even express.
+    let areas: Vec<Rect> = if ui.windows.is_split() {
+        let halves = match ui.windows.axis() {
+            Axis::Vertical => {
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             }
-            .split(body);
-            // The focused pane keeps the first half, so a split does not move
-            // what you were looking at out from under you.
-            draw_body(frame, halves[0], ui, ctx, ui.view, true);
-            draw_body(frame, halves[1], ui, ctx, split.other, false);
+            Axis::Horizontal => {
+                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+            }
         }
+        .split(body);
+        halves.to_vec()
+    } else {
+        vec![body]
+    };
+    for (i, (window, area)) in ui.windows.all().iter().zip(areas).enumerate() {
+        draw_body(frame, area, ui, ctx, *window, ui.windows.has_focus(i));
     }
 
     // After the body, so it takes room from it rather than covering it — the
@@ -6718,7 +6888,7 @@ const PICKER_HEIGHT: u16 = 18;
 
 /// Draw one pane.
 ///
-/// **Takes the view rather than reading `ui.view`**, because a split draws two
+/// **Takes the view rather than reading `ui.view()`**, because a split draws two
 /// (#97). Everything else about a pane still comes from `ui`: the cursors are
 /// per view *kind*, so two panes showing different views already have their
 /// own — and two showing the same view share one, which is the honest
@@ -6779,14 +6949,27 @@ fn draw_queue(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, focused
     )
 }
 
-fn draw_body(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, view: View, focused: bool) {
+/// One window's body.
+///
+/// **Takes the `Window`, not a `View`** — a non-focused window's grouping is its
+/// own, and reading `ui.levels()` here would draw it the way the *focused*
+/// window is grouped (#275).
+fn draw_body(
+    frame: &mut Frame,
+    body: Rect,
+    ui: &Ui,
+    ctx: &Context<'_>,
+    window: Window,
+    focused: bool,
+) {
+    let view = window.view;
     let playlist_title = match &ui.open {
         Some(o) => o.name().to_string(),
         None => "nothing open".to_string(),
     };
     match view {
         // **One view, drawn by what `levels` says** (#97).
-        View::Tree if !ui.levels.is_flat() => draw_tree(frame, body, ui, ctx),
+        View::Tree if !window.levels.is_flat() => draw_tree(frame, body, ui, ctx),
         View::Tree => draw_tracks(
             frame,
             body,
@@ -6940,7 +7123,7 @@ fn go_back(ui: &mut Ui, ctx: &Context<'_>) {
     ui.info_sel = 0;
     if ui.focus.is_empty() {
         let _ = ctx;
-        switch_view(ui, ui.previous_view);
+        switch_view(ui, ui.windows.focused().previous);
     }
 }
 
@@ -6976,7 +7159,7 @@ fn open_info(ui: &mut Ui, ctx: &Context<'_>, what: Option<crate::cmd::Named>) {
 
     // Already in the panel: `K` again is a no-op rather than a re-open, so it
     // cannot quietly throw away where you have navigated to (#127).
-    if ui.view == View::Info {
+    if ui.view() == View::Info {
         return;
     }
     match under_cursor(ui, ctx) {
@@ -7031,7 +7214,7 @@ fn under_cursor(
         ))
     };
 
-    let Some((outer, inner)) = ui.levels.pair().filter(|_| ui.view == View::Tree) else {
+    let Some((outer, inner)) = ui.levels().pair().filter(|_| ui.view() == View::Tree) else {
         return recording_page(ui.selected_track(ctx));
     };
     let Some(row) = ui.tree.here(&ui.library) else {
@@ -8630,7 +8813,7 @@ mod tests {
             gapless: None,
         };
         let mut ui = ui_of(&store, true);
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         let out = render(&ui, &ctx, 90, 10);
         assert!(out.contains("3:playlist"), "{out}");
         // Both halves say what is going on rather than rendering blank.
@@ -8699,8 +8882,8 @@ mod tests {
 
     /// The library view drawn flat — what view 2 was (#97).
     fn flat_view(ui: &mut Ui) {
-        ui.view = View::Tree;
-        ui.levels = crate::shelf::Levels::Flat;
+        ui.set_view(View::Tree);
+        ui.set_levels(crate::shelf::Levels::Flat);
     }
 
     fn ctx_of(store: &Scan) -> Context<'_> {
@@ -9244,7 +9427,7 @@ mod tests {
         ui.playlist.push(sorted[3]);
         ui.playlist.push(sorted[1]);
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         start(&mut ui, &ctx);
         assert_eq!(ui.playback.active, ActiveSource::Playlist);
@@ -9433,7 +9616,7 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist open electronic");
 
-        assert_eq!(ui.view, View::Playlist);
+        assert_eq!(ui.view(), View::Playlist);
         assert_eq!(ui.open.as_ref().map(Open::name), Some("electronic"));
         let titles: Vec<String> = ui
             .playlist
@@ -9560,7 +9743,7 @@ mod tests {
             "the rule was not recorded"
         );
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         execute(&mut ui, &ctx, Command::Remove);
         assert_eq!(ui.playlist.len(), before - 1, "still not editable");
@@ -9665,7 +9848,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "session-view");
         new_playlist(&mut ui, &ctx, "mix");
-        assert_eq!(ui.view, View::Playlist, "`new` should open it");
+        assert_eq!(ui.view(), View::Playlist, "`new` should open it");
 
         // Wander off to a different view and quit from there.
         press(&mut ui, &ctx, ":");
@@ -9690,7 +9873,7 @@ mod tests {
         fresh.listened = std::sync::Arc::clone(&fresh.desk.current().listened);
         restore_session(&mut fresh, &ctx, &snapshot, &Default::default());
 
-        assert_eq!(fresh.view, View::Guide, "it landed on the playlist view");
+        assert_eq!(fresh.view(), View::Guide, "it landed on the playlist view");
         // And the playlist still came back — the view restore is on top of it,
         // not instead of it.
         assert_eq!(fresh.open.as_ref().map(Open::name), Some("mix"));
@@ -9706,9 +9889,9 @@ mod tests {
         let mut snapshot = capture_session(&ui, &ctx);
         snapshot.view = None;
 
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         restore_session(&mut ui, &ctx, &snapshot, &Default::default());
-        assert_eq!(ui.view, View::Queue);
+        assert_eq!(ui.view(), View::Queue);
     }
 
     /// A rule is remembered by name too, and **recomputed** on open — which is
@@ -9789,7 +9972,7 @@ mod tests {
             !ui.open.as_ref().unwrap().is_rule(),
             "a saved playlist is editable"
         );
-        assert_eq!(ui.view, View::Playlist);
+        assert_eq!(ui.view(), View::Playlist);
     }
 
     /// Saving is also how a rule becomes editable, so it must detach — leaving
@@ -9811,7 +9994,7 @@ mod tests {
         assert!(!ui.open.as_ref().unwrap().is_rule());
         assert_eq!(ui.playlist.len(), before);
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         execute(&mut ui, &ctx, Command::Remove);
         assert_eq!(ui.playlist.len(), before - 1, "still not editable");
@@ -9977,7 +10160,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guide;
+        ui.set_view(View::Guide);
         ui.guide_pane = Pane::Tracks;
         let _ = render(&ui, &ctx, 100, 24);
 
@@ -10062,7 +10245,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 3");
-        assert_eq!(ui.view, View::Playlist);
+        assert_eq!(ui.view(), View::Playlist);
 
         let out = render(&ui, &ctx, 110, 12);
         assert!(out.contains("3:playlist"), "{out}");
@@ -10138,7 +10321,11 @@ mod tests {
         // Rules sort first, so the cursor starts on `electronic`.
         execute(&mut ui, &ctx, Command::Activate);
 
-        assert_eq!(ui.view, View::Playlist, "the left pane is a place to leave");
+        assert_eq!(
+            ui.view(),
+            View::Playlist,
+            "the left pane is a place to leave"
+        );
         assert_eq!(ui.open.as_ref().map(Open::name), Some("electronic"));
         assert_eq!(ui.playlist.len(), 2);
     }
@@ -10203,7 +10390,7 @@ mod tests {
         let all = ui.playlist.len();
         assert!(all >= 3, "the fixture needs three tracks");
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "d d");
         assert_eq!(ui.playlist.len(), all - 1);
@@ -10225,7 +10412,7 @@ mod tests {
         }
         assert!(ui.playlist.len() >= 3, "the fixture needs three tracks");
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         ui.playlist_sel = 1;
         press(&mut ui, &ctx, "D");
@@ -10246,7 +10433,7 @@ mod tests {
         new_playlist(&mut ui, &ctx, "mix");
         ui.playlist.push(Listing::rows(lib_of(&store))[0]);
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "9 d d");
         assert!(ui.playlist.is_empty());
@@ -10316,7 +10503,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        let before = ui.view;
+        let before = ui.view();
 
         press(&mut ui, &ctx, "space");
         press(&mut ui, &ctx, "?");
@@ -10325,7 +10512,7 @@ mod tests {
         press(&mut ui, &ctx, "g");
         assert!(ui.help.is_none(), "the popup stayed up");
         press(&mut ui, &ctx, "t");
-        assert_eq!(ui.view, before, "the dismissing key also did something");
+        assert_eq!(ui.view(), before, "the dismissing key also did something");
     }
 
     /// Space is the leader, so `expand` moved to `o` — a chord cannot extend a
@@ -10377,7 +10564,7 @@ mod tests {
         assert_eq!(ui.playlist.len(), 1);
 
         // Copy it out of the first playlist.
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "y y");
         assert_eq!(ui.register.len(), 1);
@@ -10407,7 +10594,7 @@ mod tests {
         let before = ui.playlist.entries().to_vec();
         assert!(before.len() >= 3);
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "d d");
         press(&mut ui, &ctx, "p");
@@ -10430,7 +10617,7 @@ mod tests {
         ui.playlist.push(ids[0]);
         ui.playlist.push(ids[1]);
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         ui.playlist_sel = 1;
         ui.register = vec![ids[2]];
@@ -10451,7 +10638,7 @@ mod tests {
         }
         let all = ui.playlist.len();
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "2 y y");
         assert_eq!(ui.register.len(), 2, "the count was ignored");
@@ -10469,7 +10656,7 @@ mod tests {
         new_playlist(&mut ui, &ctx, "mix");
         ui.register = vec![Listing::rows(lib_of(&store))[0]];
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "p");
 
@@ -10483,7 +10670,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let (mut ui, _) = ui_with_saved(&store, "put-empty");
         new_playlist(&mut ui, &ctx, "mix");
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
 
         press(&mut ui, &ctx, "p");
@@ -10514,7 +10701,7 @@ mod tests {
             ui.playlist.push(id);
         }
         let original = ui.playlist.entries().to_vec();
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
 
         press(&mut ui, &ctx, "y y");
@@ -10541,7 +10728,7 @@ mod tests {
         let (mut ui, _) = ui_with_saved(&store, "undo-redo");
         new_playlist(&mut ui, &ctx, "mix");
         ui.playlist.push(Listing::rows(lib_of(&store))[0]);
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
 
         press(&mut ui, &ctx, "d d");
@@ -10568,7 +10755,7 @@ mod tests {
 
         // A second playlist, never edited: `u` there has nothing to do.
         new_playlist(&mut ui, &ctx, "two");
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "u");
         assert!(ui.status.contains("oldest"), "{}", ui.status);
@@ -10618,7 +10805,7 @@ mod tests {
         // **Undoable, which is what makes it safe to reach for** — and undone *in the queue*,
         // because `undo_key` is the list on screen while `edited_key` is the list the command
         // changed. The same split that lets `a` in the library be undone in view 3.
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         press(&mut ui, &ctx, "u");
         assert_eq!(
             ui.queue.entries().count(),
@@ -10710,7 +10897,7 @@ mod tests {
         assert!(ui.status.contains("next"), "it said {:?}", ui.status);
 
         // **And it is undoable**, like every other queue edit.
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         press(&mut ui, &ctx, "u");
         assert_eq!(
             ui.queue.entries().copied().collect::<Vec<_>>(),
@@ -10731,7 +10918,7 @@ mod tests {
         let (mut ui, _) = ui_with_saved(&store, "queue-next-album");
 
         // An album row, so one press queues several tracks under it.
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         ui.tree.open_everything(&ui.library);
         let album = ui
             .library
@@ -10769,7 +10956,7 @@ mod tests {
         let before = ui.queue.len();
         assert!(before > 0);
 
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         press(&mut ui, &ctx, "d d");
         assert_eq!(ui.queue.len(), before - 1);
         press(&mut ui, &ctx, "u");
@@ -10794,7 +10981,7 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "playlist save mix");
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "u");
         assert!(
@@ -10832,7 +11019,7 @@ mod tests {
             (View::Playlist, Pane::Tracks),
             (View::Queue, Pane::Tree),
         ] {
-            ui.view = view;
+            ui.set_view(view);
             ui.playlist_pane = pane;
             handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
             assert!(
@@ -10874,7 +11061,7 @@ mod tests {
         let queued = ui.queue.len();
         assert!(queued > 0);
 
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         start(&mut ui, &ctx);
         assert_eq!(ui.queue.len(), queued - 1, "the entry was not consumed");
     }
@@ -10926,7 +11113,7 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 7");
-        assert_eq!(ui.view, View::Guide);
+        assert_eq!(ui.view(), View::Guide);
 
         let out = render(&ui, &ctx, 96, 18);
         assert!(out.contains("7:guide"), "{out}");
@@ -10947,7 +11134,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guide;
+        ui.set_view(View::Guide);
 
         press(&mut ui, &ctx, "j");
         handle_key(KeyEvent::from(KeyCode::Enter), &mut ui, &ctx);
@@ -10972,7 +11159,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guide;
+        ui.set_view(View::Guide);
         ui.guide_pane = Pane::Tracks;
         // The cursor's range comes from what was last drawn, so draw first —
         // as the event loop does before it ever sees a keypress.
@@ -11005,7 +11192,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guide;
+        ui.set_view(View::Guide);
         ui.guide_pane = Pane::Tracks;
         let _ = render(&ui, &ctx, 56, 10);
 
@@ -11115,7 +11302,7 @@ mod tests {
         );
         assert_eq!(filed(&ui, "roadtrip"), 1, "{}", ui.status);
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         execute(&mut ui, &ctx, Command::Remove);
         assert_eq!(filed(&ui, "roadtrip"), 0, "the removal was not written");
@@ -11177,7 +11364,7 @@ mod tests {
             let mut ui = ui_of(&store, true);
             // The binding must be reachable through lookup from somewhere the
             // user can actually be — a view, or a mode.
-            ui.view = match bctx {
+            ui.set_view(match bctx {
                 crate::cmd::Context::Common | crate::cmd::Context::Transport => View::Tree,
                 other => View::from_id(match other {
                     crate::cmd::Context::Library => ViewId::Library,
@@ -11189,7 +11376,7 @@ mod tests {
                         unreachable!()
                     }
                 }),
-            };
+            });
             if bctx == crate::cmd::Context::Transport {
                 ui.mode = crate::cmd::Mode::Transport;
             }
@@ -11215,9 +11402,9 @@ mod tests {
         // **Three tabs, not five** (#97): `sorted` was `library` drawn flat
         // and `scope` was a picker, so neither was ever a set of its own.
         press(&mut ui, &ctx, "g t");
-        assert_eq!(ui.view, View::Playlist);
+        assert_eq!(ui.view(), View::Playlist);
         press(&mut ui, &ctx, "g T");
-        assert_eq!(ui.view, View::Tree);
+        assert_eq!(ui.view(), View::Tree);
 
         // Wrapping, so you can always get anywhere with one key. A full lap
         // from where it starts, counted from `ALL` rather than a literal — so
@@ -11226,7 +11413,7 @@ mod tests {
         for _ in 0..View::ALL.len() {
             press(&mut ui, &ctx, "g t");
         }
-        assert_eq!(ui.view, View::Tree);
+        assert_eq!(ui.view(), View::Tree);
     }
 
     /// `1gt` is view 1 while `gt` is "next" — the count changes the meaning,
@@ -11239,11 +11426,11 @@ mod tests {
 
         press(&mut ui, &ctx, "4");
         press(&mut ui, &ctx, "g t");
-        assert_eq!(ui.view, View::Queue);
+        assert_eq!(ui.view(), View::Queue);
 
         press(&mut ui, &ctx, "1");
         press(&mut ui, &ctx, "g t");
-        assert_eq!(ui.view, View::Tree, "1gt must mean view 1, not next");
+        assert_eq!(ui.view(), View::Tree, "1gt must mean view 1, not next");
     }
 
     #[test]
@@ -11254,12 +11441,12 @@ mod tests {
 
         press(&mut ui, &ctx, "4");
         press(&mut ui, &ctx, "g t");
-        assert_eq!(ui.view, View::Queue);
+        assert_eq!(ui.view(), View::Queue);
         press(&mut ui, &ctx, "g tab");
-        assert_eq!(ui.view, View::Tree);
+        assert_eq!(ui.view(), View::Tree);
         // And back again — it is an alt-tab, not a one-way trip.
         press(&mut ui, &ctx, "g tab");
-        assert_eq!(ui.view, View::Queue);
+        assert_eq!(ui.view(), View::Queue);
     }
 
     /// `]b`/`[b` are the bracket spelling of `gt`/`gT` (#272). Both live.
@@ -11276,11 +11463,11 @@ mod tests {
             "one view cannot be cycled; this test would pass on any key"
         );
 
-        let first = ui.view;
+        let first = ui.view();
         press(&mut ui, &ctx, "] b");
-        assert_ne!(ui.view, first, "]b did not move");
+        assert_ne!(ui.view(), first, "]b did not move");
         press(&mut ui, &ctx, "[ b");
-        assert_eq!(ui.view, first, "[b is not ]b's inverse");
+        assert_eq!(ui.view(), first, "[b is not ]b's inverse");
     }
 
     /// **The count is the whole reason these are their own commands.** `3gt` is
@@ -11312,11 +11499,15 @@ mod tests {
              this test can no longer tell a repeat from a selection"
         );
         assert_eq!(
-            stepped.view,
+            stepped.view(),
             View::ALL[3],
             "3]b must be three views along from the first"
         );
-        assert_eq!(selected.view, View::Playlist, "3gt must still mean view 3");
+        assert_eq!(
+            selected.view(),
+            View::Playlist,
+            "3gt must still mean view 3"
+        );
     }
 
     /// A count larger than the number of views wraps — `999]b` is a held
@@ -11362,7 +11553,7 @@ mod tests {
         assert!(ui.prompt.is_some(), "colon should open the prompt");
         type_line(&mut ui, &ctx, "view 3");
         assert!(ui.prompt.is_none(), "prompt should close on enter");
-        assert_eq!(ui.view, View::Playlist);
+        assert_eq!(ui.view(), View::Playlist);
     }
 
     #[test]
@@ -11466,7 +11657,7 @@ mod tests {
         // playlist, since adding means adding to the one you picked.
         ui.data_dir = Some(scratch("add-tree"));
         new_playlist(&mut ui, &ctx, "mix");
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         let expected = ui.tree.tracks_for(&ui.library).len();
         press(&mut ui, &ctx, "a");
         assert_eq!(ui.playlist.len(), expected);
@@ -11483,18 +11674,18 @@ mod tests {
         let mut ui = ui_of(&store, true);
         ui.data_dir = Some(scratch("remove-only"));
         new_playlist(&mut ui, &ctx, "mix");
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         press(&mut ui, &ctx, "a");
         let before = ui.playlist.len();
 
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         press(&mut ui, &ctx, "d d");
         assert_eq!(ui.playlist.len(), before - 1);
 
         // In the tree there is no list to remove from, and it must say so rather
         // than deleting something else — the playlist is untouched.
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         press(&mut ui, &ctx, "d d");
         assert!(ui.status.contains("projection"), "{}", ui.status);
         assert_eq!(
@@ -11531,7 +11722,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guide;
+        ui.set_view(View::Guide);
         ui.guide_sel = crate::guides::GUIDES
             .iter()
             .position(|g| g.title == "Index")
@@ -11669,7 +11860,11 @@ mod tests {
         let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 3");
-        assert_eq!(ui.view, View::Playlist, "`:view 3` stopped switching views");
+        assert_eq!(
+            ui.view(),
+            View::Playlist,
+            "`:view 3` stopped switching views"
+        );
         assert!(ui.composed.is_empty(), "and it composed something instead");
     }
 
@@ -11734,7 +11929,7 @@ mod tests {
         select_view(&mut ui, &ctx, "paak");
 
         assert_eq!(ui.playlist.len(), 1, "the playlist was filtered");
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tracks;
         start(&mut ui, &ctx);
         assert_eq!(
@@ -12028,7 +12223,7 @@ mod tests {
         for id in ui.library.sorted().to_vec() {
             ui.playlist.push(id);
         }
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         let out = render(&ui, &ctx, 100, 24);
         // A playlist is a deliberate ordering; a header would imply a grouping
         // that is not there.
@@ -13356,7 +13551,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "add-to-view");
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         let add = |ui: &mut Ui, ctx: &Context<'_>| {
             execute(
@@ -13675,7 +13870,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         let under = ui.tree.tracks_for(&ui.library).len();
         assert!(under > 1, "the cursor is not on a multi-track node");
 
@@ -13763,7 +13958,7 @@ mod tests {
         type_line(&mut ui, &ctx, "view levels genre@1,album");
         assert!(ui.status.contains("no hierarchy yet"), "{}", ui.status);
         assert_eq!(
-            ui.levels,
+            ui.levels(),
             crate::shelf::Levels::default(),
             "it was applied anyway"
         );
@@ -13820,7 +14015,7 @@ mod tests {
 
         let copy = ui.selected_track(&ctx).expect("a row under the cursor");
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info);
+        assert_eq!(ui.view(), View::Info);
         assert_eq!(
             ui.focus.last().copied(),
             Some(crate::model::focus::Focus::Recording(
@@ -13867,7 +14062,7 @@ mod tests {
         // The history section is folded by default; the long page is behind it.
         ui.info_folded.remove(crate::model::about::FACTS);
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info);
+        assert_eq!(ui.view(), View::Info);
         let total = current_len(&ui, &ctx);
         assert!(
             total > 60,
@@ -13927,13 +14122,13 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         let Some(Row::Artist { display, .. }) = ui.tree.here(&ui.library) else {
             panic!("the cursor is not on an artist row");
         };
 
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert_eq!(ui.view(), View::Info, "{}", ui.status);
         assert!(
             matches!(ui.focus.last(), Some(Focus::Artist(_))),
             "it opened {:?} rather than the artist",
@@ -13953,7 +14148,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         // Open the artist and step onto its first album.
         press(&mut ui, &ctx, "o");
         press(&mut ui, &ctx, "j");
@@ -13965,7 +14160,7 @@ mod tests {
         };
 
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert_eq!(ui.view(), View::Info, "{}", ui.status);
         assert!(
             matches!(ui.focus.last(), Some(Focus::ReleaseGroup(_))),
             "it opened {:?} rather than the record",
@@ -14008,7 +14203,7 @@ mod tests {
         ui.desk.settled();
         refresh_listened(&mut ui);
         let ctx = refolded(&store, &ui);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view levels genre,album");
         assert!(
@@ -14025,7 +14220,7 @@ mod tests {
         };
         if is_stand_in(&ui) {
             press(&mut ui, &ctx, "K");
-            assert_ne!(ui.view, View::Info, "it opened a page for the stand-in");
+            assert_ne!(ui.view(), View::Info, "it opened a page for the stand-in");
             assert!(ui.status.contains("nothing is said"), "{}", ui.status);
             press(&mut ui, &ctx, "j");
         }
@@ -14036,7 +14231,7 @@ mod tests {
         );
 
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert_eq!(ui.view(), View::Info, "{}", ui.status);
         assert!(
             matches!(ui.focus.last(), Some(Focus::Concept(_))),
             "it opened {:?} rather than the concept",
@@ -14051,20 +14246,20 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view levels year,album");
 
         press(&mut ui, &ctx, "K");
-        assert_ne!(ui.view, View::Info, "it opened something anyway");
+        assert_ne!(ui.view(), View::Info, "it opened something anyway");
         assert!(ui.status.contains("has no page"), "{}", ui.status);
     }
 
     /// Put the tree's cursor on the artist node called `name`.
     fn onto_artist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         use crate::ui::tree::Row;
-        ui.view = View::Tree;
-        ui.levels = crate::shelf::Levels::default();
+        ui.set_view(View::Tree);
+        ui.set_levels(crate::shelf::Levels::default());
         rebuild_library(ui, ctx);
         press(ui, ctx, "g g");
         for _ in 0..200 {
@@ -14136,7 +14331,7 @@ mod tests {
             "the instrument: Paak has one track, so no fraction can show"
         );
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert_eq!(ui.view(), View::Info, "{}", ui.status);
         let filed = filed_in(&ui, &ctx);
         assert_eq!(
             filed,
@@ -14155,7 +14350,7 @@ mod tests {
         onto_artist(&mut ui, &ctx, "Anderson .Paak");
         let of = ui.tree.tracks_for(&ui.library).len();
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert_eq!(ui.view(), View::Info, "{}", ui.status);
         assert!(filed_in(&ui, &ctx).is_empty(), "already filed somewhere");
 
         press(&mut ui, &ctx, "a");
@@ -14378,10 +14573,10 @@ mod tests {
         let mut ui = ui_of(&store, true);
         flat_view(&mut ui);
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info);
+        assert_eq!(ui.view(), View::Info);
 
         press(&mut ui, &ctx, "^o");
-        assert_eq!(ui.view, View::Tree, "it stayed on an empty panel");
+        assert_eq!(ui.view(), View::Tree, "it stayed on an empty panel");
         assert!(ui.focus.is_empty());
     }
 
@@ -14469,7 +14664,7 @@ mod tests {
         // An artist, by part of the name — nobody types the whole credit.
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, r#"info artist="Ferrell""#);
-        assert_eq!(ui.view, View::Info, "{}", ui.status);
+        assert_eq!(ui.view(), View::Info, "{}", ui.status);
         assert!(
             matches!(ui.focus.last(), Some(crate::model::focus::Focus::Artist(_))),
             "{:?}",
@@ -14491,7 +14686,7 @@ mod tests {
         // Every fixture artist contains an "a" somewhere.
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, r#"info artist="a""#);
-        assert_ne!(ui.view, View::Info, "it picked one");
+        assert_ne!(ui.view(), View::Info, "it picked one");
 
         let picker = ui.picker.as_ref().expect("no picker offered");
         assert!(picker.shown.len() > 1, "{:?}", picker.shown);
@@ -14520,7 +14715,7 @@ mod tests {
         };
         press(&mut ui, &ctx, "enter");
         assert!(ui.picker.is_none(), "the picker stayed open");
-        assert_eq!(ui.view, View::Info);
+        assert_eq!(ui.view(), View::Info);
         assert_eq!(ui.focus.last(), Some(&wanted));
     }
 
@@ -14552,7 +14747,7 @@ mod tests {
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, r#"info artist="Ozric Tentacles""#);
         assert!(ui.status.contains("no artist called"), "{}", ui.status);
-        assert_ne!(ui.view, View::Info);
+        assert_ne!(ui.view(), View::Info);
     }
 
     /// **A saved view is a definition, not a thing** — what it names has a
@@ -14576,7 +14771,7 @@ mod tests {
         flat_view(&mut ui);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "info");
-        assert_eq!(ui.view, View::Info);
+        assert_eq!(ui.view(), View::Info);
         assert!(matches!(
             ui.focus.last(),
             Some(crate::model::focus::Focus::Recording(_))
@@ -14878,7 +15073,7 @@ mod tests {
         let mut ui = ui_of(&store, true);
         flat_view(&mut ui);
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info);
+        assert_eq!(ui.view(), View::Info);
 
         let before = ui.info_sel;
         press(&mut ui, &ctx, "/");
@@ -14899,9 +15094,9 @@ mod tests {
         flat_view(&mut ui);
 
         press(&mut ui, &ctx, "K");
-        assert_eq!(ui.view, View::Info);
+        assert_eq!(ui.view(), View::Info);
         press(&mut ui, &ctx, "escape");
-        assert_eq!(ui.view, View::Tree, "escape did not go back");
+        assert_eq!(ui.view(), View::Tree, "escape did not go back");
     }
 
     /// **The panel reached with no focus says how to point it at something**,
@@ -14981,7 +15176,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_with_history(&store, "add-ambiguous");
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, r#"view genre="techno""#);
@@ -15003,6 +15198,97 @@ mod tests {
         );
     }
 
+    /// **What #275 is for**: the tree grouped on one side and flat on the other.
+    ///
+    /// Unsayable before, because `levels` was one field for both halves — so the
+    /// two windows could differ only in which view they were on. This is the
+    /// first layout that needs a window to own its own projection state.
+    #[test]
+    fn two_windows_can_group_the_same_view_differently() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // Somewhere else to split with, then split.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 4");
+        press(&mut ui, &ctx, "^w v");
+        assert_eq!(ui.windows.count(), 2, "no split: {}", ui.status);
+
+        // The instrument: both windows start on the same grouping, so a test
+        // that never changed one would see them agree and prove nothing.
+        assert_eq!(
+            ui.windows.all()[0].levels,
+            ui.windows.all()[1].levels,
+            "the windows already differ before anything asked them to"
+        );
+
+        // This window flat, the other grouped. **`:view 2`, not `2gt`** — those
+        // are documented as the same and are not, which is #280; only this one
+        // sets the grouping.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 2");
+        assert_eq!(ui.view(), View::Tree);
+        assert!(ui.levels().is_flat(), "`:view 2` did not go flat");
+
+        press(&mut ui, &ctx, "^w w");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 1");
+        assert_eq!(ui.view(), View::Tree);
+        assert!(!ui.levels().is_flat(), "`:view 1` did not group");
+
+        // Both on the tree, grouped differently — the claim.
+        let [a, b] = [ui.windows.all()[0], ui.windows.all()[1]];
+        assert_eq!((a.view, b.view), (View::Tree, View::Tree));
+        assert_ne!(
+            a.levels.is_flat(),
+            b.levels.is_flat(),
+            "the two windows share one grouping"
+        );
+
+        // And both are drawn: the flat half lists tracks, the grouped half shows
+        // an album row to open.
+        let out = render(&ui, &ctx, 160, 20);
+        assert!(out.contains("library"), "no library pane:\n{out}");
+    }
+
+    /// The shared projection is built for the window that **wants** a grouping,
+    /// not for whichever window has the keys (#275, #279).
+    ///
+    /// This was a focus-order bug by construction: a flat window asks for no
+    /// grouping, so focusing the flat half of a grouped-beside-flat split
+    /// rebuilt the projection ungrouped and left the other window drawing a tree
+    /// with nothing to group by.
+    #[test]
+    fn the_projection_is_grouped_for_whichever_window_wants_it() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let grouped = ui.windows.focused().levels;
+        // The instrument: the default is a grouping, so "flat" below is a change.
+        assert!(
+            !grouped.is_flat(),
+            "the fixture starts flat; nothing to lose"
+        );
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 4");
+        press(&mut ui, &ctx, "^w v");
+        // Window 1 is the tree, grouped. Focus this one and make it flat.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 2");
+        assert!(ui.levels().is_flat(), "this window is not flat");
+
+        // The other window is still grouped, so the projection must be too —
+        // even though the keys are in the flat one.
+        assert_eq!(
+            ui.windows.grouping(),
+            grouped,
+            "the projection followed the focused window and ungrouped the other"
+        );
+    }
+
     /// **A split shows two lists at once, and the keys go to the focused
     /// one** — #97's last item.
     ///
@@ -15014,35 +15300,45 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        // Nothing to split with yet: the other pane starts on where you were.
+        // Nothing to split with yet: the new window starts on where you were.
         press(&mut ui, &ctx, "^w v");
-        assert!(ui.split.is_none(), "{}", ui.status);
+        assert!(!ui.windows.is_split(), "{}", ui.status);
         assert!(ui.status.contains("g<Tab>"), "{}", ui.status);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 4");
-        assert_eq!(ui.view, View::Queue);
+        assert_eq!(ui.view(), View::Queue);
         press(&mut ui, &ctx, "^w v");
-        let split = ui.split.expect("no split");
-        assert_eq!(split.other, View::Tree, "the other pane is where you were");
-        assert_eq!(split.axis, Axis::Vertical);
+        assert_eq!(ui.windows.count(), 2, "no split");
+        assert_eq!(ui.windows.axis(), Axis::Vertical);
+        assert_eq!(
+            ui.windows.all()[1].view,
+            View::Tree,
+            "the new window is where you were"
+        );
 
-        // **`ui.view` is the focused pane**, which is why nothing else needs
-        // to know a split exists — focus swaps by swapping the two.
+        // **The windows stay where they are and the focus moves** (#275). It used
+        // to swap the two views, so the focused one was always drawn first and
+        // `^w w` shuffled the screen; now the layout order is `all()`'s order.
         press(&mut ui, &ctx, "^w w");
-        assert_eq!(ui.view, View::Tree, "focus did not move");
-        assert_eq!(ui.split.unwrap().other, View::Queue);
+        assert_eq!(ui.view(), View::Tree, "focus did not move");
+        assert!(ui.windows.has_focus(1), "focus is not on the second window");
+        assert_eq!(
+            ui.windows.all()[0].view,
+            View::Queue,
+            "the windows swapped instead of the focus moving"
+        );
         press(&mut ui, &ctx, "^w w");
-        assert_eq!(ui.view, View::Queue, "focus did not move back");
+        assert_eq!(ui.view(), View::Queue, "focus did not move back");
 
-        // Both panes are drawn, and only one is focused.
+        // Both windows are drawn, and only one is focused.
         let out = render(&ui, &ctx, 120, 20);
         assert!(out.contains("up next"), "{out}");
         assert!(out.contains("library"), "{out}");
 
         press(&mut ui, &ctx, "^w o");
-        assert!(ui.split.is_none());
-        assert_eq!(ui.view, View::Queue, "closing moved what was focused");
+        assert!(!ui.windows.is_split());
+        assert_eq!(ui.view(), View::Queue, "closing moved what was focused");
     }
 
     /// **Views 1 and 2 are one set drawn two ways, and `levels` says which**
@@ -15061,24 +15357,24 @@ mod tests {
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 2");
-        assert_eq!(ui.view, View::Tree, "2 is the library view drawn flat");
-        assert!(ui.levels.is_flat(), "view 2 is `levels: flat`");
+        assert_eq!(ui.view(), View::Tree, "2 is the library view drawn flat");
+        assert!(ui.levels().is_flat(), "view 2 is `levels: flat`");
         assert_eq!(ui.library.len(), tracks, "the set changed");
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view 1");
-        assert_eq!(ui.view, View::Tree);
-        assert!(!ui.levels.is_flat());
+        assert_eq!(ui.view(), View::Tree);
+        assert!(!ui.levels().is_flat());
 
         // And the other direction: saying the value picks the drawing.
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view levels flat");
-        assert!(ui.levels.is_flat(), "{}", ui.status);
-        assert_eq!(ui.view, View::Tree);
+        assert!(ui.levels().is_flat(), "{}", ui.status);
+        assert_eq!(ui.view(), View::Tree);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "view levels genre,album");
-        assert_eq!(ui.view, View::Tree);
-        assert!(!ui.levels.is_flat());
+        assert_eq!(ui.view(), View::Tree);
+        assert!(!ui.levels().is_flat());
     }
 
     /// **`levels` is a field on the view, settable in place** — #97.
@@ -15161,8 +15457,8 @@ mod tests {
         // keys, so the picker keeps the distinction.
         press(&mut ui, &ctx, "enter");
         assert!(ui.picker.is_none(), "the picker stayed open");
-        assert_eq!(ui.view, View::Tree);
-        assert!(ui.levels.is_flat(), "a picked track lands in a flat list");
+        assert_eq!(ui.view(), View::Tree);
+        assert!(ui.levels().is_flat(), "a picked track lands in a flat list");
         assert!(
             ui.playback.current.is_none(),
             "enter played something it was only asked to go to"
@@ -16430,7 +16726,7 @@ mod tests {
         let playing = ui.library.sorted()[1];
         ui.playlist.push(playing);
         ui.playback.current = Some(playing);
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
 
         let title = Listing::listed(lib_of(&store), playing)
             .unwrap()
@@ -16513,7 +16809,7 @@ mod tests {
         for id in Listing::rows(lib_of(&store)) {
             ui.playlist.push(id);
         }
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         ui.playlist_pane = Pane::Tree;
 
         let title = Listing::listed(lib_of(&store), ui.playlist.entries()[0])
@@ -16599,7 +16895,7 @@ mod tests {
         press(&mut ui, &ctx, "G");
         let _ = render(&ui, &ctx, 90, 12);
 
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         let queue = render(&ui, &ctx, 90, 12);
         assert!(!queue.contains("Track 039"), "the queue is empty:\n{queue}");
 
@@ -16747,7 +17043,7 @@ mod tests {
         let store = many_artists(20);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "1 5 G");
         let before = render(&ui, &ctx, 90, 14);
@@ -16785,7 +17081,7 @@ mod tests {
         let store = many_artists(20);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z r");
         press(&mut ui, &ctx, "3 0 G");
@@ -16810,7 +17106,7 @@ mod tests {
         let store = many_artists(20);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z r");
         press(&mut ui, &ctx, "1 0 G");
@@ -16832,7 +17128,7 @@ mod tests {
         let store = many_artists(20);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "1 5 G");
         let before = render(&ui, &ctx, 90, 14);
@@ -16857,7 +17153,7 @@ mod tests {
         let store = many_artists(20);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z r");
         press(&mut ui, &ctx, "3 0 G");
@@ -16888,7 +17184,7 @@ mod tests {
         let store = many_artists(20);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         // `G` then back up the page, so the cursor sits *high* on a view that
         // is scrolled a long way down. Collapsing from there wants a viewport
@@ -16923,7 +17219,7 @@ mod tests {
         let store = many_artists(20);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         ui.tree.selected = 19;
         ui.tree_scroll.scroll_to(9_999);
 
@@ -16945,7 +17241,7 @@ mod tests {
         let store = many_artists(2);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         let out = render(&ui, &ctx, 90, 14);
         assert!(out.contains('~'), "expected filler rows:\n{out}");
@@ -16969,7 +17265,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z");
         waited(&mut ui);
@@ -17000,7 +17296,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "bind common \"z 9\" quit");
@@ -17041,7 +17337,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z");
         assert!(
@@ -17070,7 +17366,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         ui.bindings = bindings;
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "g");
         waited(&mut ui);
@@ -17127,7 +17423,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "<leader> ?");
         let first = render(&ui, &ctx, 80, 24);
@@ -17190,7 +17486,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         // `d` has one continuation, so it cannot overflow at any width.
         press(&mut ui, &ctx, "d");
@@ -17210,7 +17506,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "<leader> ?");
         let _ = render(&ui, &ctx, 80, 24);
@@ -17238,7 +17534,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "<leader> ?");
         let _ = render(&ui, &ctx, 80, 24);
@@ -17388,7 +17684,7 @@ mod tests {
     /// **The claim the panel exists to make**: `gq` shows the programme without
     /// changing what you are looking at (#274).
     ///
-    /// `assert_eq!(ui.view, View::Tree)` alone would pass if `gq` were unbound,
+    /// `assert_eq!(ui.view(), View::Tree)` alone would pass if `gq` were unbound,
     /// did nothing, or crashed before touching anything — an unchanged value is
     /// the weakest possible evidence. So the panel has to be shown to be *on
     /// screen*, beside the library it did not replace.
@@ -17397,7 +17693,7 @@ mod tests {
         let store = big_fixture(8);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         ui.playback.current = ui.library.sorted().first().copied();
         ui.queue.push_back(ui.library.sorted()[5]);
 
@@ -17416,7 +17712,7 @@ mod tests {
             "`gq` did not draw the panel:\n{after}"
         );
         // And the claim: the projection is untouched, and still on screen.
-        assert_eq!(ui.view, View::Tree, "`gq` changed the active projection");
+        assert_eq!(ui.view(), View::Tree, "`gq` changed the active projection");
         assert!(
             after.contains("1:library"),
             "the library went away:\n{after}"
@@ -17437,7 +17733,7 @@ mod tests {
         let store = big_fixture(8);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         let first = ui.library.sorted().first().copied();
         ui.playback.current = first;
 
@@ -17475,7 +17771,7 @@ mod tests {
         let store = big_fixture(60);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         ui.playback.current = ui.library.sorted().first().copied();
         press(&mut ui, &ctx, "g q");
 
@@ -17503,7 +17799,7 @@ mod tests {
         // And the same cursor is what view 4 opens on.
         press(&mut ui, &ctx, "4");
         press(&mut ui, &ctx, "g t");
-        assert_eq!(ui.view, View::Queue, "4gt did not reach the queue");
+        assert_eq!(ui.view(), View::Queue, "4gt did not reach the queue");
         assert_eq!(
             ui.queue_sel, 30,
             "view 4 has a cursor of its own; the panel is a second copy"
@@ -17546,7 +17842,7 @@ mod tests {
         let store = big_fixture(8);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         ui.playback.current = ui.library.sorted().first().copied();
         ui.queue.push_back(ui.library.sorted()[5]);
 
@@ -17569,7 +17865,7 @@ mod tests {
         let store = big_fixture(8);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         ui.playback.current = ui.library.sorted().first().copied();
         let sixth = ui.library.sorted()[5];
         ui.queue.push_back(sixth);
@@ -17588,7 +17884,7 @@ mod tests {
         let store = big_fixture(8);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         ui.playback.current = ui.library.sorted().first().copied();
         ui.queue.push_back(ui.library.sorted()[5]);
 
@@ -17612,7 +17908,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         assert_eq!(ui.mode, crate::cmd::Mode::Normal);
         assert!(!render(&ui, &ctx, 100, 24).contains("TRANSPORT"));
@@ -17635,7 +17931,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         ui.playback.current = ui.library.sorted().first().copied();
 
         let browsing = render(&ui, &ctx, 84, 20);
@@ -17698,7 +17994,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
         press(&mut ui, &ctx, "i");
 
         for (w, h) in [(84u16, 8u16), (40, 20)] {
@@ -17968,7 +18264,7 @@ mod tests {
             execute(&mut ui, &ctx, cmd);
         }
 
-        ui.view = View::from_id(ViewId::Library);
+        ui.set_view(View::from_id(ViewId::Library));
         press(&mut ui, &ctx, "z 9");
 
         assert_eq!(
@@ -18004,7 +18300,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         expand_to_tracks(&mut ui, &store);
-        ui.view = View::from_id(ViewId::Library);
+        ui.set_view(View::from_id(ViewId::Library));
 
         // **Enough room for both answers to be reachable.** Four rows and six
         // rows both have to fit, or the wrong one clamps to the right one and
@@ -18139,7 +18435,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z");
         assert!(!ui.pending.is_empty());
@@ -18153,7 +18449,7 @@ mod tests {
         let store = fixture();
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z");
         waited(&mut ui);
@@ -18229,7 +18525,7 @@ mod tests {
         let store = many_artists(8);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z R");
         let wide = ui.tree.rows(&ui.library).len();
@@ -18263,7 +18559,7 @@ mod tests {
         let store = many_artists(8);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z R");
         press(&mut ui, &ctx, "z x");
@@ -18277,7 +18573,7 @@ mod tests {
         let store = many_artists(20);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "z R");
         press(&mut ui, &ctx, "G");
@@ -18302,7 +18598,7 @@ mod tests {
         let store = many_artists(30);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "1 5 G");
         let _ = render(&ui, &ctx, 90, 14);
@@ -18333,7 +18629,7 @@ mod tests {
         let store = many_artists(30);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "G");
         let _ = render(&ui, &ctx, 90, 14);
@@ -18370,7 +18666,7 @@ mod tests {
         let store = many_artists(8);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         // Play something three levels down, then close everything over it.
         press(&mut ui, &ctx, "z R");
@@ -18400,7 +18696,7 @@ mod tests {
         let store = many_artists(4);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Tree;
+        ui.set_view(View::Tree);
 
         press(&mut ui, &ctx, "g p");
         assert_eq!(ui.tree.selected, 0);
@@ -18447,7 +18743,7 @@ mod tests {
         let store = many_artists(30);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Playlist;
+        ui.set_view(View::Playlist);
         for id in ui.library.sorted() {
             ui.playlist.push(*id);
         }
@@ -18476,7 +18772,7 @@ mod tests {
         let store = many_artists(4);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.view = View::Guide;
+        ui.set_view(View::Guide);
         ui.guide_pane = Pane::Tree;
 
         press(&mut ui, &ctx, "G");
@@ -18808,7 +19104,7 @@ mod a_pane_asks_for_a_screenful {
             gapless: None,
         };
         let mut ui = tests::ui_of(&store, true);
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         // **A list far longer than the pane**, which is the shape the queue has in practice:
         // "up next" is the whole projection, not a playlist. The fixture holds seven rows, so
         // they go round until there are enough of them.
@@ -18865,7 +19161,7 @@ mod a_pane_asks_for_a_screenful {
             gapless: None,
         };
         let mut ui = tests::ui_of(&store, true);
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         for id in ids.iter().cycle().take(200) {
             ui.queue.push_back(*id);
         }
@@ -18924,7 +19220,7 @@ mod a_pane_draws_where_the_cursor_is {
             gapless: None,
         };
         let mut ui = tests::ui_of(&store, true);
-        ui.view = View::Queue;
+        ui.set_view(View::Queue);
         ui.relative_numbers = true;
         for id in ids.iter().cycle().take(200) {
             ui.queue.push_back(*id);
