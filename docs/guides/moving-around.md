@@ -3,6 +3,11 @@
 Views are switched like nvim tabs. `gt` and `gT` step; `3gt` jumps straight to view 3; `g<Tab>` returns to the one you
 were on before.
 
+`]b` and `[b` step as well, if brackets are what your hands reach for — the same shape as `]]` and `[z`, on the prefix
+those already live on. **The count is the one difference between the two spellings**: `3gt` is view 3, while `3]b` is
+three views along from here. Both of those are vim, which is why neither is wrong and why it is worth knowing which you
+are typing.
+
     1 library    3 playlist   4 queue      7 guide
 
 Three of them hold rows, and the guide holds prose. `2` and `6` still work and are **not views**:

@@ -117,6 +117,8 @@ pub const VERBS: &[&str] = &[
     "undo",
     "up",
     "view",
+    "view-back",
+    "view-forward",
     "view-last",
     "view-next",
     "view-prev",
@@ -319,6 +321,8 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             Err(_) => Command::Compose(compose_term(rest)?),
         },
         "view-next" => Command::ViewNext,
+        "view-forward" => Command::ViewForward,
+        "view-back" => Command::ViewBack,
         "view-prev" => Command::ViewPrev,
         "view-last" => Command::ViewLast,
         "search" => Command::Search {
@@ -944,6 +948,8 @@ pub fn format(cmd: &Command) -> String {
         }
         Command::View(v) => format!("view {}", *v as u8),
         Command::ViewNext => "view-next".into(),
+        Command::ViewForward => "view-forward".into(),
+        Command::ViewBack => "view-back".into(),
         Command::ViewPrev => "view-prev".into(),
         Command::ViewLast => "view-last".into(),
         Command::Rate(RateSpec::Report) => "rate".into(),

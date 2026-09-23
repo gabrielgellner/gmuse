@@ -810,6 +810,21 @@ pub enum Command {
     View(ViewId),
     ViewNext,
     ViewPrev,
+    /// `]b` and `[b` — step the view, **and a count repeats rather than
+    /// selects**.
+    ///
+    /// Two commands rather than a key that reinterprets [`Command::ViewNext`],
+    /// because the count's meaning is the difference between them and a
+    /// `Command` has to carry its own meaning — a key that changed what a
+    /// variant meant would put the semantics back in the keymap, which §12's
+    /// "parse at the boundary" exists to prevent.
+    ///
+    /// `3gt` is view 3; `3]b` is three views forward. Both are vim: `gt` takes
+    /// an absolute count in nvim and `]b` a repeat in unimpaired. Every other
+    /// bracket motion here already repeats — `3]]` is three sections — so the
+    /// surprising one would have been a bracket key that did not.
+    ViewForward,
+    ViewBack,
     /// `i` and `<Esc>` — which keymap the keyboard is in (#33).
     Mode(Mode),
     /// `50%` — seek to that much of the way through the track, as vim's `50%`

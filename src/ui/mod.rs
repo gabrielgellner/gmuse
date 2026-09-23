@@ -119,6 +119,26 @@ impl View {
         all[(i + all.len() - 1) % all.len()]
     }
 
+    /// `n` views forward, wrapping — the repeat `]b` takes (#272).
+    ///
+    /// `n % len` before the add rather than after, so a count typed by
+    /// accident (`999]b`, or a held digit) cannot overflow the index. Written
+    /// as arithmetic rather than `next()` called `n` times for the same
+    /// reason: no loop, so there is nothing for a large count to spin on.
+    pub fn forward(self, n: usize) -> Self {
+        let all = Self::ALL;
+        let i = all.iter().position(|v| *v == self).unwrap_or(0);
+        all[(i + n % all.len()) % all.len()]
+    }
+
+    /// `n` views back, wrapping. The `+ len` is what keeps the subtraction on
+    /// `usize`, exactly as [`View::prev`] does it.
+    pub fn back(self, n: usize) -> Self {
+        let all = Self::ALL;
+        let i = all.iter().position(|v| *v == self).unwrap_or(0);
+        all[(i + all.len() - n % all.len()) % all.len()]
+    }
+
     pub const ALL: &'static [View] = &[
         View::Tree,
         View::Playlist,
@@ -3393,6 +3413,9 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             None => switch_view(ui, ui.view.next()),
         },
         Command::ViewPrev => switch_view(ui, ui.view.prev()),
+        // A count repeats here and selects on `gt` — see `Command::ViewForward`.
+        Command::ViewForward => switch_view(ui, ui.view.forward(n)),
+        Command::ViewBack => switch_view(ui, ui.view.back(n)),
         Command::ViewLast => switch_view(ui, ui.previous_view),
         Command::Search { pattern, dir } => {
             if pattern.is_empty() {
@@ -11158,6 +11181,96 @@ mod tests {
         // And back again — it is an alt-tab, not a one-way trip.
         press(&mut ui, &ctx, "g tab");
         assert_eq!(ui.view, View::Queue);
+    }
+
+    /// `]b`/`[b` are the bracket spelling of `gt`/`gT` (#272). Both live.
+    #[test]
+    fn bracket_b_steps_the_view_both_ways() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // The instrument: cycling is only observable if there is more than one
+        // view to cycle between, and `ALL` is what `forward` walks.
+        assert!(
+            View::ALL.len() > 1,
+            "one view cannot be cycled; this test would pass on any key"
+        );
+
+        let first = ui.view;
+        press(&mut ui, &ctx, "] b");
+        assert_ne!(ui.view, first, "]b did not move");
+        press(&mut ui, &ctx, "[ b");
+        assert_eq!(ui.view, first, "[b is not ]b's inverse");
+    }
+
+    /// **The count is the whole reason these are their own commands.** `3gt` is
+    /// view 3 and `3]b` is three views forward, which is vim in both cases —
+    /// nvim's `gt` takes an absolute count, unimpaired's `]b` a repeat.
+    ///
+    /// Reusing `view-next` for `]b` would have made `3]b` mean view 3, and
+    /// nothing would have failed: the view would still be a legal one.
+    #[test]
+    fn a_count_before_bracket_b_repeats_rather_than_selecting() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+
+        let mut stepped = ui_of(&store, true);
+        press(&mut stepped, &ctx, "3");
+        press(&mut stepped, &ctx, "] b");
+
+        let mut selected = ui_of(&store, true);
+        press(&mut selected, &ctx, "3");
+        press(&mut selected, &ctx, "g t");
+
+        // The instrument, and deliberately not through `execute`: three views
+        // along must *be* a different view from view 3, or the two assertions
+        // below would agree no matter which meaning the code implemented.
+        assert_ne!(
+            View::ALL[3],
+            View::Playlist,
+            "ALL is ordered so that three-along and view-3 coincide; \
+             this test can no longer tell a repeat from a selection"
+        );
+        assert_eq!(
+            stepped.view,
+            View::ALL[3],
+            "3]b must be three views along from the first"
+        );
+        assert_eq!(selected.view, View::Playlist, "3gt must still mean view 3");
+    }
+
+    /// A count larger than the number of views wraps — `999]b` is a held
+    /// digit, not a bug report.
+    ///
+    /// **The `usize::MAX` case must not start from the first view.** Tests run
+    /// in release, where `i + n` wraps silently instead of panicking, and from
+    /// index 0 the wrapped answer coincides with the right one — so
+    /// `Tree.forward(usize::MAX)` is green against a `forward` with the `n %
+    /// len` guard taken out, and proves nothing. From a non-zero index the two
+    /// differ, which is what makes the guard observable at all. Written down
+    /// because that is how the first version of this test was written, and it
+    /// survived the sabotage §13 asks for.
+    #[test]
+    fn a_count_past_the_end_wraps() {
+        let n = View::ALL.len();
+        assert!(n > 1, "wrapping is not observable with one view");
+        assert_eq!(View::Tree.forward(n), View::Tree, "a full turn is identity");
+        assert_eq!(View::Tree.forward(n + 1), View::Tree.forward(1));
+        assert_eq!(View::Tree.back(n + 1), View::Tree.back(1));
+
+        // The instrument: the case below only discriminates from a non-zero
+        // index, and `Playlist` is index 1 in `ALL`.
+        assert_eq!(
+            View::ALL[1],
+            View::Playlist,
+            "ALL reordered; this needs a view at a non-zero index"
+        );
+        assert_eq!(
+            View::Playlist.forward(usize::MAX),
+            View::Playlist.forward(usize::MAX % n),
+            "a huge count must reduce before the add, not wrap after it"
+        );
     }
 
     #[test]

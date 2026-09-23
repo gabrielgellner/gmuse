@@ -48,6 +48,13 @@ pub const DEFAULTS: &[&str] = &[
     "bind common \"g t\" view-next",
     "bind common \"g T\" view-prev",
     "bind common \"g tab\" view-last",
+    // The bracket spelling of the same step, because "cycle the thing in this
+    // window" is a bracket motion everywhere else in this keymap — `]]`, `[[`,
+    // `][`, `[]`, `[z`, `]z` — and views should not be the exception a reader
+    // has to learn (#272). Both spellings live, the way vim has `:bnext` and
+    // `]b`; what differs is the count, which repeats here and selects on `gt`.
+    "bind common \"] b\" view-forward",
+    "bind common \"[ b\" view-back",
     // navigation
     "bind common j down",
     "bind common k up",
