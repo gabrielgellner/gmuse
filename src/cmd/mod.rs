@@ -825,6 +825,14 @@ pub enum Command {
     /// surprising one would have been a bracket key that did not.
     ViewForward,
     ViewBack,
+    /// `<leader>i` — show or hide the info panel beside the list (#273).
+    ///
+    /// **Not a new surface.** #275 gave windows their own view and #276 made the
+    /// focus follow the cursor, which between them *are* a live detail pane —
+    /// this is the one keystroke that arranges it, and closing it again. A
+    /// second renderer was the thing to avoid, and the way to avoid it is to
+    /// have no second surface at all.
+    InfoWindow,
     /// `gq` — show or hide the programme in the bottom panel (#274).
     ///
     /// A panel and not a view: toggling it leaves the active projection alone,

@@ -116,6 +116,7 @@ pub const VERBS: &[&str] = &[
     "unbind",
     "undo",
     "up",
+    "info-window",
     "queue-next",
     "queue-panel",
     "queue-prev",
@@ -323,6 +324,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             ),
             Err(_) => Command::Compose(compose_term(rest)?),
         },
+        "info-window" => Command::InfoWindow,
         "queue-panel" => Command::QueuePanel,
         "queue-next" => Command::QueueNext,
         "queue-prev" => Command::QueuePrev,
@@ -953,6 +955,7 @@ pub fn format(cmd: &Command) -> String {
             format!("unbind {} {}", ctx.name(), quoted)
         }
         Command::View(v) => format!("view {}", *v as u8),
+        Command::InfoWindow => "info-window".into(),
         Command::QueuePanel => "queue-panel".into(),
         Command::QueueNext => "queue-next".into(),
         Command::QueuePrev => "queue-prev".into(),

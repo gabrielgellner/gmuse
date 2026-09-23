@@ -187,6 +187,21 @@ tracks a cursor cannot be jumped back through, because nothing was jumped.
 would toggle; the page is view 8. What makes them one feature rather than two is that the pane's rows are the page's
 rows — the same `About`, drawn shorter. That is worth building and it does not require demoting anything.
 
+### They turned out to be one surface — #273, 2026-09-23
+
+Not two, and the paragraph above is what was wrong with it. #275 gave a window its own view and #276 made the focus
+follow the cursor; between them, a window showing view 8 beside a list **is** a live-tracking pane. So `<leader>i` is
+one keystroke for an arrangement, and there is no second renderer to keep in step — the worry this section had was
+answered by removing its subject rather than by being careful about it.
+
+`<leader>i` rather than `<leader>p`, and `info-window` rather than `detail-pane`: `<leader>P` is already cue-preview,
+and "detail" and "pane" were the proposal's words for things this codebase calls `info` and — since #275 — `window`.
+
+What the half-width pane **did** expose is that a row's last column is the one that falls off, and the last column is
+where a claim's source lives. `artist="Anderson .Paak"` clipped to `artist="Anderson` is a plausible query rather than a
+visibly incomplete one. That inverts this document's own rule, it is now the ordinary case rather than a corner, and it
+is #282.
+
 ---
 
 ## 8. Splits are built; window-local projections are not

@@ -287,6 +287,27 @@ impl Windows {
         index == self.focused
     }
 
+    /// The window that does **not** have the keys, if there is one.
+    pub fn unfocused_mut(&mut self) -> Option<&mut Window> {
+        if !self.is_split() {
+            return None;
+        }
+        let other = (self.focused + 1) % self.windows.len();
+        self.windows.get_mut(other)
+    }
+
+    /// Move the keys to the first window this describes. False when none does,
+    /// and then the focus has not moved.
+    pub fn focus_where(&mut self, which: impl FnMut(&Window) -> bool) -> bool {
+        match self.windows.iter().position(which) {
+            Some(i) => {
+                self.focused = i;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Divide, putting `other` in the new pane. Refuses when already split.
     pub fn split(&mut self, axis: Axis, other: Window) -> bool {
         if self.is_split() {
@@ -3637,6 +3658,38 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // A count repeats here and selects on `gt` — see `Command::ViewForward`.
         Command::ViewForward => switch_view(ui, ui.view().forward(n)),
         Command::ViewBack => switch_view(ui, ui.view().back(n)),
+        // **One keystroke for an arrangement, not a new surface** (#273). A
+        // window showing the panel, beside the list, with the focus following
+        // the cursor (#276) *is* the live detail pane the proposal asked for.
+        // The keys stay in the list, because a preview you have to leave to use
+        // is not a preview.
+        Command::InfoWindow => {
+            if ui.windows.all().iter().any(|w| w.view == View::Info) {
+                // Closing keeps the list, not the panel — `^w o` keeps whatever
+                // has the keys, so move them first.
+                if ui.windows.focus_where(|w| w.view != View::Info) {
+                    ui.windows.only();
+                    ui.notify("info window closed".to_string());
+                } else {
+                    // Every window is the panel, so there is no list to keep.
+                    ui.notify("nothing beside it to keep — `g<Tab>` first".to_string());
+                }
+            } else if let Some(other) = ui.windows.unfocused_mut() {
+                other.view = View::Info;
+                ui.notify("info beside".to_string());
+            } else {
+                let here = *ui.windows.focused();
+                ui.windows.split(
+                    Axis::Vertical,
+                    Window {
+                        view: View::Info,
+                        levels: here.levels,
+                        previous: here.view,
+                    },
+                );
+                ui.notify("info beside".to_string());
+            }
+        }
         // **No `switch_view`.** The panel is not a projection, so opening it
         // must not touch `ui.view()` — that is the whole distinction #274 draws,
         // and calling `switch_view` here would quietly make it a view again.
@@ -15256,6 +15309,72 @@ mod tests {
             ui.status.contains("add to one of them"),
             "the refusal did not say what to do instead: {}",
             ui.status
+        );
+    }
+
+    /// **What #273 asked for, and it needed no new surface.** `<leader>i` puts
+    /// the info panel beside the list and the keys stay in the list.
+    ///
+    /// The issue was written expecting a *pane* — a second surface drawing a
+    /// shorter `About` — and warned that the thing to avoid was a second
+    /// builder. #275 gave windows their own view and #276 made the focus follow
+    /// the cursor, which between them already **are** a live detail pane; so
+    /// there is one keystroke here and no second renderer to keep in step.
+    ///
+    /// The subset assertion the issue asked for is therefore moot rather than
+    /// skipped: the pane and view 8 are the same view, so there is nothing that
+    /// could disagree.
+    #[test]
+    fn leader_i_puts_the_panel_beside_the_list_and_leaves_the_keys() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // The instrument: one window, no panel, so everything below is a change.
+        assert!(!ui.windows.is_split(), "already split");
+        assert!(
+            !ui.windows.all().iter().any(|w| w.view == View::Info),
+            "the panel is already open"
+        );
+
+        press(&mut ui, &ctx, "<leader> i");
+        assert_eq!(ui.windows.count(), 2, "did not split: {}", ui.status);
+        assert_ne!(ui.view(), View::Info, "the keys went into the panel");
+        assert!(
+            ui.windows.all().iter().any(|w| w.view == View::Info),
+            "no panel in either window"
+        );
+
+        // Both on screen, and the panel is already about the row under the
+        // cursor — #276 tracking on the same keystroke that opened it.
+        let out = render(&ui, &ctx, 100, 16);
+        assert!(out.contains("library"), "no list:\n{out}");
+        assert!(out.contains("info"), "no panel:\n{out}");
+        assert!(
+            ui.focus.last().is_some(),
+            "the panel opened with nothing in focus"
+        );
+    }
+
+    /// Closing keeps the **list**, not the panel: `^w o` keeps whatever has the
+    /// keys, so the toggle has to move them before it closes.
+    #[test]
+    fn leader_i_again_closes_it_and_keeps_the_list() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "<leader> i");
+        // Put the keys in the panel, which is the case that would go wrong.
+        press(&mut ui, &ctx, "^w w");
+        assert_eq!(ui.view(), View::Info, "the keys are not in the panel");
+
+        press(&mut ui, &ctx, "<leader> i");
+        assert!(!ui.windows.is_split(), "still split: {}", ui.status);
+        assert_ne!(
+            ui.view(),
+            View::Info,
+            "closing kept the panel and threw away the list"
         );
     }
 

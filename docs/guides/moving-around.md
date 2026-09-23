@@ -52,9 +52,12 @@ Keys go to the **focused** window, and only that one is highlighted. `^w w` move
 are. Splitting the same view twice is not offered: two windows on one list is what `g<Tab>` already gives you, and the
 cursors are shared per list rather than per window, so both halves would move together.
 
-**The panel follows the cursor.** Put `K`'s panel in one window and a list in the other, and moving the cursor in the
-list changes what the panel is about — you do not press anything. `K` again while it is already open asks about the row
-you are on rather than taking the window the list is in.
+**The panel follows the cursor.** `<leader>i` puts the info panel beside the list and takes it away again — the keys
+stay in the list, and moving the cursor changes what the panel is about. You do not press anything to update it. `K`
+while it is already open asks about the row you are on rather than taking the window the list is in.
+
+It is not a separate thing from view `8`: same panel, same rows, just arranged beside the list instead of filling the
+screen. So `^w w` into it and `^o` still walks back the way you came.
 
 Moving the cursor is a _new_ question, so it replaces where you had navigated to: if you followed links into the panel
 and then moved in the list, `^o` has nothing to go back to. Nothing follows anything while the panel is off screen.

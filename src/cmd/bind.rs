@@ -66,6 +66,17 @@ pub const DEFAULTS: &[&str] = &[
     // prefix `gt` already means "go to a view", which makes `gq` "go to the
     // queue" rather than a borrowed verb doing something else. Recorded because
     // the collision is real and the next reader should see it was weighed.
+    // **`<leader>i`, not `<leader>p`.** `<leader>P` is already cue-preview, and
+    // two different previews one shift apart is the ambiguity #228 avoided when
+    // it gave preview its own key. `i` is what `info-panel.md` §6 named as the
+    // discoverable spelling anyway, and this opens the info panel (#273).
+    //
+    // **`info-window`, not `detail-pane`.** The proposal's words were "detail"
+    // and "pane"; this codebase's are `info` — `View::Info`, `:info`,
+    // `info-panel.md` — and, since #275, `window` for what a body divides into,
+    // with `Pane` meaning the halves *inside* one view. Two new words for two
+    // things that already have them is what `domain-model.md` §8 is about.
+    "bind common \"<leader> i\" info-window",
     "bind common \"g q\" queue-panel",
     "bind common \"] q\" queue-next",
     "bind common \"[ q\" queue-prev",
