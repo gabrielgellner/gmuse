@@ -120,6 +120,14 @@ distinction the same way.
 
 `^o` past the beginning leaves the panel: the way in is the way out.
 
+**The list follows you.** Follow a link to an artist and the library window walks there too, opening whatever was closed
+above it — so `^w w` back into the list leaves you where the panel had got to. A window that cannot show the thing lands
+on the nearest row it does have: a genre-grouped window has no artist row, so it stops at the track.
+
+Only a **navigation** moves it. Moving the cursor in a list changes what the panel is about (that is what the panel is
+for) and moves nothing else — walking the tree costs a pass over the whole library, which is fine a few times a minute
+and not fine on every `j`.
+
 `enter` on a section header folds it instead, and a fold is remembered by name — so hiding the parts you never read
 stays hidden as you walk around, rather than resetting on every page.
 

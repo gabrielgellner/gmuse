@@ -8,10 +8,10 @@ those already live on. **The count is the one difference between the two spellin
 three views along from here. Both of those are vim, which is why neither is wrong and why it is worth knowing which you
 are typing.
 
-    1 library    3 playlist   4 queue      7 guide      8 info
+    1 library    3 playlist   7 guide      8 info
 
-Three of them hold rows, the guide holds prose, and `8` is what the library says about one thing. `2` and `6` still work
-— by either spelling, `2gt` or `:view 2` — and are **not views**:
+Two of them hold rows, the guide holds prose, and `8` is what the library says about one thing. `2` and `6` still work —
+by either spelling, `2gt` or `:view 2` — and are **not views**:
 
     2   the library, drawn flat — the same rows, ungrouped
     6   the picker over your saved views and collections
@@ -19,6 +19,8 @@ Three of them hold rows, the guide holds prose, and `8` is what the library says
 That is the difference the numbers used to hide. `2` was never a different set from `1`, only a different drawing, so it
 is `:view levels flat` — see [the library tree](the-library-tree.md). And `6` was a list you scrolled; it is a fuzzy
 picker now, the same one `<leader>fg` opens.
+
+`4` went the same way. The queue was a tab and is a window you open beside what you are doing — `gq`, below.
 
 ## The queue, without leaving where you are
 
@@ -64,8 +66,11 @@ Moving the cursor is a _new_ question, so it replaces where you had navigated to
 and then moved in the list, `^o` has nothing to go back to. Nothing follows anything while the panel is off screen.
 
 **Each window groups the tree its own way.** `:view 1` on one side and `:view 2` on the other gives you the albums to
-open on one half and the flat track list on the other, of the same library. Two windows grouped _differently_ — by
-artist on one side and genre on the other — is not there yet: they will both show the first one's grouping.
+open on one half and the flat track list on the other, of the same library.
+
+Two windows grouped _differently_ — by artist on one side and genre on the other — is **refused**, and says so. There is
+one tree between them, so the second grouping would have been taken and quietly ignored; `^w o` first if that is the one
+you want.
 
 `5` is unbound. It was a file browser, and gmuse navigates the library rather than a filesystem.
 
@@ -253,8 +258,8 @@ Five toggles, and they show in the status line so you can see what is on without
 `m` is what cmus calls `aaa_mode`, and it decides how far "the list" reaches: everything, everything by this artist, or
 just this album. It is the setting that makes `r` mean three different things.
 
-The queue always wins. Anything in view 4 plays before whatever these would have chosen, which is what makes it a queue
-rather than a second playlist.
+The queue always wins. Anything you have queued plays before whatever these would have chosen, which is what makes it a
+queue rather than a second playlist — `gq` shows what that is.
 
 ## Leaving
 
