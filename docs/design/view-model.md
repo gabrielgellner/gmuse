@@ -174,7 +174,7 @@ payoff is only in principle.
 path outside the window system: its own height, its own slot in the frame, drawn unfocused and therefore uneditable. The
 view was the only editable surface, which is exactly what made the retirement look blocked from this end.
 
-So `gq` became what `<leader>i` already was — one keystroke for an **arrangement**: a horizontal split with the queue in
+So `gq` became what `<leader>K` already was — one keystroke for an **arrangement**: a horizontal split with the queue in
 the second window, keys left in the list. It is an ordinary window, so `^w w` reaches it and all twenty-one
 `View::Queue` arms work there. The bespoke path is gone, and with it the question of how a panel holds focus: it does
 not need to, because it is not a panel.
@@ -188,7 +188,7 @@ opened, `body_height` being a `Cell` that `draw` fills in.
 and `Queue` left `View::ALL`, so no strip lists it and no `gt` steps to it. That is §1's test applied once more — two
 placements of one set of rows, and this time the placement was the thing to remove.
 
-**The honest price: a split holds two windows**, so `gq` and `<leader>i` are now mutually exclusive where a panel and a
+**The honest price: a split holds two windows**, so `gq` and `<leader>K` are now mutually exclusive where a panel and a
 window were not. Three is a keymap question — how `^w w` cycles, how splits nest — and #275 declined it deliberately.
 
 ---
@@ -213,11 +213,11 @@ rows — the same `About`, drawn shorter. That is worth building and it does not
 ### They turned out to be one surface — #273, 2026-09-23
 
 Not two, and the paragraph above is what was wrong with it. #275 gave a window its own view and #276 made the focus
-follow the cursor; between them, a window showing view 8 beside a list **is** a live-tracking pane. So `<leader>i` is
+follow the cursor; between them, a window showing view 8 beside a list **is** a live-tracking pane. So `<leader>K` is
 one keystroke for an arrangement, and there is no second renderer to keep in step — the worry this section had was
 answered by removing its subject rather than by being careful about it.
 
-`<leader>i` rather than `<leader>p`, and `info-window` rather than `detail-pane`: `<leader>P` is already cue-preview,
+`<leader>K` rather than `<leader>p`, and `info-window` rather than `detail-pane`: `<leader>P` is already cue-preview,
 and "detail" and "pane" were the proposal's words for things this codebase calls `info` and — since #275 — `window`.
 
 What the half-width pane **did** expose is that a row's last column is the one that falls off, and the last column is

@@ -221,8 +221,15 @@ Linear; each one is usable before the next exists.
 
 ## 6. Open questions
 
-- **Which key opens it.** vim's `K` is "look up the thing under the cursor", which is exactly this, and it is unbound.
-  `<leader>i` is more discoverable and less surprising. Decide when the panel exists and can be lived with.
+- ~~**Which key opens it.**~~ **Answered: `K`, and `<leader>K` for the window beside the list** (#273, #286). vim's `K`
+  is "look up the thing under the cursor", which is exactly this, and it was unbound.
+
+  **The `<leader>i` half of this suggestion expired before it was taken.** It was written when `i` was free; #33 then
+  bound `i` to `mode transport`, making it the _player_ key — so `<leader>i` read as "leader plus the player" while
+  doing the opposite. It shipped that way briefly and was reported as confusing. A suggestion in an open question is
+  only as current as the keymap it was weighed against, which is an argument for answering them rather than leaving them
+  to age.
+
 - **How much of a long list to show.** An artist with four hundred recordings cannot list them; a count and a link into
   a view (`artist="…"`) is probably right, which makes the panel a way _into_ the query language rather than a
   competitor to it.

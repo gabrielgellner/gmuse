@@ -66,17 +66,26 @@ pub const DEFAULTS: &[&str] = &[
     // prefix `gt` already means "go to a view", which makes `gq` "go to the
     // queue" rather than a borrowed verb doing something else. Recorded because
     // the collision is real and the next reader should see it was weighed.
-    // **`<leader>i`, not `<leader>p`.** `<leader>P` is already cue-preview, and
-    // two different previews one shift apart is the ambiguity #228 avoided when
-    // it gave preview its own key. `i` is what `info-panel.md` §6 named as the
-    // discoverable spelling anyway, and this opens the info panel (#273).
+    // **`<leader>K`: `K`, but beside.** It opens what `K` opens, in a window
+    // next to the list instead of over it, so the key says the relation (#286).
+    //
+    // It was `<leader>i` and that was wrong twice over. `i` is bound to
+    // `mode transport` — it is *the player key* — so `<leader>i` read as
+    // "leader plus the player" while doing the opposite. And `info-panel.md` §6,
+    // which named `<leader>i` as the discoverable spelling, predates #33 giving
+    // `i` the mode: a suggestion that was right when written and stopped being.
+    //
+    // `<leader>p` was rejected for the neighbouring reason — `<leader>P` is
+    // cue-preview, and two previews one shift apart is the ambiguity #228
+    // avoided. Checking the shifted pair and not the bare key is how the first
+    // answer survived.
     //
     // **`info-window`, not `detail-pane`.** The proposal's words were "detail"
     // and "pane"; this codebase's are `info` — `View::Info`, `:info`,
     // `info-panel.md` — and, since #275, `window` for what a body divides into,
     // with `Pane` meaning the halves *inside* one view. Two new words for two
     // things that already have them is what `domain-model.md` §8 is about.
-    "bind common \"<leader> i\" info-window",
+    "bind common \"<leader> K\" info-window",
     "bind common \"g q\" queue-panel",
     "bind common \"] q\" queue-next",
     "bind common \"[ q\" queue-prev",

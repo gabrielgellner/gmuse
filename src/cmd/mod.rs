@@ -825,7 +825,7 @@ pub enum Command {
     /// surprising one would have been a bracket key that did not.
     ViewForward,
     ViewBack,
-    /// `<leader>i` — show or hide the info panel beside the list (#273).
+    /// `<leader>K` — show or hide the info panel beside the list (#273, #286).
     ///
     /// **Not a new surface.** #275 gave windows their own view and #276 made the
     /// focus follow the cursor, which between them *are* a live detail pane —

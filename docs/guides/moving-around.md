@@ -55,7 +55,7 @@ Keys go to the **focused** window, and only that one is highlighted. `^w w` move
 are. Splitting the same view twice is not offered: two windows on one list is what `g<Tab>` already gives you, and the
 cursors are shared per list rather than per window, so both halves would move together.
 
-**The panel follows the cursor.** `<leader>i` puts the info panel beside the list and takes it away again — the keys
+**The panel follows the cursor.** `<leader>K` puts the info panel beside the list and takes it away again — the keys
 stay in the list, and moving the cursor changes what the panel is about. You do not press anything to update it. `K`
 while it is already open asks about the row you are on rather than taking the window the list is in.
 

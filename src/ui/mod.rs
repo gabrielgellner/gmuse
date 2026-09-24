@@ -142,7 +142,7 @@ impl View {
     ///
     /// **`Queue` is deliberately absent** — #284. It is still a `View`, because
     /// a window has to be showing *something*, but it is not a place you go: it
-    /// is what `gq` puts beside what you are doing, the way `<leader>i` does the
+    /// is what `gq` puts beside what you are doing, the way `<leader>K` does the
     /// panel. A tab for it was the second placement of one set of rows, which is
     /// what §1's test removed `Sorted` and `Filters` for.
     pub const ALL: &'static [View] = &[View::Tree, View::Playlist, View::Guide, View::Info];
@@ -15755,7 +15755,7 @@ mod tests {
         );
     }
 
-    /// **What #273 asked for, and it needed no new surface.** `<leader>i` puts
+    /// **What #273 asked for, and it needed no new surface.** `<leader>K` puts
     /// the info panel beside the list and the keys stay in the list.
     ///
     /// The issue was written expecting a *pane* — a second surface drawing a
@@ -15780,7 +15780,7 @@ mod tests {
             "the panel is already open"
         );
 
-        press(&mut ui, &ctx, "<leader> i");
+        press(&mut ui, &ctx, "<leader> K");
         assert_eq!(ui.windows.count(), 2, "did not split: {}", ui.status);
         assert_ne!(ui.view(), View::Info, "the keys went into the panel");
         assert!(
@@ -15807,12 +15807,12 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        press(&mut ui, &ctx, "<leader> i");
+        press(&mut ui, &ctx, "<leader> K");
         // Put the keys in the panel, which is the case that would go wrong.
         press(&mut ui, &ctx, "^w w");
         assert_eq!(ui.view(), View::Info, "the keys are not in the panel");
 
-        press(&mut ui, &ctx, "<leader> i");
+        press(&mut ui, &ctx, "<leader> K");
         assert!(!ui.windows.is_split(), "still split: {}", ui.status);
         assert_ne!(
             ui.view(),
@@ -15881,7 +15881,7 @@ mod tests {
         );
 
         press(&mut ui, &ctx, "g tab");
-        press(&mut ui, &ctx, "<leader> i");
+        press(&mut ui, &ctx, "<leader> K");
         let narrow = render(&ui, &ctx, 80, 14);
 
         // The claim: elided, and visibly so.
@@ -15928,7 +15928,7 @@ mod tests {
             let mut ui = ui_of(&store, true);
             ui.playback.current = ui.library.sorted().first().copied();
             if open {
-                press(&mut ui, &ctx, "<leader> i");
+                press(&mut ui, &ctx, "<leader> K");
                 assert!(
                     ui.windows.all().iter().any(|w| w.view == View::Info),
                     "the panel did not open, so this measures nothing"
@@ -16020,7 +16020,7 @@ mod tests {
         let mut ui = ui_of(&store, true);
 
         // The panel beside the list, so the focus is tracking (#276).
-        press(&mut ui, &ctx, "<leader> i");
+        press(&mut ui, &ctx, "<leader> K");
         press(&mut ui, &ctx, "j");
         let before = *ui.focus.last().expect("a focus");
         let walks = ui.relocations.get();
