@@ -296,6 +296,27 @@ The expensive direction — a projection relocating to a focus — is **not buil
 below is what it will need, and #281 is where both of these decisions are either confirmed or spent: they were made
 before anyone had felt the cost, which was deliberate, and that is exactly what makes the measurement the point.
 
+#### Measured — 2026-09-24, `just bench-reveal`
+
+**A relocation costs 1.3–1.7 ms**, against 1.1 ms for the unfolded flatten it needs. `Browsing::find` is the one door —
+`gp` and `/` already go through it — and it flattens the whole library before it can scan, because "a closed fold still
+holds its lines" and the row it wants does not exist until everything is open. Position in the library does not matter:
+the flatten dominates and the scan is noise. 6,500 tracks, 7,350 nodes, which is about this library's size.
+
+**That number does not answer "is relocation affordable" — it answers "affordable how often".** 1.3 ms is nothing for a
+deliberate act and a lot for a held key, and #276 is what makes the difference matter: the focus now changes on **every
+cursor move**. A projection relocating on every focus change would pay a flatten per `j`.
+
+So the rule the measurement implies is sharper than the one-way fall-back §10 reached for, and it is not about direction
+at all:
+
+> **A projection relocates when somebody navigated, not when the cursor drifted.**
+
+A focus changes two ways, and they are different acts. The cursor moved under it — #276, cheap, moves nothing else. Or
+somebody followed a link, typed `:info`, chose from the picker — deliberate, a few times a minute, and the one where
+moving the other windows is the point. §10's "both directions until one hurts" survives; what it costs is the assumption
+that a direction is the thing to switch off.
+
 **A projection that cannot show the focus goes to the nearest ancestor it can.** A `Concept` has no row in the tree, so
 the tree goes to the nearest thing it does hold. This is the same bargain a diff view or a fold already makes — you land
 near the thing rather than on it, and you can see that you did. "No movement" was the alternative and it is the one that

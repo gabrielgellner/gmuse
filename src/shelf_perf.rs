@@ -178,4 +178,84 @@ mod perf {
              manages ({whole:?} for all of it) — it is paying for rows it did not draw"
         );
     }
+
+    /// **What it costs to relocate a projection to a thing** — #281, `just
+    /// bench-reveal`.
+    ///
+    /// `Browsing::find` is the one door a relocation goes through: `gp` (go to
+    /// playing) and `/` both use it, and #281 would use it to walk a window to
+    /// whatever the panel is focused on. It **flattens the whole library
+    /// unfolded** and scans — "a closed fold still holds its lines", so the
+    /// line it wants does not exist until everything is open.
+    ///
+    /// That is the number #281 turns on, and it matters more than the issue
+    /// knew: #276 made the focus follow the cursor on **every key**. If a
+    /// projection relocated on every focus change, every `j` would pay this.
+    ///
+    /// **A ratio, not a wall clock** — the same reason as the bench above: a
+    /// budget in milliseconds measures the machine, and under `cargo test` this
+    /// runs beside six hundred others. What has to hold is that a reveal costs
+    /// about what one flatten costs, because that is the claim — one pass, not
+    /// a search that rescans per candidate.
+    #[test]
+    fn revealing_a_track_costs_one_flatten() {
+        use crate::browse::{Browsing, Target};
+
+        let l = library(200, 650);
+        let members: HashSet<CopyId> = Listing::rows(&l).iter().copied().collect();
+        let shelf = Shelf::grouped(&l, members, Levels::default(), true);
+        let folds = crate::fold::Expansion::default();
+        let rows = shelf.len();
+
+        // Tracks spread through the library, so the linear scan's position
+        // varies: first, middle and last are different amounts of walking.
+        let ids = shelf.sorted();
+        assert!(
+            ids.len() > 100,
+            "the bench library is too small to say much"
+        );
+        let probes = [0, ids.len() / 2, ids.len() - 1];
+
+        eprintln!("\n{rows} rows, {} tracks\n", ids.len());
+        eprintln!("{:<28} {:>11}", "reveal", "find");
+
+        let mut worst = std::time::Duration::ZERO;
+        for at in probes {
+            let id = ids[at];
+            let t = Instant::now();
+            let found = shelf.find(&folds, &Target::Id(id), 0);
+            let took = t.elapsed();
+            assert!(found.is_some(), "the track is in the library it came from");
+            eprintln!("{:<28} {took:>11.1?}", format!("track {at}"));
+            worst = worst.max(took);
+        }
+
+        // The reference: one unfolded flatten, which is what `find` does before
+        // it can scan at all.
+        let t = Instant::now();
+        let all = crate::browse::flatten(&shelf, &folds, true);
+        let flatten = t.elapsed();
+        eprintln!(
+            "{:<28} {flatten:>11.1?}   ({} nodes)",
+            "one flatten",
+            all.len()
+        );
+        eprintln!();
+
+        // **The instrument**: the flatten has to be doing real work, or "find
+        // costs about a flatten" is two numbers near zero agreeing.
+        assert!(
+            all.len() > 1_000,
+            "only {} nodes unfolded — this library cannot show the cost",
+            all.len()
+        );
+
+        // The claim. Three flattens of headroom: `find` does one, plus a scan
+        // over the same vector, and the scan is cheaper than building it.
+        assert!(
+            worst < flatten * 3,
+            "a reveal took {worst:?} against {flatten:?} for the flatten it \
+             needs — it is doing more than one pass"
+        );
+    }
 }

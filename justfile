@@ -240,6 +240,10 @@ bench-shelf:
 bench-fold:
     @just _bench rebuilding_the_librarian
 
+# Show what it costs to walk a projection to a thing (#281). Runs in `ci` too.
+bench-reveal:
+    @just _bench revealing_a_track
+
 # Show what one appended fact costs the librarian (#223). Runs in `ci` too.
 bench-write:
     @just _bench one_rating_is_not_a_whole_rebuild
