@@ -22,20 +22,20 @@ picker now, the same one `<leader>fg` opens.
 
 ## The queue, without leaving where you are
 
-`gq` shows the programme in a panel along the bottom, and hides it again. **It is not a view**, which is the point: the
-list you were on stays where it is, so you can dig through the library and watch what you are collecting at the same
-time.
+`gq` opens the programme in a window along the bottom, and closes it again. The list you were on stays where it is and
+**keeps the keys**, so you can dig through the library and watch what you are collecting at the same time.
 
-    gq       show or hide the panel
+    gq       open or close it
     ]q       down a row in the programme
     [q       up a row
+    ^w w     put the keys in it, to reorder or remove
 
-`]q` and `[q` reach into the panel from whatever you are looking at, and they **move a cursor — they do not play
-anything**. Next and previous track are `z` and `v`, in the transport row, and they stay that whether the panel is open
-or shut.
+`]q` and `[q` reach into it from whatever you are looking at, and they **move a cursor — they do not play anything**.
+Next and previous track are `z` and `v`, in the transport row, and they stay that whether it is open or shut.
 
-The panel is as tall as the programme needs, up to a point, and never more than half the screen. It is the same rows
-view `4` shows, drawn small — one cursor between them, so moving in one moves in the other.
+It is as tall as the programme needs, up to twelve rows and never more than half the body. **It is an ordinary window**,
+which is why `^w w` works and why `dd` and `p` do there what they do everywhere else once the keys are in it. There is
+no separate queue view: this is the only place the programme is drawn.
 
 ## Two panes
 

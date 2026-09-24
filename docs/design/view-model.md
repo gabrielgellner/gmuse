@@ -168,6 +168,29 @@ A panel that can hold focus _is_ per-window projections. So this is #275's to un
 that refactor buys rather than merely enables — worth knowing, because §8 could otherwise read as a refactor whose
 payoff is only in principle.
 
+#### Retired — 2026-09-24, #284
+
+**The thing that was redundant turned out to be the panel, not the view.** #274's bottom panel was a second rendering
+path outside the window system: its own height, its own slot in the frame, drawn unfocused and therefore uneditable. The
+view was the only editable surface, which is exactly what made the retirement look blocked from this end.
+
+So `gq` became what `<leader>i` already was — one keystroke for an **arrangement**: a horizontal split with the queue in
+the second window, keys left in the list. It is an ordinary window, so `^w w` reaches it and all twenty-one
+`View::Queue` arms work there. The bespoke path is gone, and with it the question of how a panel holds focus: it does
+not need to, because it is not a panel.
+
+What made it possible was giving a split a **size**. Windows were halves, and a glance at the programme is vim's
+`:copen` — twelve rows, not half the screen. The half-extent cap moved into `Windows::constraints`, because only a frame
+knows the extent: asking the _command_ for it is how the queue window came out zero rows tall the first time it was
+opened, `body_height` being a `Cell` that `draw` fills in.
+
+`View::Queue` stays, because a window has to be showing something. What went is the **tab**: `4` is unbound, like `5`,
+and `Queue` left `View::ALL`, so no strip lists it and no `gt` steps to it. That is §1's test applied once more — two
+placements of one set of rows, and this time the placement was the thing to remove.
+
+**The honest price: a split holds two windows**, so `gq` and `<leader>i` are now mutually exclusive where a panel and a
+window were not. Three is a keymap question — how `^w w` cycles, how splits nest — and #275 declined it deliberately.
+
 ---
 
 ## 7. The detail view is a view because it needs the room

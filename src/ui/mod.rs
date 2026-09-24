@@ -98,7 +98,6 @@ impl View {
             // where both land.
             ViewId::Sorted => View::Tree,
             ViewId::Playlist => View::Playlist,
-            ViewId::Queue => View::Queue,
             ViewId::Filters => View::Tree,
             ViewId::Guide => View::Guide,
             ViewId::Info => View::Info,
@@ -139,13 +138,14 @@ impl View {
         all[(i + all.len() - n % all.len()) % all.len()]
     }
 
-    pub const ALL: &'static [View] = &[
-        View::Tree,
-        View::Playlist,
-        View::Queue,
-        View::Guide,
-        View::Info,
-    ];
+    /// The views a tab strip lists and `gt` steps through.
+    ///
+    /// **`Queue` is deliberately absent** — #284. It is still a `View`, because
+    /// a window has to be showing *something*, but it is not a place you go: it
+    /// is what `gq` puts beside what you are doing, the way `<leader>i` does the
+    /// panel. A tab for it was the second placement of one set of rows, which is
+    /// what §1's test removed `Sorted` and `Filters` for.
+    pub const ALL: &'static [View] = &[View::Tree, View::Playlist, View::Guide, View::Info];
 
     pub fn context(self) -> crate::cmd::Context {
         use crate::cmd::Context as C;
@@ -211,6 +211,13 @@ pub struct Windows {
     /// Which way the body divides. Meaningless with one pane, and kept rather
     /// than cleared so `^w o` then `^w s` splits the way you split last.
     axis: Axis,
+    /// Rows for the **second** window, when it should not be half the body.
+    ///
+    /// `None` is an even split, which is what `^w s` and `^w v` mean. `Some` is
+    /// what `gq` means: a glance at the programme is vim's `:copen`, ten lines
+    /// rather than half the screen, and before #284 that was the one thing the
+    /// bespoke bottom panel could do that a window could not.
+    size: Option<u16>,
 }
 
 impl Windows {
@@ -223,6 +230,7 @@ impl Windows {
             }],
             focused: 0,
             axis: Axis::Vertical,
+            size: None,
         }
     }
 
@@ -308,12 +316,39 @@ impl Windows {
         }
     }
 
+    /// How tall or wide each window is, in the order `all()` gives them.
+    ///
+    /// **Even unless the split asked for a size**, because `^w s` and `^w v`
+    /// mean halves. A sized split gives the second window what it asked for and
+    /// the first what is left, so the one you are working in keeps the room.
+    /// `extent` is the body's height or width, whichever the axis divides.
+    ///
+    /// **The half cap lives here because only a frame knows the extent.** The
+    /// command that asks for a size is run on a keystroke, and `body_height` is
+    /// a `Cell` set by `draw` — zero before the first one, which sized the
+    /// queue window to nothing the first time it was asked for.
+    pub fn constraints(&self, extent: u16) -> Vec<Constraint> {
+        match (self.is_split(), self.size) {
+            (false, _) => vec![Constraint::Min(1)],
+            (true, None) => vec![Constraint::Percentage(50), Constraint::Percentage(50)],
+            (true, Some(rows)) => {
+                vec![Constraint::Min(1), Constraint::Length(rows.min(extent / 2))]
+            }
+        }
+    }
+
     /// Divide, putting `other` in the new pane. Refuses when already split.
     pub fn split(&mut self, axis: Axis, other: Window) -> bool {
+        self.split_sized(axis, other, None)
+    }
+
+    /// As [`Windows::split`], with a height for the new window — `gq`'s glance.
+    pub fn split_sized(&mut self, axis: Axis, other: Window, size: Option<u16>) -> bool {
         if self.is_split() {
             return false;
         }
         self.axis = axis;
+        self.size = size;
         self.windows.push(other);
         true
     }
@@ -326,6 +361,7 @@ impl Windows {
         let keep = self.windows[self.focused];
         self.windows = vec![keep];
         self.focused = 0;
+        self.size = None;
         true
     }
 
@@ -761,13 +797,6 @@ pub struct Ui {
     /// Found by sabotage: wiring `relocate_to` into `track_focus` — the one
     /// thing the measurement forbids — left both tests green (§13, 2026-09-24).
     pub relocations: std::cell::Cell<u64>,
-    /// Whether the programme is shown in the bottom panel — `gq` (#274).
-    ///
-    /// **Not a view, which is the whole point.** Toggling it does not change
-    /// which projection is active, so you can collect into the queue while
-    /// looking at the library — vim's `:copen`, where the quickfix window
-    /// appears without the buffer you were editing going anywhere.
-    pub queue_panel: bool,
     /// The fuzzy picker, while it is open (#54).
     pub picker: Option<crate::ui::picker::Picker>,
     /// The path the info panel has taken — #126, made a stack by #127.
@@ -869,7 +898,6 @@ impl Ui {
         Self {
             stop: None,
             relocations: std::cell::Cell::new(0),
-            queue_panel: false,
             picker: None,
             focus: Vec::new(),
             info_sel: 0,
@@ -2895,12 +2923,13 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
             // second layout of the same five things.
             //
             // `6` is absent: it *is* a picker (the groups one), and a row that
-            // opens another picker is a corridor rather than a choice.
+            // opens another picker is a corridor rather than a choice. `4` is
+            // absent because the queue stopped being a place you go — `gq` puts
+            // it beside what you are doing (#284).
             [
                 (ViewId::Library, "view 1 · grouped"),
                 (ViewId::Sorted, "view 2 · one row a track"),
                 (ViewId::Playlist, "view 3"),
-                (ViewId::Queue, "view 4 · what is up next"),
                 (ViewId::Guide, "view 7 · how to do things"),
                 (ViewId::Info, "view 8 · what the library says"),
             ]
@@ -3716,9 +3745,33 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // must not touch `ui.view()` — that is the whole distinction #274 draws,
         // and calling `switch_view` here would quietly make it a view again.
         Command::QueuePanel => {
-            ui.queue_panel = !ui.queue_panel;
-            let state = if ui.queue_panel { "shown" } else { "hidden" };
-            ui.notify(format!("queue panel {state}"));
+            if ui.windows.all().iter().any(|w| w.view == View::Queue) {
+                if ui.windows.focus_where(|w| w.view != View::Queue) {
+                    ui.windows.only();
+                    ui.notify("queue closed".to_string());
+                } else {
+                    ui.notify("nothing beside it to keep — `g<Tab>` first".to_string());
+                }
+            } else if let Some(other) = ui.windows.unfocused_mut() {
+                other.view = View::Queue;
+                ui.notify("up next".to_string());
+            } else {
+                let here = *ui.windows.focused();
+                // **Sized, not halved.** A glance at the programme is vim's
+                // `:copen` — and the height is the same function the bespoke
+                // panel used, which is the whole of what it knew (#284).
+                let rows = queue_panel_height(up_next(ui, ctx).len());
+                ui.windows.split_sized(
+                    Axis::Horizontal,
+                    Window {
+                        view: View::Queue,
+                        levels: here.levels,
+                        previous: here.view,
+                    },
+                    Some(rows),
+                );
+                ui.notify("up next".to_string());
+            }
         }
         // The cursor only. `z` and `v` play things; these move where you are
         // looking in the programme, from whatever projection is active.
@@ -6908,21 +6961,9 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
         _ => 0,
     };
 
-    // The panel is as tall as it needs to be, capped twice: at twelve rows, and
-    // at half the frame — so a long programme cannot squeeze the view it is
-    // meant to sit beside, and an eighty-row terminal does not get a panel
-    // taller than the library above it. Closed, it is a zero-height slot and
-    // costs the layout nothing.
-    let queue_height = if ui.queue_panel {
-        queue_panel_height(up_next(ui, ctx).len(), frame.area().height)
-    } else {
-        0
-    };
-
-    let [tabs, body, queue, menu, status] = Layout::vertical([
+    let [tabs, body, menu, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(queue_height),
         Constraint::Length(menu_height),
         Constraint::Length(1),
     ])
@@ -6991,29 +7032,22 @@ pub fn draw(frame: &mut Frame, ui: &Ui, ctx: &Context<'_>) {
     // drawn here never reads the focused window's grouping for a window that is
     // not focused — the bug that shape could not even express.
     let areas: Vec<Rect> = if ui.windows.is_split() {
-        let halves = match ui.windows.axis() {
-            Axis::Vertical => {
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            }
-            Axis::Horizontal => {
-                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-            }
+        let extent = match ui.windows.axis() {
+            Axis::Vertical => body.width,
+            Axis::Horizontal => body.height,
+        };
+        let sizes = ui.windows.constraints(extent);
+        match ui.windows.axis() {
+            Axis::Vertical => Layout::horizontal(sizes),
+            Axis::Horizontal => Layout::vertical(sizes),
         }
-        .split(body);
-        halves.to_vec()
+        .split(body)
+        .to_vec()
     } else {
         vec![body]
     };
     for (i, (window, area)) in ui.windows.all().iter().zip(areas).enumerate() {
         draw_body(frame, area, ui, ctx, *window, ui.windows.has_focus(i));
-    }
-
-    // After the body, so it takes room from it rather than covering it — the
-    // difference between a panel and the transport overlay below. Never
-    // focused: the keys still go to the projection, and `]q`/`[q` are what
-    // reach into it (#274).
-    if queue_height > 0 {
-        draw_queue(frame, queue, ui, ctx, false);
     }
 
     // **Last, and over the middle of the view.** #34 put this in the bottom
@@ -7059,9 +7093,11 @@ const PICKER_HEIGHT: u16 = 18;
 /// through `render` did not work: at eight rows the string that was supposed to
 /// prove the body survived (`One Artist`) is also in the panel's own track
 /// rows, so the assertion passed with the half-frame cap deleted (§13).
-fn queue_panel_height(rows: usize, frame_height: u16) -> u16 {
-    let wanted = u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2);
-    wanted.clamp(3, 12).min(frame_height / 2)
+fn queue_panel_height(rows: usize) -> u16 {
+    u16::try_from(rows)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .clamp(3, 12)
 }
 
 /// The programme, wherever it is drawn — view 4's body or `gq`'s panel.
@@ -10811,7 +10847,7 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 4");
+        type_line(&mut ui, &ctx, "view 3");
 
         press(&mut ui, &ctx, "space");
         press(&mut ui, &ctx, "?");
@@ -11705,16 +11741,14 @@ mod tests {
             // user can actually be — a view, or a mode.
             ui.set_view(match bctx {
                 crate::cmd::Context::Common | crate::cmd::Context::Transport => View::Tree,
-                other => View::from_id(match other {
-                    crate::cmd::Context::Library => ViewId::Library,
-                    crate::cmd::Context::Playlist => ViewId::Playlist,
-                    crate::cmd::Context::Queue => ViewId::Queue,
-                    crate::cmd::Context::Guide => ViewId::Guide,
-                    crate::cmd::Context::Info => ViewId::Info,
-                    crate::cmd::Context::Common | crate::cmd::Context::Transport => {
-                        unreachable!()
-                    }
-                }),
+                // **The `View`, not a `ViewId`** — since #284 the queue has no
+                // number, and a context still has to name somewhere the keys
+                // can be.
+                crate::cmd::Context::Library => View::Tree,
+                crate::cmd::Context::Playlist => View::Playlist,
+                crate::cmd::Context::Queue => View::Queue,
+                crate::cmd::Context::Guide => View::Guide,
+                crate::cmd::Context::Info => View::Info,
             });
             if bctx == crate::cmd::Context::Transport {
                 ui.mode = crate::cmd::Mode::Transport;
@@ -11763,9 +11797,9 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        press(&mut ui, &ctx, "4");
+        press(&mut ui, &ctx, "3");
         press(&mut ui, &ctx, "g t");
-        assert_eq!(ui.view(), View::Queue);
+        assert_eq!(ui.view(), View::Playlist);
 
         press(&mut ui, &ctx, "1");
         press(&mut ui, &ctx, "g t");
@@ -11778,14 +11812,14 @@ mod tests {
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
 
-        press(&mut ui, &ctx, "4");
+        press(&mut ui, &ctx, "3");
         press(&mut ui, &ctx, "g t");
-        assert_eq!(ui.view(), View::Queue);
+        assert_eq!(ui.view(), View::Playlist);
         press(&mut ui, &ctx, "g tab");
         assert_eq!(ui.view(), View::Tree);
         // And back again — it is an alt-tab, not a one-way trip.
         press(&mut ui, &ctx, "g tab");
-        assert_eq!(ui.view(), View::Queue);
+        assert_eq!(ui.view(), View::Playlist);
     }
 
     /// `]b`/`[b` are the bracket spelling of `gt`/`gT` (#272). Both live.
@@ -15989,7 +16023,7 @@ mod tests {
 
         // Somewhere else to split with, then split.
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 4");
+        type_line(&mut ui, &ctx, "view 3");
         press(&mut ui, &ctx, "^w v");
         assert_eq!(ui.windows.count(), 2, "no split: {}", ui.status);
 
@@ -16051,7 +16085,7 @@ mod tests {
         );
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 4");
+        type_line(&mut ui, &ctx, "view 3");
         press(&mut ui, &ctx, "^w v");
         // Window 1 is the tree, grouped. Focus this one and make it flat.
         press(&mut ui, &ctx, ":");
@@ -16084,8 +16118,8 @@ mod tests {
         assert!(ui.status.contains("g<Tab>"), "{}", ui.status);
 
         press(&mut ui, &ctx, ":");
-        type_line(&mut ui, &ctx, "view 4");
-        assert_eq!(ui.view(), View::Queue);
+        type_line(&mut ui, &ctx, "view 3");
+        assert_eq!(ui.view(), View::Playlist);
         press(&mut ui, &ctx, "^w v");
         assert_eq!(ui.windows.count(), 2, "no split");
         assert_eq!(ui.windows.axis(), Axis::Vertical);
@@ -16103,20 +16137,20 @@ mod tests {
         assert!(ui.windows.has_focus(1), "focus is not on the second window");
         assert_eq!(
             ui.windows.all()[0].view,
-            View::Queue,
+            View::Playlist,
             "the windows swapped instead of the focus moving"
         );
         press(&mut ui, &ctx, "^w w");
-        assert_eq!(ui.view(), View::Queue, "focus did not move back");
+        assert_eq!(ui.view(), View::Playlist, "focus did not move back");
 
         // Both windows are drawn, and only one is focused.
         let out = render(&ui, &ctx, 120, 20);
-        assert!(out.contains("up next"), "{out}");
+        assert!(out.contains("playlist"), "{out}");
         assert!(out.contains("library"), "{out}");
 
         press(&mut ui, &ctx, "^w o");
         assert!(!ui.windows.is_split());
-        assert_eq!(ui.view(), View::Queue, "closing moved what was focused");
+        assert_eq!(ui.view(), View::Playlist, "closing moved what was focused");
     }
 
     /// **Views 1 and 2 are one set drawn two ways, and `levels` says which**
@@ -18535,34 +18569,32 @@ mod tests {
         );
     }
 
-    /// One cursor, wherever the programme is drawn — and **the panel has to
-    /// follow it on screen**, not merely share the field.
+    /// `]q` reaches into the queue window from the list, and **the window
+    /// scrolls to keep the cursor visible**.
     ///
-    /// The first version of this test asserted `ui.queue_sel` after switching to
-    /// view 4, which cannot fail while there is one field: it stayed green
-    /// against a panel rendering `selected: 0`. So it steps far enough down that
-    /// the panel must *scroll* to keep the cursor visible, and reads the rows
-    /// that are actually drawn — the cheapest observable proof that the cursor
-    /// reached the renderer (§13).
+    /// This asserted that the panel and view 4 shared one cursor until #284
+    /// retired the tab — with one placement there is nothing left to share, so
+    /// what it checks now is the half that was always load-bearing: that the
+    /// cursor reaches the renderer. It steps far enough to force a scroll and
+    /// reads the rows actually drawn, because a test of `queue_sel` alone
+    /// cannot fail while there is one field (§13).
     #[test]
-    fn the_panel_follows_the_cursor_it_shares_with_view_four() {
+    fn bracket_q_scrolls_the_queue_window_from_the_list() {
         let store = big_fixture(60);
         let ctx = ctx_of(&store);
         let mut ui = ui_of(&store, true);
-        ui.set_view(View::Tree);
         ui.playback.current = ui.library.sorted().first().copied();
         press(&mut ui, &ctx, "g q");
+        assert_ne!(ui.view(), View::Queue, "the keys went into the queue");
 
         let top = render(&ui, &ctx, 62, 24);
-        // The instrument: the programme starts at the beginning, so a panel that
-        // ignored the cursor would keep showing exactly this.
+        // The instrument: the programme starts at the beginning, so a window
+        // that ignored the cursor would keep showing exactly this.
         assert!(
             top.contains("Track 0002"),
-            "the panel starts elsewhere:\n{top}"
+            "the window starts elsewhere:\n{top}"
         );
 
-        // Two presses: `press` takes one key, and `0` extends a count rather
-        // than starting one — which is what makes `30` reachable at all.
         press(&mut ui, &ctx, "3");
         press(&mut ui, &ctx, "0");
         press(&mut ui, &ctx, "] q");
@@ -18571,48 +18603,73 @@ mod tests {
         let scrolled = render(&ui, &ctx, 62, 24);
         assert!(
             !scrolled.contains("Track 0002"),
-            "the panel did not scroll to the cursor:\n{scrolled}"
-        );
-
-        // And the same cursor is what view 4 opens on.
-        press(&mut ui, &ctx, "4");
-        press(&mut ui, &ctx, "g t");
-        assert_eq!(ui.view(), View::Queue, "4gt did not reach the queue");
-        assert_eq!(
-            ui.queue_sel, 30,
-            "view 4 has a cursor of its own; the panel is a second copy"
+            "the window did not scroll to the cursor:\n{scrolled}"
         );
     }
 
-    /// The two caps, asserted on the function rather than through a frame.
+    /// The two caps, and they now live in two places — #284.
     ///
     /// **This started as a `render` test and was green against a broken cap.**
-    /// At eight rows the evidence that the body survived was `One Artist`,
-    /// which the panel's own rows also contain — so deleting `.min(height / 2)`
-    /// changed nothing the assertion could see. The lesson is §13's second
-    /// shape: the harness was measuring something other than what it claimed.
+    /// At eight rows the evidence that the body survived was `One Artist`, which
+    /// the panel's own rows also contain — so deleting the cap changed nothing
+    /// the assertion could see. Both are asserted on pure functions instead.
+    ///
+    /// The twelve-row cap is the height a glance asks for and belongs to the
+    /// queue. The half-extent cap belongs to `Windows`, because only a frame
+    /// knows the extent — and asking a command for it is how the queue window
+    /// came out zero rows tall the first time it was opened, `body_height`
+    /// being a `Cell` that `draw` fills in.
     #[test]
-    fn the_panel_is_capped_at_twelve_rows_and_at_half_the_frame() {
-        // The twelve-row cap, with room to spare.
-        assert_eq!(queue_panel_height(60, 40), 12, "the twelve-row cap");
-        // The half-frame cap, which is the tighter one here.
-        assert_eq!(queue_panel_height(60, 8), 4, "half of an eight-row frame");
-        assert!(
-            queue_panel_height(60, 8) < queue_panel_height(60, 40),
-            "the frame cap must bind before the row cap, or this proves nothing"
-        );
-        // The floor, and a programme shorter than it.
-        assert_eq!(queue_panel_height(1, 40), 3, "the three-row floor");
+    fn a_glance_is_capped_at_twelve_rows_and_at_half_the_body() {
+        assert_eq!(queue_panel_height(60), 12, "the twelve-row cap");
+        assert_eq!(queue_panel_height(1), 3, "the three-row floor");
+
         // The property rather than one more example: every row count lands
-        // inside both caps. **No claim about the `u16` cast** — `clamp(3, 12)`
+        // inside the caps. **No claim about the `u16` cast** — `clamp(3, 12)`
         // swallows every large value, so `rows as u16` returns the same answer
         // for every input and an assertion about the conversion could not fail.
-        // `try_from` is there to keep the truncation lint quiet, not to change
-        // a result.
         for rows in [0, 1, 11, 12, 13, 400, usize::MAX] {
-            let h = queue_panel_height(rows, 40);
+            let h = queue_panel_height(rows);
             assert!((3..=12).contains(&h), "{rows} rows gave {h}");
         }
+
+        // And the half-extent cap, on the type that applies it.
+        let mut w = Windows::new(View::Tree, crate::shelf::Levels::default());
+        w.split_sized(
+            Axis::Horizontal,
+            Window {
+                view: View::Queue,
+                levels: crate::shelf::Levels::default(),
+                previous: View::Tree,
+            },
+            Some(12),
+        );
+        // The instrument: 12 fits in a tall body, so the short one below is the
+        // cap doing something rather than the number being small anyway.
+        assert_eq!(
+            w.constraints(40),
+            vec![Constraint::Min(1), Constraint::Length(12)],
+            "a tall body should give the glance what it asked for"
+        );
+        assert_eq!(
+            w.constraints(8),
+            vec![Constraint::Min(1), Constraint::Length(4)],
+            "half of an eight-row body"
+        );
+        // An even split ignores it, which is what `^w s` and `^w v` mean.
+        let mut even = Windows::new(View::Tree, crate::shelf::Levels::default());
+        even.split(
+            Axis::Vertical,
+            Window {
+                view: View::Queue,
+                levels: crate::shelf::Levels::default(),
+                previous: View::Tree,
+            },
+        );
+        assert_eq!(
+            even.constraints(40),
+            vec![Constraint::Percentage(50), Constraint::Percentage(50)]
+        );
     }
 
     #[test]

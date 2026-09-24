@@ -110,9 +110,10 @@ pub enum ViewId {
     Library = 1,
     Sorted = 2,
     Playlist = 3,
-    Queue = 4,
-    // 5 was the file browser, removed: gmuse navigates the library, not a
-    // filesystem, and the digit is left unbound rather than renumbering 6 and 7.
+    // 4 was the queue, retired by #284: it is not a place you go, it is what
+    // `gq` puts beside what you are doing. 5 was the file browser, removed
+    // because gmuse navigates the library and not a filesystem. Both digits are
+    // left unbound rather than renumbering what is above them.
     Filters = 6,
     Guide = 7,
     /// The info panel (#126).
@@ -126,7 +127,6 @@ impl ViewId {
             1 => ViewId::Library,
             2 => ViewId::Sorted,
             3 => ViewId::Playlist,
-            4 => ViewId::Queue,
             6 => ViewId::Filters,
             7 => ViewId::Guide,
             _ => return None,
