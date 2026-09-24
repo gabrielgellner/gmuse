@@ -2,6 +2,58 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-09-24
+
+### Bug Fixes
+
+- A number means the same thing typed or pressed — #280 ([`95c9979`](https://gitlab.com/gabrielgellner/gmuse/-/commit/95c9979052fda10a609039db52153dc256982b03))
+- The info panel elides a column rather than losing it — #282 ([`0d56a4a`](https://gitlab.com/gabrielgellner/gmuse/-/commit/0d56a4a685701c8ccb4d1c7251a3e0d764d61d43))
+- A second grouping is refused, not taken and ignored — #279 ([`5944b30`](https://gitlab.com/gabrielgellner/gmuse/-/commit/5944b301b7d7f2521ec68e96e8f84e645610c236))
+- [**breaking**] The info window is <leader>K, because it is K beside — #286 ([`b6ad8e6`](https://gitlab.com/gabrielgellner/gmuse/-/commit/b6ad8e6dd1fce234a66761b9ca1c7e1e95cdcda4))
+
+### Build System
+
+- Just ui passes flags through — #291 ([`536d3fa`](https://gitlab.com/gabrielgellner/gmuse/-/commit/536d3fa921d4926d846269f7b5383ed2b9285d8e))
+
+### Documentation
+
+- What a view is, and what was wearing one — #272–#278 ([`ba8b891`](https://gitlab.com/gabrielgellner/gmuse/-/commit/ba8b891290d6dce23f131fc76bce3fcc79da5a02))
+- View 4 is redundant and cannot go yet — #274, #275 ([`d80b9bb`](https://gitlab.com/gabrielgellner/gmuse/-/commit/d80b9bb5ca59a65b3e6bd6abcadfeedfffff6b45))
+- The relocation half of a shared focus is its own issue — #281 ([`ca76c5f`](https://gitlab.com/gabrielgellner/gmuse/-/commit/ca76c5f894c93e3a9efdc353870ddef9d48317f3))
+- An instrument computed from the code under test is the claim again — §13 ([`c9de009`](https://gitlab.com/gabrielgellner/gmuse/-/commit/c9de0099ccc09cd2259b782bf361ba944c3c3f60))
+- The keys and behaviours this milestone added, and two it got wrong ([`313b7df`](https://gitlab.com/gabrielgellner/gmuse/-/commit/313b7df565531e68aa0f5d28703c163706a6d1bf))
+
+### Features
+
+- ] b and [ b step the view, and a count repeats — #272 ([`8935ba6`](https://gitlab.com/gabrielgellner/gmuse/-/commit/8935ba6a595cc0339ec6023e0d1a0c919d5742d5))
+- Gq shows the programme without leaving the view — #274 ([`aec13c0`](https://gitlab.com/gabrielgellner/gmuse/-/commit/aec13c098ae133f7c5c7eeac63d8e2f2bc47f5cd))
+- The panel follows the cursor — #276 ([`e334605`](https://gitlab.com/gabrielgellner/gmuse/-/commit/e3346058d530f29221b57b91b14c88d428fbd4bf))
+- <leader>i puts the info panel beside the list — #273 ([`7ed827d`](https://gitlab.com/gabrielgellner/gmuse/-/commit/7ed827d896b426215a2eb591d1124bfe5caf6ede))
+- <leader>fv picks a view, and reaches the flat drawing — #277 ([`696cfcb`](https://gitlab.com/gabrielgellner/gmuse/-/commit/696cfcbe1fd763821d8ffc43aec9a9d4d360e855))
+- A navigation walks the projections to what it named — #281 ([`50978e0`](https://gitlab.com/gabrielgellner/gmuse/-/commit/50978e0f4044904be216eaeb626c3273835c5a49))
+- A slow frame says what it was doing — #291 ([`5ef2442`](https://gitlab.com/gabrielgellner/gmuse/-/commit/5ef244220336c896da9e7602d14bde4feee23b65))
+- A slow frame says whether it built the page or drew it — #291 ([`795052e`](https://gitlab.com/gabrielgellner/gmuse/-/commit/795052ed0c85e6ee9ba69c49783065fc8af5ad3e))
+
+### Performance
+
+- What it costs to walk a projection to a thing — #281 ([`b4fe517`](https://gitlab.com/gabrielgellner/gmuse/-/commit/b4fe517fc04d70e385e8d982c4d7ca09d97e60d8))
+- The info window costs a keystroke almost nothing — #285 ([`eb14eee`](https://gitlab.com/gabrielgellner/gmuse/-/commit/eb14eeec035b5d13c80cb5e9e9e24922b238c97c))
+- The spine is cached on the folds that shape it — #285 ([`9a39268`](https://gitlab.com/gabrielgellner/gmuse/-/commit/9a39268b329e311beaa914e124fec79d094feccc))
+- The info page is handed out, not copied — #285 ([`d36e7e5`](https://gitlab.com/gabrielgellner/gmuse/-/commit/d36e7e596815df653dc2769bda63030b02a56d70))
+- What a focus reaches is derived in the fold — #287 ([`2501dbb`](https://gitlab.com/gabrielgellner/gmuse/-/commit/2501dbb78bbc718059f1c2a77b9b56330fe04544))
+- Which crates hold a recording is derived in the fold — #289 ([`1227f80`](https://gitlab.com/gabrielgellner/gmuse/-/commit/1227f80f56634da90506eaa11b1500497da03b5c))
+- A turn of the loop applies every key already waiting — #290 ([`7fad3c7`](https://gitlab.com/gabrielgellner/gmuse/-/commit/7fad3c77fe3a0de0e8b273015dc2f0d5327ce0a9))
+- Query.label gives a name without building the page — #292 ([`65ff584`](https://gitlab.com/gabrielgellner/gmuse/-/commit/65ff5846b5f26aff40aadf595b1780600b62303c))
+
+### Refactoring
+
+- [**breaking**] A window owns its view and its grouping — #275 ([`3d41040`](https://gitlab.com/gabrielgellner/gmuse/-/commit/3d410406676878a17eff3e0b2b2b14d4c3229e7b))
+- [**breaking**] The queue is a window, not a tab and not a panel — #284 ([`cbb9a3f`](https://gitlab.com/gabrielgellner/gmuse/-/commit/cbb9a3ff3a6a79f36d193b141988450370d73ab8))
+
+### Testing
+
+- The queue test waits for its own change — #283 ([`e1cef07`](https://gitlab.com/gabrielgellner/gmuse/-/commit/e1cef075480b2a9e207abee6ec28e89321801e2e))
+
 ## [0.1.0] - 2026-09-22
 
 ### Bug Fixes
@@ -576,6 +628,8 @@ All notable changes to this project will be documented in this file.
 - The accounting counter is global, so its window is one ([`b4a6c72`](https://gitlab.com/gabrielgellner/gmuse/-/commit/b4a6c723d9cc4f739120852d3452553ca6d257fd))
 - What two processes cost at rest, measured against the target ([`8ea3290`](https://gitlab.com/gabrielgellner/gmuse/-/commit/8ea329093b20f042081144064dca7875638ef097))
 - Which facts change the past, and the net for an incremental fold ([`a5f1102`](https://gitlab.com/gabrielgellner/gmuse/-/commit/a5f11025478a3aa22e207a2e3b04bc68f9faa20f))
+
+[0.2.0]: https://gitlab.com/gabrielgellner/gmuse/-/compare/v0.1.0...v0.2.0
 
 [0.1.0]: https://gitlab.com/gabrielgellner/gmuse/-/tags/v0.1.0
 

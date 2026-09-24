@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "gmuse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "clap",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "gmuse-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "gmuse-proto",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "gmuse-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "crossbeam-channel",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "gmuse-ids"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "postcard",
  "serde",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "gmuse-library"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "crossbeam-channel",
@@ -890,14 +890,14 @@ dependencies = [
 
 [[package]]
 name = "gmuse-lock"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "gmuse-programme"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gmuse-ids",
  "serde",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "gmuse-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gmuse-ids",
  "serde",
