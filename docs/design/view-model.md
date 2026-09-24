@@ -200,7 +200,9 @@ and "detail" and "pane" were the proposal's words for things this codebase calls
 What the half-width pane **did** expose is that a row's last column is the one that falls off, and the last column is
 where a claim's source lives. `artist="Anderson .Paak"` clipped to `artist="Anderson` is a plausible query rather than a
 visibly incomplete one. That inverts this document's own rule, it is now the ordinary case rather than a corner, and it
-is #282.
+was #282 — fixed by budgeting the columns from the panel's width, with **the tail reserved and the earlier columns
+giving way**, elided with `…` so you can see when something did not fit. Wide is byte-for-byte what it was, so view 8
+full-screen is untouched.
 
 ---
 

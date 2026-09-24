@@ -7158,6 +7158,73 @@ fn draw_body(
 ///
 /// A row is a rendered template and may hold anything a tag does; slicing on a
 /// byte boundary would panic on the first accented artist.
+/// How wide each column of an info row may be, in a panel this wide — #282.
+///
+/// **The last column is the one that must not vanish.** Every row kind puts its
+/// provenance or its handle last: a claim's basis, a count's query, an event's
+/// detail. The widths were fixed — `{label:<14}`, `{value:<22}`, then the rest —
+/// so a half-width panel ran the last column off the edge with nothing to say it
+/// had. `artist="Anderson .Paak"` became `artist="Anderson`, which is worse than
+/// eliding it: what is left is a **plausible** query rather than a visibly
+/// incomplete one, and a claim whose source is gone is a value the library never
+/// asserted, which inverts `info-panel.md`'s one rule.
+///
+/// So the earlier columns give way and the tail is reserved. Anything that gives
+/// way is elided with `…` by [`clip`], because the point is not to fit — it is
+/// that you can see when something did not.
+///
+/// **Wide is byte-for-byte what it was**, so view 8 full-screen is unchanged and
+/// the tests that read it did not have to move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cols {
+    label: usize,
+    value: usize,
+    /// What the tail has to play with. Advisory: the tail is last, so it is
+    /// clipped to this rather than padded to it.
+    tail: usize,
+}
+
+impl Cols {
+    /// The indent every row carries, which is not available to any column.
+    const INDENT: usize = 4;
+    /// Widest sensible label, and what it has always been.
+    const LABEL: usize = 14;
+    /// Ditto the value.
+    const VALUE: usize = 22;
+    /// Below this a label stops being readable, so the value gives way first.
+    const LABEL_MIN: usize = 8;
+    const VALUE_MIN: usize = 6;
+    /// Enough for `tag · certain` or `ruled out · …`, which is the shortest a
+    /// source can be and still say who.
+    const TAIL_MIN: usize = 13;
+
+    /// `inner` is the width inside the panel's border.
+    fn of(inner: usize) -> Self {
+        let free = inner.saturating_sub(Self::INDENT);
+        // The roomy case first, and it is exactly the old numbers.
+        if free >= Self::LABEL + Self::VALUE + Self::TAIL_MIN {
+            return Self {
+                label: Self::LABEL,
+                value: Self::VALUE,
+                tail: free - Self::LABEL - Self::VALUE,
+            };
+        }
+        // The value gives way before the label: a label is a word you are
+        // scanning down a column, and a clipped one stops being findable.
+        let value = free
+            .saturating_sub(Self::LABEL + Self::TAIL_MIN)
+            .clamp(Self::VALUE_MIN, Self::VALUE);
+        let label = free
+            .saturating_sub(value + Self::TAIL_MIN)
+            .clamp(Self::LABEL_MIN, Self::LABEL);
+        Self {
+            label,
+            value,
+            tail: free.saturating_sub(label + value).max(Self::TAIL_MIN),
+        }
+    }
+}
+
 fn clip(s: &str, width: usize) -> String {
     if s.chars().count() <= width {
         return s.to_string();
@@ -7556,6 +7623,9 @@ fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused:
     // 9,400 history rows was 9,400 `format!`s a frame, felt as a small lag on every
     // keystroke in the panel. The window is decided first, from the count alone, and
     // only the lines in it are formatted.
+    // **The columns, from this panel's width** — #282. Beside a list it gets half
+    // the screen, so this is the ordinary case rather than a corner.
+    let cols = Cols::of(body.width.saturating_sub(2) as usize);
     let lines = info_lines(ui, &about);
     let total = above + lines.len();
     let height = view_height(body);
@@ -7589,8 +7659,13 @@ fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused:
             ]),
             InfoLine::Row(row) => match row {
                 Row::Link { label, name, .. } => Line::from(vec![
-                    Span::styled(format!("    {label:<14}"), dim),
-                    Span::styled(name.clone(), text),
+                    Span::styled(
+                        format!("    {:<w$}", clip(label, cols.label), w = cols.label),
+                        dim,
+                    ),
+                    // The `→` is what says this is somewhere to go, so the name
+                    // gives way to it rather than the other way round.
+                    Span::styled(clip(name, cols.value + cols.tail - 2), text),
                     Span::styled(" →", dim),
                 ]),
                 // **Struck, not omitted.** A claim somebody ruled out and a
@@ -7603,41 +7678,60 @@ fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused:
                     retracted,
                     ..
                 } => Line::from(vec![
-                    Span::styled(format!("    {label:<14}"), dim),
+                    Span::styled(
+                        format!("    {:<w$}", clip(label, cols.label), w = cols.label),
+                        dim,
+                    ),
                     // **Padded, so the third column lines up.** Who said it
                     // is the column being compared down the page — four
                     // genres from one tagger and one from a person read as
                     // different things only if the eye can find them.
+                    //
+                    // And **elided rather than cut**, because a value with its
+                    // source missing is a value pretending to be a fact (#282).
                     Span::styled(
-                        format!("{value:<22}"),
+                        format!("{:<w$}", clip(value, cols.value), w = cols.value),
                         match retracted {
                             Some(_) => dim.add_modifier(ratatui::style::Modifier::CROSSED_OUT),
                             None => text,
                         },
                     ),
                     Span::styled(
-                        match (said, retracted) {
-                            (_, Some(by)) => format!(" ruled out · {}", by.written()),
-                            (Some((basis, sure)), None) => {
-                                format!(" {} · {}", basis.written(), sure.written())
-                            }
-                            (None, None) => String::new(),
-                        },
+                        clip(
+                            &match (said, retracted) {
+                                (_, Some(by)) => format!(" ruled out · {}", by.written()),
+                                (Some((basis, sure)), None) => {
+                                    format!(" {} · {}", basis.written(), sure.written())
+                                }
+                                (None, None) => String::new(),
+                            },
+                            cols.tail,
+                        ),
                         dim,
                     ),
                 ]),
                 Row::Fact { label, value } => Line::from(vec![
-                    Span::styled(format!("    {label:<14}"), dim),
-                    Span::styled(value.clone(), text),
+                    Span::styled(
+                        format!("    {:<w$}", clip(label, cols.label), w = cols.label),
+                        dim,
+                    ),
+                    Span::styled(clip(value, cols.value + cols.tail), text),
                 ]),
                 Row::Many {
                     label,
                     count,
                     query,
                 } => Line::from(vec![
-                    Span::styled(format!("    {label:<14}"), dim),
-                    Span::styled(format!("{count}"), text),
-                    Span::styled(format!("   {query}"), dim),
+                    Span::styled(
+                        format!("    {:<w$}", clip(label, cols.label), w = cols.label),
+                        dim,
+                    ),
+                    Span::styled(format!("{count:<4}"), text),
+                    // **The query is the row's point** — the count says how many
+                    // and this says how to see them. A count is four characters,
+                    // so what is left over goes here, elided rather than cut:
+                    // `artist="Anderson` is a query that means something else.
+                    Span::styled(clip(&format!(" {query}"), cols.value + cols.tail - 4), dim),
                 ]),
                 // **When, and on which machine.** A withdrawal is marked
                 // rather than reading as one more thing somebody said.
@@ -15522,6 +15616,87 @@ mod tests {
             ui.view(),
             View::Info,
             "closing kept the panel and threw away the list"
+        );
+    }
+
+    /// **The tail is reserved, and the earlier columns give way** — #282.
+    ///
+    /// A pure test of the budget, because the budget is the guarantee: every row
+    /// kind clips its columns to these numbers, so a tail that always has room
+    /// is what keeps a claim's source on screen. The row tests below are what
+    /// show the numbers are actually used.
+    #[test]
+    fn the_columns_reserve_room_for_the_tail() {
+        // Wide is exactly what it always was, so view 8 full-screen is untouched.
+        let wide = Cols::of(120);
+        assert_eq!((wide.label, wide.value), (14, 22), "wide changed");
+
+        let narrow = Cols::of(38);
+        // The instrument: narrow has to actually differ, or this test is two
+        // assertions about one case.
+        assert_ne!(
+            (narrow.label, narrow.value),
+            (wide.label, wide.value),
+            "38 columns is not narrow enough to make anything give way"
+        );
+        assert!(narrow.value < wide.value, "the value did not give way");
+
+        // The claim: whatever the width, the tail keeps enough to say who.
+        for inner in 10..=200 {
+            let c = Cols::of(inner);
+            assert!(
+                c.tail >= Cols::TAIL_MIN,
+                "at {inner} the tail is {} — a source would vanish",
+                c.tail
+            );
+            // And a label stays readable rather than being clipped to nothing.
+            assert!(
+                c.label >= Cols::LABEL_MIN,
+                "at {inner} the label is {}",
+                c.label
+            );
+        }
+    }
+
+    /// **`artist="Anderson` is a query that means something else** — #282.
+    ///
+    /// The last column used to run off the edge with nothing to say it had, so a
+    /// clipped query read as a complete one. Beside a list the panel gets half the
+    /// screen, which is why this is the ordinary case rather than a corner.
+    #[test]
+    fn a_narrow_panel_elides_the_tail_instead_of_cutting_it() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "K");
+        // The instrument: wide, the whole query is there — so there is something
+        // for the narrow case to lose, and it is not simply absent.
+        let wide = render(&ui, &ctx, 160, 14);
+        assert!(
+            wide.contains(r#"artist="Anderson .Paak""#),
+            "no full query on the wide page; nothing to elide:\n{wide}"
+        );
+
+        press(&mut ui, &ctx, "g tab");
+        press(&mut ui, &ctx, "<leader> i");
+        let narrow = render(&ui, &ctx, 80, 14);
+
+        // The claim: elided, and visibly so.
+        assert!(
+            narrow.contains('…'),
+            "nothing is marked as elided:\n{narrow}"
+        );
+        assert!(
+            !narrow.contains(r#"artist="Anderson .Paak""#),
+            "the panel is not actually narrow here:\n{narrow}"
+        );
+        // And the elision is in the query rather than somewhere else on the page.
+        assert!(
+            narrow
+                .lines()
+                .any(|l| l.contains("artist=") && l.contains('…')),
+            "the query was cut rather than elided:\n{narrow}"
         );
     }
 
