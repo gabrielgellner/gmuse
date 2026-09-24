@@ -785,6 +785,11 @@ pub struct Ui {
     // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// What building the info page cost, when it was built this frame — #291.
+    ///
+    /// Taken by the slow-frame line, so a `Some` means "this frame paid for it"
+    /// and a reader can tell a slow draw from a slow page.
+    pub page_cost: std::cell::Cell<Option<Duration>>,
     /// Where the cursor was when the focus was last resolved — #285.
     ///
     /// **`track_focus` ran on every key**, not on every *movement*: pressing
@@ -913,6 +918,7 @@ impl Ui {
     fn bare(library: Box<dyn crate::browse::Holding>) -> Self {
         Self {
             stop: None,
+            page_cost: std::cell::Cell::new(None),
             focus_at: std::cell::Cell::new(None),
             relocations: std::cell::Cell::new(0),
             picker: None,
@@ -1302,6 +1308,13 @@ pub enum Stop {
     Edit,
 }
 
+/// A frame slower than this earns a line in the log — #291.
+///
+/// The tick is 200 ms, so 8 ms is where a frame stops being free at that rate.
+/// Chosen to be **noisy enough to be useful**: a threshold nobody trips teaches
+/// nothing.
+const SLOW_FRAME: Duration = Duration::from_millis(8);
+
 /// How many keys one turn of the loop will take before it draws again.
 ///
 /// A bound rather than "until the queue is empty", so a key held down cannot
@@ -1381,7 +1394,32 @@ where
         if let Some(why) = ui.stop.take() {
             return Ok(why);
         }
+        // **What a slow frame was doing** — #291, switched on by `--log`.
+        //
+        // Three fixes for one reported lag were found by measuring in a harness,
+        // and each came back "better, still laggy", because a synthetic fixture
+        // is a hypothesis about the data and the real library kept holding
+        // something the fixture did not. §13 says measure inside the running
+        // player; this is the instrument for doing that.
+        //
+        // Only frames over the threshold, so a quiet session writes nothing.
+        let began = Instant::now();
         terminal.draw(|frame| draw(frame, ui, ctx))?;
+        let drew = began.elapsed();
+        let page = ui.page_cost.take();
+        if drew >= SLOW_FRAME {
+            let panel = ui.windows.all().iter().any(|w| w.view == View::Info);
+            ui.audit.line(
+                "slow",
+                &format!(
+                    "draw {drew:.1?} — {} rows, {} window(s){}{}",
+                    ui.tree.total(&ui.library),
+                    ui.windows.count(),
+                    if panel { ", panel" } else { "" },
+                    page.map_or(String::new(), |d| format!(", page {d:.1?}")),
+                ),
+            );
+        }
         // Poll rather than block: the position display has to tick even when
         // nobody is pressing anything.
         //
@@ -6856,11 +6894,15 @@ pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<std::rc::Rc<crate::model
     } else {
         Vec::new()
     };
+    let built = Instant::now();
     let about = std::rc::Rc::new(crate::model::rows::Listing::about(
         ctx.library,
         focus,
         &happened,
     ));
+    // **Only when it was actually built**, so a slow frame's line can say
+    // whether the page was the reason — #291.
+    ui.page_cost.set(Some(built.elapsed()));
     *ui.about.borrow_mut() = Some((focus, history, std::rc::Rc::clone(&about)));
     Some(about)
 }
