@@ -14,16 +14,27 @@ default:
 build:
     cargo build --release --workspace
 
-# Launch the TUI: just ui [library-root]   (the root is remembered in the cache)
+# The root is remembered in the cache, so `just ui` alone is the usual way. A
+# first argument starting with `-` is a flag rather than a root: `just ui --log`
+# was passing `--log` to `--library` and failing, which is the kind of thing a
+# positional-with-a-default cannot tell apart on its own.
+#
+# `just --list` shows the *last* comment line, so the one-liner goes last.
+
+# Launch the TUI: just ui [library-root] [flags...]
 [group('dev')]
-ui dir="":
+ui dir="" *flags:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -n "{{ dir }}" ]; then
-        cargo run --release -- --library "{{ dir }}"
-    else
-        cargo run --release
-    fi
+    args=()
+    case "{{ dir }}" in
+        "") ;;
+        -*) args+=("{{ dir }}") ;;
+        *) args+=(--library "{{ dir }}") ;;
+    esac
+    # `${a[@]+...}` because bash 3.2 — which is what macOS ships — treats an
+    # empty array as unset under `set -u`.
+    cargo run --release -- ${args[@]+"${args[@]}"} {{ flags }}
 
 # Launch the TUI with session logging, for a listening test
 [group('dev')]
