@@ -3867,6 +3867,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                         ));
                         return;
                     }
+                    if let Some(other) = grouping_clash(ui, levels) {
+                        ui.notify(say_clash(other));
+                        return;
+                    }
                     ui.set_levels(levels);
                     // **The drawing follows the value, never the other way**
                     // (#97). Views 1 and 2 are one set drawn two ways, so
@@ -5615,10 +5619,57 @@ fn go_to_numbered_view(ui: &mut Ui, ctx: &Context<'_>, id: ViewId) {
     if let Some(levels) = wanted
         && levels != ui.levels()
     {
+        if let Some(other) = grouping_clash(ui, levels) {
+            ui.notify(say_clash(other));
+            return;
+        }
         ui.set_levels(levels);
         rebuild_library(ui, ctx);
     }
     switch_view(ui, View::from_id(id));
+}
+
+/// **One projection, so two groupings cannot both be drawn** — #279.
+///
+/// `ui.library` is one tree, built for `Windows::grouping()`. A second window
+/// asking for a *different* grouping used to get the first one's rows with
+/// nothing said: you typed `:view levels genre,album` and kept looking at
+/// artist/album. Silently showing the wrong answer is the failure this refuses.
+///
+/// **Flat never clashes.** A flat window reads `sorted()` and asks the tree for
+/// no grouping at all, which is why the tree-beside-flat layout #275 was for
+/// keeps working — and is the case this has to be careful not to refuse.
+///
+/// **A refusal rather than a second projection**, and the measurement is why:
+/// a whole-library shelf is **41 ms** (`just bench-shelf`), paid again on every
+/// rebuild — and a rebuild happens when a play is counted, with nobody at the
+/// keyboard. A second grouping also needs a second `TreeState`, because a fold
+/// path in artist/album names nothing in genre/year, and per-window folds is a
+/// question #97 answered the other way for cursors. Both are real work with a
+/// real cost, and neither should be started to rescue a case that can be
+/// refused in a line. #279 keeps the eventual shape.
+fn grouping_clash(ui: &Ui, wanted: crate::shelf::Levels) -> Option<crate::shelf::Levels> {
+    if wanted.is_flat() {
+        return None;
+    }
+    ui.windows
+        .all()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !ui.windows.has_focus(*i))
+        .map(|(_, w)| w)
+        .find(|w| w.view == View::Tree && !w.levels.is_flat() && w.levels != wanted)
+        .map(|w| w.levels)
+}
+
+/// How a clash reads on the status line: what the other window is doing, and
+/// the one keystroke that resolves it.
+fn say_clash(other: crate::shelf::Levels) -> String {
+    let by = match other.pair() {
+        Some((outer, inner)) => format!("{} then {}", outer.written(), inner.written()),
+        None => "something else".to_string(),
+    };
+    format!("the other window is grouped by {by} — one tree between them, so `^w o` first (#279)")
 }
 
 /// Change view, remembering where we came from so `g<Tab>` can go back.
@@ -16007,6 +16058,61 @@ mod tests {
                 .count(),
             1,
             "the panel is in two windows at once"
+        );
+    }
+
+    /// **One tree between two windows, so a second grouping is refused** — #279.
+    ///
+    /// It used to be taken and ignored: `ui.library` is built for
+    /// `Windows::grouping()`, so the second window kept drawing the first's
+    /// rows. Typing `:view levels year,album` and still looking at
+    /// artist/album is the kind of wrong that never announces itself.
+    #[test]
+    fn a_second_grouping_is_refused_rather_than_silently_ignored() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+
+        // **The instrument, in its own `Ui`**: with one window this grouping is
+        // accepted, so the refusal below is about the second window and not
+        // about the grouping being illegal.
+        let mut alone = ui_of(&store, true);
+        alone.set_view(View::Tree);
+        press(&mut alone, &ctx, ":");
+        type_line(&mut alone, &ctx, "view levels year,album");
+        let wanted = alone.levels();
+        assert!(
+            !wanted.is_flat(),
+            "the grouping was refused on its own merits"
+        );
+
+        // Two windows, both on the grouped tree.
+        let mut ui = ui_of(&store, true);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 3");
+        press(&mut ui, &ctx, "^w v");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 1");
+        press(&mut ui, &ctx, "^w w");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view 1");
+        assert!(
+            ui.windows
+                .all()
+                .iter()
+                .all(|w| w.view == View::Tree && !w.levels.is_flat()),
+            "both windows are not on a grouped tree: {:?}",
+            ui.windows.all()
+        );
+        let before = ui.levels();
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view levels year,album");
+
+        assert_eq!(ui.levels(), before, "the second grouping was taken");
+        assert!(
+            ui.status.contains("other window"),
+            "it was refused without saying why: {}",
+            ui.status
         );
     }
 

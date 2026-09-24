@@ -260,7 +260,26 @@ Three things fell out that the plan did not predict:
 - **The shared projection was keyed to the focused window**, so grouped-beside-flat worked or broke depending on which
   half your keys were in: a flat window asks for no grouping, and rebuilding for it left the other window drawing a tree
   with nothing to group by. `Windows::grouping` builds for the first window that wants a grouping instead. **Two windows
-  grouped differently still share one projection** — that needs a projection each, and is #279.
+  grouped differently still share one projection** — that needs a projection each, and was #279.
+
+#### Refused — 2026-09-24, #279
+
+A second grouping is **refused with a reason** rather than taken and ignored. `ui.library` is one tree built for
+`Windows::grouping()`, so the second window kept drawing the first's rows: you typed `:view levels year,album` and went
+on looking at artist/album. Silently showing the wrong answer is what this closes.
+
+**Flat never clashes**, which is the case the guard has to be careful not to refuse: a flat window reads `sorted()` and
+asks the tree for no grouping at all, so the tree-beside-flat layout §8 was for keeps working. The existing test for it
+is what catches an over-eager guard.
+
+**A refusal rather than a projection each, and the measurement is why.** A whole-library shelf is **41 ms**
+(`just bench-shelf`), paid again on every rebuild — and a rebuild happens when a play is counted, with nobody at the
+keyboard. A second grouping also needs a second `TreeState`, because a fold path in `artist/album` names nothing in
+`genre/year`, and per-window folds is a question §3 records #97 answering the other way for cursors. Both are real work
+with a real cost, and neither is worth starting to rescue a case a line can refuse.
+
+One fold (milestone 14) landing is what made this worth revisiting rather than what unblocked it: the two shelves were
+never the fold, they were the tree over it.
 
 What is _not_ done is retiring view 4 (§6), which needs the panel to hold focus rather than a window to hold a view.
 
