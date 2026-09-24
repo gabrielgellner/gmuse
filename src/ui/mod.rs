@@ -834,8 +834,13 @@ pub struct Ui {
     /// cannot go stale; the third changes only on a refold, and
     /// `refresh_library` clears this — the one place, and the same door every
     /// other projection goes through (#84).
-    pub about:
-        std::cell::RefCell<Option<(crate::model::focus::Focus, bool, crate::model::about::About)>>,
+    pub about: std::cell::RefCell<
+        Option<(
+            crate::model::focus::Focus,
+            bool,
+            std::rc::Rc<crate::model::about::About>,
+        )>,
+    >,
     /// Sections the reader has folded away, by title.
     ///
     /// **Keyed by title rather than by position**, so a fold survives
@@ -6771,14 +6776,21 @@ pub fn info_lines<'a>(ui: &Ui, about: &'a crate::model::about::About) -> Vec<Inf
 
 /// What the panel is showing, or nothing if it has not been pointed at
 /// anything yet.
-pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<crate::model::about::About> {
+/// The page about the focus, **shared rather than copied** — #285.
+///
+/// `Rc`, because five callers ask for it and two of them run on every keystroke
+/// in the panel: `current_len` to count the rows and `draw_info` to draw them.
+/// Each was getting a deep clone of every section, row and string on a page that
+/// had not changed — the cache made the *build* happen once and then handed out
+/// a copy anyway.
+pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<std::rc::Rc<crate::model::about::About>> {
     let focus = *ui.focus.last()?;
     let history = !ui.info_folded.contains(crate::model::about::FACTS);
     if let Some((was, asked, about)) = ui.about.borrow().as_ref()
         && *was == focus
         && *asked == history
     {
-        return Some(about.clone());
+        return Some(std::rc::Rc::clone(about));
     }
     // **Asked, and only when the history pane is open** — #256. It used to be a flag on
     // a fold that carried a clone of the whole log; the log's owner answers it now, and
@@ -6792,8 +6804,12 @@ pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<crate::model::about::Abo
     } else {
         Vec::new()
     };
-    let about = crate::model::rows::Listing::about(ctx.library, focus, &happened);
-    *ui.about.borrow_mut() = Some((focus, history, about.clone()));
+    let about = std::rc::Rc::new(crate::model::rows::Listing::about(
+        ctx.library,
+        focus,
+        &happened,
+    ));
+    *ui.about.borrow_mut() = Some((focus, history, std::rc::Rc::clone(&about)));
     Some(about)
 }
 
@@ -15952,6 +15968,52 @@ mod tests {
         // And the level, which is the other half of what a fold state is.
         press(&mut ui, &ctx, "z R");
         assert!(ui.tree.total(&ui.library) > open, "zR saw nothing");
+    }
+
+    /// **Asking for the page twice gives the same page, not a copy of it** —
+    /// #285.
+    ///
+    /// Five callers ask, and two run on every keystroke in the panel:
+    /// `current_len` to count the rows and `draw_info` to draw them. The cache
+    /// made the *build* happen once and then handed out a deep clone of every
+    /// section, row and string anyway — 22 µs a hand-out on a substantial page,
+    /// which is why a bigger page felt heavier.
+    ///
+    /// **`Rc::ptr_eq` rather than a timing bound**, because the claim is exact:
+    /// one allocation, shared. A timing test would measure the machine, and an
+    /// equality test on the contents would pass for a copy.
+    #[test]
+    fn the_page_is_handed_out_rather_than_copied() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "K");
+        assert_eq!(ui.view(), View::Info, "K did not open the panel");
+
+        let first = info_about(&ui, &ctx).expect("a page");
+        let again = info_about(&ui, &ctx).expect("a page");
+        // The instrument: there is something on the page, so "same pointer" is
+        // not two empty pages agreeing.
+        assert!(
+            !first.sections.is_empty(),
+            "the page is empty; sharing it proves nothing"
+        );
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &again),
+            "the page was rebuilt or copied between two asks for the same focus"
+        );
+
+        // And a different focus is a different page, or the cache would be
+        // serving the wrong one.
+        press(&mut ui, &ctx, "g tab");
+        press(&mut ui, &ctx, "j");
+        press(&mut ui, &ctx, "K");
+        let moved = info_about(&ui, &ctx).expect("a page");
+        assert!(
+            !std::rc::Rc::ptr_eq(&first, &moved),
+            "a new focus was served the old page"
+        );
     }
 
     /// **What the info window costs a keystroke** — #285, `just bench-panel`.
