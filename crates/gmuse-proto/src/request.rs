@@ -231,6 +231,15 @@ pub enum Request {
     },
     /// **What the library says about one thing, and who said it** — `info-panel.md`, #261.
     QueryAbout { focus: serde_json::Value },
+    /// **What to call one thing, without building the page about it** — #292.
+    ///
+    /// `Listing::label_of` exists locally for exactly this reason (#128): a
+    /// breadcrumb wants five names and no pages, and `about` is the expensive
+    /// one. The remote implementation had no such method, so it asked
+    /// `query.about` and kept the label — which made a breadcrumb cost one full
+    /// page build, fact log included, **per step per frame**. That is the bug
+    /// `label_of` was introduced to fix, reintroduced over the wire.
+    QueryLabel { focus: serde_json::Value },
     /// **Resolve a name to a thing** — #129.
     QueryName { kind: String, name: String },
     /// Whether a facet places a row in the tree — one bit, asked per level.
@@ -574,6 +583,7 @@ pub mod method {
     pub const QUERY_HOLDINGS: &str = "query.holdings";
     pub const QUERY_RECORDING: &str = "query.recording";
     pub const QUERY_ABOUT: &str = "query.about";
+    pub const QUERY_LABEL: &str = "query.label";
     pub const QUERY_NAME: &str = "query.name";
     pub const QUERY_PLACES: &str = "query.places";
     pub const QUERY_ENTRIES: &str = "query.entries";
@@ -623,6 +633,7 @@ pub mod method {
         QUERY_HOLDINGS,
         QUERY_RECORDING,
         QUERY_ABOUT,
+        QUERY_LABEL,
         QUERY_NAME,
         QUERY_PLACES,
         QUERY_ENTRIES,
@@ -907,6 +918,14 @@ impl Request {
                 let p: P = typed(method, params)?;
                 Ok(Self::QueryAbout { focus: p.focus })
             }
+            method::QUERY_LABEL => {
+                #[derive(Deserialize)]
+                struct P {
+                    focus: serde_json::Value,
+                }
+                let p: P = typed(method, params)?;
+                Ok(Self::QueryLabel { focus: p.focus })
+            }
             method::QUERY_NAME => {
                 #[derive(Deserialize)]
                 struct P {
@@ -1100,6 +1119,7 @@ impl Request {
             Self::QueryHoldings { .. } => method::QUERY_HOLDINGS,
             Self::QueryRecording { .. } => method::QUERY_RECORDING,
             Self::QueryAbout { .. } => method::QUERY_ABOUT,
+            Self::QueryLabel { .. } => method::QUERY_LABEL,
             Self::QueryName { .. } => method::QUERY_NAME,
             Self::QueryPlaces { .. } => method::QUERY_PLACES,
             Self::QueryEntries { .. } => method::QUERY_ENTRIES,
@@ -1156,7 +1176,7 @@ mod tests {
                 "{name} is advertised but not handled"
             );
         }
-        assert_eq!(method::ALL.len(), 39, "a new method needs adding to ALL");
+        assert_eq!(method::ALL.len(), 40, "a new method needs adding to ALL");
     }
 
     /// Asking for nothing asks for everything, so a client does not have to

@@ -3610,6 +3610,14 @@ fn run_engine(
                         "label": lib.label_of(focus),
                     })
                 }
+                // **A name, and nothing else** — #292. `query.about` reads the
+                // fact log and builds every section; a breadcrumb wants five
+                // names. This is what `Listing::label_of` is locally.
+                Request::QueryLabel { focus } => {
+                    let focus = serde_json::from_value(focus)
+                        .map_err(|e| RpcError::invalid_params("focus", e.to_string()))?;
+                    serde_json::json!({ "label": lib.label_of(focus) })
+                }
                 Request::QueryName { kind, name } => {
                     let kind = gmuse::model::about::Kind::of_word(&kind)
                         .ok_or_else(|| RpcError::invalid_params("kind", "not a kind"))?;
@@ -4208,6 +4216,7 @@ fn run_engine(
                 | Call::QueryHoldings { .. }
                 | Call::QueryRecording { .. }
                 | Call::QueryAbout { .. }
+                | Call::QueryLabel { .. }
                 | Call::QueryName { .. }
                 | Call::QueryPlaces { .. }
                 | Call::QueryEntries { .. }

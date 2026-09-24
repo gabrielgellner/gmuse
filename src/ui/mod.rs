@@ -16245,11 +16245,21 @@ mod tests {
             }
             let _ = render(&ui, &ctx, 100, 30);
             // `x` plays; it moves no cursor, which is the whole point.
-            let t = Instant::now();
-            for _ in 0..200 {
-                press(&mut ui, &ctx, "x");
-            }
-            t.elapsed() / 200
+            //
+            // **The least contended of twelve**, not a mean: `just ci` runs this
+            // beside eight hundred other tests, and a hiccup landing in one side
+            // of a ratio and not the other is what made three benches in this
+            // suite fail at random (#288).
+            (0..12)
+                .map(|_| {
+                    let t = Instant::now();
+                    for _ in 0..50 {
+                        press(&mut ui, &ctx, "x");
+                    }
+                    t.elapsed() / 50
+                })
+                .min()
+                .expect("twelve runs")
         };
 
         let shut = idle(false);

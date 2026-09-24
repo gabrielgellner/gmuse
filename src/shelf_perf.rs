@@ -219,22 +219,39 @@ mod perf {
         eprintln!("\n{rows} rows, {} tracks\n", ids.len());
         eprintln!("{:<28} {:>11}", "reveal", "find");
 
+        // **The least contended of eight for each**, not one shot: this ratio
+        // failed at random in `just ci` because a hiccup landed in the reveal
+        // and not in the flatten it is compared against (#288).
+        let fastest = |f: &mut dyn FnMut()| -> std::time::Duration {
+            (0..8)
+                .map(|_| {
+                    let t = Instant::now();
+                    f();
+                    t.elapsed()
+                })
+                .min()
+                .expect("eight runs")
+        };
         let mut worst = std::time::Duration::ZERO;
         for at in probes {
             let id = ids[at];
-            let t = Instant::now();
-            let found = shelf.find(&folds, &Target::Id(id), 0);
-            let took = t.elapsed();
-            assert!(found.is_some(), "the track is in the library it came from");
+            assert!(
+                shelf.find(&folds, &Target::Id(id), 0).is_some(),
+                "the track is in the library it came from"
+            );
+            let took = fastest(&mut || {
+                std::hint::black_box(shelf.find(&folds, &Target::Id(id), 0));
+            });
             eprintln!("{:<28} {took:>11.1?}", format!("track {at}"));
             worst = worst.max(took);
         }
 
         // The reference: one unfolded flatten, which is what `find` does before
         // it can scan at all.
-        let t = Instant::now();
         let all = crate::browse::flatten(&shelf, &folds, true);
-        let flatten = t.elapsed();
+        let flatten = fastest(&mut || {
+            std::hint::black_box(crate::browse::flatten(&shelf, &folds, true));
+        });
         eprintln!(
             "{:<28} {flatten:>11.1?}   ({} nodes)",
             "one flatten",

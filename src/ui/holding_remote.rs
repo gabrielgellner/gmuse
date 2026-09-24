@@ -771,8 +771,24 @@ impl crate::model::rows::Listing for Remote {
         .unwrap_or(crate::model::about::Found::Nothing)
     }
 
+    /// **A name, not a page** — #292.
+    ///
+    /// This was `self.about_of(focus).1`: ask for the whole page and keep the
+    /// label. `breadcrumb` calls it once per step of the path, every frame, so
+    /// an attached view paid one full page build — fact log included — per step
+    /// per frame. Measured in the running player at **110 ms a frame** with the
+    /// page itself already cached, which is what `--log`'s `panel` figure was.
+    ///
+    /// The local `Listing::label_of` exists for exactly this reason (#128); the
+    /// wire had no equivalent, so the remote reintroduced the bug the local one
+    /// was written to fix.
     fn label_of(&self, focus: crate::model::focus::Focus) -> String {
-        self.about_of(focus).1
+        self.read(
+            "query.label",
+            serde_json::json!({ "focus": serde_json::to_value(focus).unwrap_or_default() }),
+        )
+        .and_then(|r| r.get("label")?.as_str().map(str::to_owned))
+        .unwrap_or_default()
     }
 
     fn about(

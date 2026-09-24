@@ -2391,7 +2391,6 @@ mod tests {
     fn a_page_does_not_cost_more_because_the_library_has_crates() {
         use crate::model::focus::Focus;
         use crate::model::instance::{Instance, Scanned};
-        use std::time::Instant;
 
         let page = |crates: usize| {
             let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
@@ -2429,11 +2428,10 @@ mod tests {
             let l = Librarian::from_catalogue(&i.catalogue());
             let artist = *l.reference.artists.keys().next().expect("an artist");
             let entries = l.collected.len();
-            let t = Instant::now();
-            for _ in 0..20 {
+            let took = fastest(12, || {
                 std::hint::black_box(crate::model::about::of(&l, Focus::Artist(artist), &[]));
-            }
-            (entries, t.elapsed() / 20)
+            });
+            (entries, took)
         };
 
         let (none, bare) = page(0);
@@ -2455,6 +2453,25 @@ mod tests {
         );
     }
 
+    /// The **least contended** of several runs, which is what a cost is.
+    ///
+    /// A mean over a shared machine measures the neighbours as much as the code:
+    /// `just ci` runs these beside eight hundred other tests, and a scheduler
+    /// hiccup landing in one half of a ratio and not the other decided the bound
+    /// — three of this suite's benches failed at random before this existed
+    /// (#288). The minimum is the run where least else happened, and comparing
+    /// two minima compares two costs rather than two moments.
+    fn fastest(times: usize, mut f: impl FnMut()) -> std::time::Duration {
+        (0..times)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                f();
+                t.elapsed()
+            })
+            .min()
+            .expect("at least one run")
+    }
+
     /// **`covers` must cost less than the scan it replaced** — #287,
     /// `just bench-reach`.
     ///
@@ -2471,7 +2488,6 @@ mod tests {
     fn covers_costs_less_than_the_scan_it_replaced() {
         use crate::model::focus::Focus;
         use crate::model::instance::{Instance, Scanned};
-        use std::time::Instant;
 
         let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
         let scanned: Vec<Scanned> = (1..=4_000u16)
@@ -2511,8 +2527,7 @@ mod tests {
             l.spine.tracks.len()
         );
 
-        let t = Instant::now();
-        for _ in 0..20 {
+        let scan = fastest(12, || {
             let n = l
                 .spine
                 .tracks
@@ -2525,14 +2540,11 @@ mod tests {
                 })
                 .count();
             std::hint::black_box(n);
-        }
-        let scan = t.elapsed() / 20;
+        });
 
-        let t = Instant::now();
-        for _ in 0..20 {
+        let covers = fastest(12, || {
             std::hint::black_box(l.covers(Focus::Artist(artist)));
-        }
-        let covers = t.elapsed() / 20;
+        });
 
         eprintln!("\n  one filtered spine pass : {scan:>9.1?}");
         eprintln!("  covers(artist)          : {covers:>9.1?}\n");
