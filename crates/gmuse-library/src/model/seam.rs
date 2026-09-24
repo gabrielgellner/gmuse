@@ -45,6 +45,8 @@ use crate::projection::catalogue::{Catalogue, Collected};
 /// device's copy and the player has no business holding one.
 pub struct Librarian {
     pub spine: Spine,
+    /// Derived from `spine`, for `covers` — #287. See [`Reach`].
+    pub reach: Reach,
     pub reference: Reference,
     /// The genre codelist and its hierarchy.
     ///
@@ -349,10 +351,83 @@ impl crate::query::filter::Named for Librarian {
     }
 }
 
+/// **What a focus reaches, derived once from the spine** — #287.
+///
+/// `covers` answers "which recordings is this focus about", and it did so by
+/// scanning the spine — recursively, once per credit, so an artist credited at
+/// release level cost O(credits × library). 174 µs of a 188 µs page build on an
+/// eight-thousand-row library, and #276 made the info panel follow the cursor,
+/// so that ran on every `j` with the panel open.
+///
+/// **Built where the spine is, not where it is read.** Building these maps
+/// *inside* `covers` was measured at 3.5× worse — 202 µs to 715 µs — because an
+/// artist has one or two credits and a map of the whole library costs more than
+/// the one or two filtered scans it replaces. The index is only free if it is
+/// paid for once.
+///
+/// **In spine order, so `covers` answers in the order it always did.** Each map
+/// is filled by walking the spine's `BTreeMap`s in key order, which is exactly
+/// the order the old scans yielded — `relocate_to` takes the first recording and
+/// would otherwise land on a different track.
+#[derive(Debug, Default)]
+pub struct Reach {
+    of_release: BTreeMap<Id<crate::model::entity::Release>, Vec<Id<Recording>>>,
+    of_group:
+        BTreeMap<Id<crate::model::entity::ReleaseGroup>, Vec<Id<crate::model::entity::Release>>>,
+    of_work: BTreeMap<Id<crate::model::entity::Work>, Vec<Id<Recording>>>,
+}
+
+impl Reach {
+    fn of(spine: &Spine) -> Self {
+        let mut of_release: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for t in spine.tracks.values() {
+            if let Some(m) = spine.media.get(&t.medium.id()) {
+                of_release
+                    .entry(m.release.id())
+                    .or_default()
+                    .push(t.recording.id());
+            }
+        }
+        let mut of_group: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for r in spine.releases.values() {
+            of_group.entry(r.group.id()).or_default().push(r.id);
+        }
+        let mut of_work: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for r in spine.recordings.values() {
+            if let Some(w) = r.work.as_ref() {
+                of_work.entry(w.id()).or_default().push(r.id);
+            }
+        }
+        Reach {
+            of_release,
+            of_group,
+            of_work,
+        }
+    }
+
+    fn release(&self, id: Id<crate::model::entity::Release>) -> Vec<Id<Recording>> {
+        self.of_release.get(&id).cloned().unwrap_or_default()
+    }
+
+    fn group(&self, id: Id<crate::model::entity::ReleaseGroup>) -> Vec<Id<Recording>> {
+        self.of_group
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .flat_map(|rel| self.release(*rel))
+            .collect()
+    }
+
+    fn work(&self, id: Id<crate::model::entity::Work>) -> Vec<Id<Recording>> {
+        self.of_work.get(&id).cloned().unwrap_or_default()
+    }
+}
+
 impl Librarian {
     pub fn new() -> Self {
         Librarian {
             spine: Spine::default(),
+            reach: Reach::default(),
             reference: Reference::default(),
             vocabulary: Vocabulary::default(),
             encodings: Encodings::default(),
@@ -1066,6 +1141,8 @@ impl Librarian {
             })
             .collect();
 
+        // **After the spine and before anything reads it** — #287.
+        l.reach = Reach::of(&l.spine);
         l.draw();
         l
     }
@@ -1274,32 +1351,11 @@ impl Librarian {
                 .map(|r| r.id())
                 .into_iter()
                 .collect(),
-            Focus::Release(rel) => self
-                .spine
-                .tracks
-                .values()
-                .filter(|t| {
-                    self.spine
-                        .media
-                        .get(&t.medium.id())
-                        .is_some_and(|m| m.release.id() == rel)
-                })
-                .map(|t| t.recording.id())
-                .collect(),
-            Focus::ReleaseGroup(g) => self
-                .spine
-                .releases
-                .values()
-                .filter(|r| r.group.id() == g)
-                .flat_map(|r| self.covers(Focus::Release(r.id)))
-                .collect(),
-            Focus::Work(w) => self
-                .spine
-                .recordings
-                .values()
-                .filter(|r| r.work.as_ref().is_some_and(|it| it.id() == w))
-                .map(|r| r.id)
-                .collect(),
+            // **Lookups, not scans** — #287. Each of these walked the spine, and
+            // the artist arm below walked it again per credit.
+            Focus::Release(rel) => self.reach.release(rel),
+            Focus::ReleaseGroup(g) => self.reach.group(g),
+            Focus::Work(w) => self.reach.work(w),
             Focus::Artist(a) => self
                 .reference
                 .credits
@@ -1307,9 +1363,9 @@ impl Librarian {
                 .filter(|c| c.artist.id() == a)
                 .flat_map(|c| match c.subject {
                     CreditOn::Recording(r) => vec![r],
-                    CreditOn::ReleaseGroup(g) => self.covers(Focus::ReleaseGroup(g)),
-                    CreditOn::Release(rel) => self.covers(Focus::Release(rel)),
-                    CreditOn::Work(w) => self.covers(Focus::Work(w)),
+                    CreditOn::ReleaseGroup(g) => self.reach.group(g),
+                    CreditOn::Release(rel) => self.reach.release(rel),
+                    CreditOn::Work(w) => self.reach.work(w),
                 })
                 .collect(),
             Focus::Collection(c) => crate::model::rows::Listing::entries_of(self, c),
@@ -2294,6 +2350,197 @@ pub const UNKNOWN_ARTIST: &str = "Unknown Artist";
 
 #[cfg(test)]
 mod tests {
+
+    /// **`covers` must cost less than the scan it replaced** — #287,
+    /// `just bench-reach`.
+    ///
+    /// **The reference is measured here, in the same test**: one filtered pass
+    /// over the spine's tracks, which is exactly what `covers` used to do per
+    /// credit. A wall-clock budget would measure the machine and a per-row ratio
+    /// measures nothing — the old code was already linear in the library, so its
+    /// cost *per row* was flat. What changed is the constant, and the only honest
+    /// way to state that is against the thing it used to do.
+    ///
+    /// Found by sabotage: a ratio bound on the page build passed with both arms
+    /// reverted to scanning (§13, 2026-09-24).
+    #[test]
+    fn covers_costs_less_than_the_scan_it_replaced() {
+        use crate::model::focus::Focus;
+        use crate::model::instance::{Instance, Scanned};
+        use std::time::Instant;
+
+        let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
+        let scanned: Vec<Scanned> = (1..=4_000u16)
+            .map(|n| Scanned {
+                audio: crate::audio_id::AudioId {
+                    scheme: 1,
+                    hash: u128::from(n),
+                },
+                title: format!("Track {n:04}"),
+                artist: format!("Artist {:03}", n % 200),
+                album: Some(format!("Album {:03}", n % 200)),
+                album_artist: Some(format!("Artist {:03}", n % 200)),
+                track: Some(n % 20),
+                length_ms: 200_000,
+                ..Default::default()
+            })
+            .collect();
+        i.ingest(100, &scanned);
+        let l = Librarian::from_catalogue(&i.catalogue());
+
+        // **An artist, which is the focus that was slow.** A release group in this
+        // fixture has one release, so the old code did *one* spine pass for it —
+        // the same as the reference below, and the bound could not tell them
+        // apart. An artist page fans out per credit, which is where the passes
+        // multiplied. Found by sabotaging both arms back and watching this pass.
+        let artist = *l
+            .reference
+            .artists
+            .keys()
+            .next()
+            .expect("an artist in the reference");
+        // The instrument: the spine is big enough that a pass over it is
+        // measurable, or "cheaper than a pass" is two zeroes agreeing.
+        assert!(
+            l.spine.tracks.len() > 1_000,
+            "only {} tracks — a scan is not measurable",
+            l.spine.tracks.len()
+        );
+
+        let t = Instant::now();
+        for _ in 0..20 {
+            let n = l
+                .spine
+                .tracks
+                .values()
+                .filter(|tr| {
+                    l.spine
+                        .media
+                        .get(&tr.medium.id())
+                        .is_some_and(|m| m.release.id().scalar() == 0)
+                })
+                .count();
+            std::hint::black_box(n);
+        }
+        let scan = t.elapsed() / 20;
+
+        let t = Instant::now();
+        for _ in 0..20 {
+            std::hint::black_box(l.covers(Focus::Artist(artist)));
+        }
+        let covers = t.elapsed() / 20;
+
+        eprintln!("\n  one filtered spine pass : {scan:>9.1?}");
+        eprintln!("  covers(artist)          : {covers:>9.1?}\n");
+
+        // The instrument: the artist has something to reach, or a fast empty
+        // answer would pass.
+        assert!(
+            !l.covers(Focus::Artist(artist)).is_empty(),
+            "the artist reaches no recordings; there is nothing to look up"
+        );
+
+        assert!(
+            covers < scan,
+            "covers took {covers:?} against {scan:?} for one pass over the spine \
+             — it is still walking it"
+        );
+    }
+
+    /// **The index answers what the scan answered, in the same order** — #287.
+    ///
+    /// `covers` walked the spine and reads `Reach` now. **The instrument is the
+    /// walk, written out here**: comparing against the index would be comparing
+    /// it to itself. Order is load-bearing, because `relocate_to` takes the
+    /// first recording and would otherwise land on a different track (§13,
+    /// 2026-09-24).
+    #[test]
+    fn the_reach_index_answers_what_the_scan_did() {
+        use crate::model::focus::Focus;
+        use crate::model::instance::{Instance, Scanned};
+
+        let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
+        let scanned: Vec<Scanned> = (1..=12u16)
+            .map(|n| Scanned {
+                audio: crate::audio_id::AudioId {
+                    scheme: 1,
+                    hash: u128::from(n),
+                },
+                title: format!("Track {n:02}"),
+                // **One artist, four albums**: tracks have to *share* a release
+                // or the order within one is unobservable, and a reversed index
+                // would pass. Twelve distinct (artist, album) pairs is what the
+                // first version of this fixture produced — one release each.
+                artist: "One Artist".into(),
+                album: Some(format!("Album {}", n % 4)),
+                album_artist: Some("One Artist".into()),
+                track: Some(n),
+                length_ms: 200_000,
+                ..Default::default()
+            })
+            .collect();
+        i.ingest(100, &scanned);
+        let l = Librarian::from_catalogue(&i.catalogue());
+
+        // The instrument: there is a spine to walk, or every comparison below is
+        // two empty lists agreeing.
+        assert!(
+            l.spine.releases.len() > 1 && l.spine.tracks.len() > 2,
+            "no spine to index: {} releases, {} tracks",
+            l.spine.releases.len(),
+            l.spine.tracks.len()
+        );
+        // **And a release with more than one track**, or the order *within* one
+        // is unobservable and an index built backwards would pass. Found by
+        // sabotage: reversing the push changed nothing until this held.
+        assert!(
+            l.spine.tracks.len() > l.spine.releases.len(),
+            "{} tracks over {} releases — order within a release cannot be seen",
+            l.spine.tracks.len(),
+            l.spine.releases.len()
+        );
+
+        let distinct = |mut v: Vec<Id<Recording>>| {
+            let mut seen = std::collections::BTreeSet::new();
+            v.retain(|r| seen.insert(*r));
+            v
+        };
+        let by_scan = |rel: Id<crate::model::entity::Release>| {
+            l.spine
+                .tracks
+                .values()
+                .filter(|t| {
+                    l.spine
+                        .media
+                        .get(&t.medium.id())
+                        .is_some_and(|m| m.release.id() == rel)
+                })
+                .map(|t| t.recording.id())
+                .collect::<Vec<_>>()
+        };
+
+        for id in l.spine.releases.keys() {
+            assert_eq!(
+                l.covers(Focus::Release(*id)),
+                distinct(by_scan(*id)),
+                "release {id:?} reaches different recordings through the index"
+            );
+        }
+        for id in l.spine.groups.keys() {
+            let want: Vec<_> = l
+                .spine
+                .releases
+                .values()
+                .filter(|r| r.group.id() == *id)
+                .flat_map(|r| by_scan(r.id))
+                .collect();
+            assert_eq!(
+                l.covers(Focus::ReleaseGroup(*id)),
+                distinct(want),
+                "group {id:?} reaches different recordings through the index"
+            );
+        }
+    }
     use super::*;
     use crate::model::facet;
     use std::path::Path;

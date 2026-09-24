@@ -248,6 +248,10 @@ bench-reveal:
 bench-panel:
     @just _bench the_info_window_costs_a_still_cursor_nothing
 
+# Show that a focus reaches its recordings by lookup, not by scan (#287).
+bench-reach:
+    @just _bench covers_costs_less_than_the_scan_it_replaced
+
 # Show what one appended fact costs the librarian (#223). Runs in `ci` too.
 bench-write:
     @just _bench one_rating_is_not_a_whole_rebuild
