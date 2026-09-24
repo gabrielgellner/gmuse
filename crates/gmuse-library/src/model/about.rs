@@ -1117,39 +1117,53 @@ pub enum Found {
 /// string, so `artist="Stephan Bodzin"` lands without a search; but nobody
 /// types that, and `artist="Bodzin"` has to work. Case is ignored in both,
 /// because a name is not a password.
+///
+/// **One lazy pass, because this stopped being a deliberate act** — #285. It
+/// collected every candidate into a `Vec` and then looked, which is nothing for
+/// a `:info artist="…"` somebody typed. #276 made the info panel follow the
+/// cursor, so it now runs on every cursor move with the panel open: a
+/// four-thousand-element `Vec` built to find one exact name, ~1 ms a keystroke.
+/// The iterator is boxed instead — one allocation rather than N — and the
+/// containment list only grows for rows that actually contain the needle.
+///
+/// Same answers. Exact still wins over containment, because the loop returns
+/// the moment it sees one.
 pub fn find(l: &Librarian, of: Kind, name: &str) -> Found {
     let wanted = name.trim().to_lowercase();
     if wanted.is_empty() {
         return Found::Nothing;
     }
-    let named: Vec<(Focus, &str)> = match of {
-        Kind::Artist => l
-            .reference
-            .artists
-            .iter()
-            .map(|(id, a)| (Focus::Artist(*id), a.name.as_str()))
-            .collect(),
-        Kind::Collection => l
-            .collections
-            .iter()
-            .map(|(id, c)| (Focus::Collection(*id), c.name.as_str()))
-            .collect(),
-        Kind::Concept(key) => l
-            .vocabulary
-            .genres
-            .iter()
-            .filter(|(id, term)| Id::<Concept>::in_facet(key, &term.name) == **id)
-            .map(|(id, term)| (Focus::Concept(*id), term.name.as_str()))
-            .collect(),
+    let named: Box<dyn Iterator<Item = (Focus, &str)> + '_> = match of {
+        Kind::Artist => Box::new(
+            l.reference
+                .artists
+                .iter()
+                .map(|(id, a)| (Focus::Artist(*id), a.name.as_str())),
+        ),
+        Kind::Collection => Box::new(
+            l.collections
+                .iter()
+                .map(|(id, c)| (Focus::Collection(*id), c.name.as_str())),
+        ),
+        Kind::Concept(key) => Box::new(
+            l.vocabulary
+                .genres
+                .iter()
+                .filter(move |(id, term)| Id::<Concept>::in_facet(key, &term.name) == **id)
+                .map(|(id, term)| (Focus::Concept(*id), term.name.as_str())),
+        ),
     };
 
-    if let Some((focus, _)) = named.iter().find(|(_, n)| n.to_lowercase() == wanted) {
-        return Found::One(*focus);
+    let mut near: Vec<(Focus, &str)> = Vec::new();
+    for (focus, n) in named {
+        let folded = n.to_lowercase();
+        if folded == wanted {
+            return Found::One(focus);
+        }
+        if folded.contains(&wanted) {
+            near.push((focus, n));
+        }
     }
-    let near: Vec<(Focus, &str)> = named
-        .into_iter()
-        .filter(|(_, n)| n.to_lowercase().contains(&wanted))
-        .collect();
     match near.as_slice() {
         [] => Found::Nothing,
         [(focus, _)] => Found::One(*focus),

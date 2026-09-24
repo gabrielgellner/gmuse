@@ -244,6 +244,10 @@ bench-fold:
 bench-reveal:
     @just _bench revealing_a_track
 
+# Show what the info window costs a keystroke (#285). Runs in `ci` too.
+bench-panel:
+    @just _bench the_info_window_costs_a_still_cursor_nothing
+
 # Show what one appended fact costs the librarian (#223). Runs in `ci` too.
 bench-write:
     @just _bench one_rating_is_not_a_whole_rebuild

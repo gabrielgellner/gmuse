@@ -785,6 +785,17 @@ pub struct Ui {
     // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// Where the cursor was when the focus was last resolved — #285.
+    ///
+    /// **`track_focus` ran on every key**, not on every *movement*: pressing
+    /// anything at all with the panel open re-asked the library what the row
+    /// under the cursor was about, which is ~1.2 ms at library scale. Most keys
+    /// move no cursor — transport, folds, a half-typed chord, a mode change —
+    /// and paid it anyway.
+    ///
+    /// Dropped by `refresh_library` along with the `About` cache, because a
+    /// refold can put a different row under the same index.
+    focus_at: std::cell::Cell<Option<(View, usize)>>,
     /// How many times a projection has been walked to a focus — #281.
     ///
     /// **A counter, because the rule is about how often work happens and not
@@ -897,6 +908,7 @@ impl Ui {
     fn bare(library: Box<dyn crate::browse::Holding>) -> Self {
         Self {
             stop: None,
+            focus_at: std::cell::Cell::new(None),
             relocations: std::cell::Cell::new(0),
             picker: None,
             focus: Vec::new(),
@@ -2625,6 +2637,16 @@ fn track_focus(ui: &mut Ui, ctx: &Context<'_>) {
     {
         return;
     }
+    // **Nothing moved, nothing to re-ask** — #285. The row under the cursor is
+    // what this resolves, so the answer cannot have changed unless the cursor
+    // did. A refold can, which is why `refresh_library` drops this with the
+    // `About` cache it sits beside.
+    let here = (ui.view(), current_cursor(ui));
+    if ui.focus_at.get() == Some(here) {
+        return;
+    }
+    ui.focus_at.set(Some(here));
+
     // Anything the cursor is not unambiguously *about* leaves the panel where it
     // is: a row that resolves to several candidates is a question for the picker
     // (#130), and answering it by guessing would be the panel choosing.
@@ -5480,6 +5502,10 @@ pub fn refresh_library(ui: &mut Ui, ctx: &Context<'_>) {
     // the door every projection goes through after a refold — so the cache is
     // dropped here rather than in each of the places that cause one.
     ui.about.replace(None);
+    // **And what the focus was resolved for** (#285): a refold can put a
+    // different row under the same cursor index, so the marker is as stale as
+    // the page above it.
+    ui.focus_at.set(None);
     rebuild_library(ui, ctx);
     refresh_playlist_rows(ui);
     refresh_smart(ui, ctx);
@@ -15873,6 +15899,66 @@ mod tests {
                 .lines()
                 .any(|l| l.contains("artist=") && l.contains('…')),
             "the query was cut rather than elided:\n{narrow}"
+        );
+    }
+
+    /// **What the info window costs a keystroke** — #285, `just bench-panel`.
+    ///
+    /// #276 made the focus follow the cursor, and two things turned that into a
+    /// lag you could feel with the panel open:
+    ///
+    /// - `track_focus` ran on **every key**, not every movement. Anything at all
+    ///   re-asked the library what the row under the cursor was about.
+    /// - Asking that calls `page(at, 1)`, which flattened the whole visible tree
+    ///   to keep one line.
+    ///
+    /// **A ratio, not a wall clock**, for the reason `shelf_perf` gives: a
+    /// budget in milliseconds measures the machine, and this runs beside six
+    /// hundred other tests. The claim is that **a key that moves nothing costs
+    /// the same whether the panel is open or shut** — which is what the guard
+    /// makes true, and what its absence makes false by three orders of
+    /// magnitude.
+    #[test]
+    fn the_info_window_costs_a_still_cursor_nothing() {
+        use std::time::Instant;
+        let store = many_artists(2000);
+        let ctx = ctx_of(&store);
+
+        let idle = |open: bool| {
+            let mut ui = ui_of(&store, true);
+            ui.playback.current = ui.library.sorted().first().copied();
+            if open {
+                press(&mut ui, &ctx, "<leader> i");
+                assert!(
+                    ui.windows.all().iter().any(|w| w.view == View::Info),
+                    "the panel did not open, so this measures nothing"
+                );
+            }
+            let _ = render(&ui, &ctx, 100, 30);
+            // `x` plays; it moves no cursor, which is the whole point.
+            let t = Instant::now();
+            for _ in 0..200 {
+                press(&mut ui, &ctx, "x");
+            }
+            t.elapsed() / 200
+        };
+
+        let shut = idle(false);
+        let open = idle(true);
+        eprintln!(
+            "\n  a key that moves nothing\n    panel shut: {shut:>10.1?}\n    panel open: {open:>10.1?}\n"
+        );
+
+        // The instrument: the shut case has to be doing *something*, or "open is
+        // no worse than shut" is two numbers near zero agreeing.
+        assert!(
+            shut > std::time::Duration::from_nanos(50),
+            "the baseline is {shut:?} — this measures nothing"
+        );
+        assert!(
+            open < shut * 5,
+            "a still cursor costs {open:?} with the panel open against {shut:?} \
+             shut — the focus is being re-resolved on keys that move nothing"
         );
     }
 

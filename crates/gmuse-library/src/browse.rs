@@ -317,6 +317,21 @@ pub fn tree(
 /// Display names come from the shelf and the tracks, since §4 keeps display strings on the
 /// track and only sort keys in the tree.
 pub fn flatten(lib: &Shelf, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<Node> {
+    walk(lib, folds, unfolded, usize::MAX)
+}
+
+/// [`flatten`], stopping once `upto` lines exist — #285.
+///
+/// **A page asked for one line and paid for every line.** `Shelf::page(at, 1)`
+/// flattened the whole visible tree and then took the first: ~890 µs on a
+/// four-thousand-artist library, for the row under the cursor. Nothing noticed
+/// while that was a thing a redraw did five times a second; #276 made the info
+/// panel follow the cursor, so it became a thing every keystroke did.
+///
+/// `usize::MAX` is the old behaviour, and `find` still asks for it: a search
+/// needs the lines that are *not* on screen, which is the whole reason it
+/// flattens unfolded.
+fn walk(lib: &Shelf, folds: &Expansion<SortKey>, unfolded: bool, upto: usize) -> Vec<Node> {
     if lib.levels().is_flat() {
         // **No grouping, so every line is a track** — which is what view 2 is. A flat list is
         // not a tree with everything open; it is a tree with no levels to open, so the folds
@@ -330,6 +345,7 @@ pub fn flatten(lib: &Shelf, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<N
         return lib
             .sorted()
             .iter()
+            .take(upto)
             .map(|id| {
                 // **No path, because there is no tree to have one in.** `alone` is true for
                 // the same reason: nothing groups it, so nothing could be opened to reveal it.
@@ -340,6 +356,9 @@ pub fn flatten(lib: &Shelf, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<N
     }
     let mut rows = Vec::new();
     for (artist_key, albums) in lib.artists() {
+        if rows.len() >= upto {
+            return rows;
+        }
         let display = lib.artist_name(artist_key).to_string();
         let expanded = unfolded || folds.is_open(std::slice::from_ref(artist_key));
         rows.push(Node::Artist {
@@ -352,6 +371,9 @@ pub fn flatten(lib: &Shelf, folds: &Expansion<SortKey>, unfolded: bool) -> Vec<N
             continue;
         }
         for (album_key, tracks) in albums {
+            if rows.len() >= upto {
+                return rows;
+            }
             // **A group of one is not a level** (#135). The album row would open onto exactly
             // this track, so the track takes its place — and there is no fold, because there is
             // nothing left to open.
@@ -804,7 +826,11 @@ impl Browsing for Shelf {
     }
 
     fn page(&self, folds: &Expansion<SortKey>, at: usize, limit: usize) -> Vec<Node> {
-        flatten(self, folds, false)
+        // **Only as far as the page reaches** — #285. This built every visible
+        // line to keep `limit` of them; `walk` stops at `at + limit`, so asking
+        // what row the cursor is on costs the walk down to it rather than the
+        // whole tree.
+        walk(self, folds, false, at.saturating_add(limit))
             .into_iter()
             .skip(at)
             .take(limit)
