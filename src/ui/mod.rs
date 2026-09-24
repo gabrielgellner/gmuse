@@ -785,6 +785,13 @@ pub struct Ui {
     // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// What drawing the info panel cost this frame — #291.
+    ///
+    /// Separate from `page_cost` so a slow frame says whether the time went on
+    /// *building* the page or on *drawing* it. The log's first answer was 130 ms
+    /// frames with no page build at all, which ruled out the build and left no
+    /// candidate — so the instrument got finer rather than the guesses.
+    pub panel_cost: std::cell::Cell<Option<Duration>>,
     /// What building the info page cost, when it was built this frame — #291.
     ///
     /// Taken by the slow-frame line, so a `Some` means "this frame paid for it"
@@ -918,6 +925,7 @@ impl Ui {
     fn bare(library: Box<dyn crate::browse::Holding>) -> Self {
         Self {
             stop: None,
+            panel_cost: std::cell::Cell::new(None),
             page_cost: std::cell::Cell::new(None),
             focus_at: std::cell::Cell::new(None),
             relocations: std::cell::Cell::new(0),
@@ -1412,11 +1420,14 @@ where
             ui.audit.line(
                 "slow",
                 &format!(
-                    "draw {drew:.1?} — {} rows, {} window(s){}{}",
+                    "draw {drew:.1?} — {} rows, {} window(s){}{}{}",
                     ui.tree.total(&ui.library),
                     ui.windows.count(),
-                    if panel { ", panel" } else { "" },
+                    if panel { ", info" } else { "" },
                     page.map_or(String::new(), |d| format!(", page {d:.1?}")),
+                    ui.panel_cost
+                        .take()
+                        .map_or(String::new(), |d| format!(", panel {d:.1?}")),
                 ),
             );
         }
@@ -7886,6 +7897,12 @@ fn land(
 /// whole reason this panel exists — every other player shows the value, and
 /// this one can show why the value is what it is.
 fn draw_info(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused: bool) {
+    let drawing = Instant::now();
+    draw_info_inner(frame, body, ui, ctx, focused);
+    ui.panel_cost.set(Some(drawing.elapsed()));
+}
+
+fn draw_info_inner(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>, focused: bool) {
     use crate::model::about::Row;
     let theme = &ui.theme;
 
