@@ -822,7 +822,23 @@ impl Browsing for Shelf {
     }
 
     fn spine(&self, folds: &Expansion<SortKey>) -> Spine {
-        spine_of(&flatten(self, folds, false))
+        // **Keyed on the folds, which are the only thing that changes it** —
+        // #285. See `Shelf::spine_cache`.
+        let key = folds.fingerprint();
+        // **A poisoned lock is not a reason to answer wrongly.** Nothing here
+        // panics while holding it, and if something ever did, the cache is a
+        // cache: take what is inside and carry on.
+        let mut cache = self.spine_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((was, spine)) = cache.as_ref()
+            && *was == key
+        {
+            return spine.clone();
+        }
+        drop(cache);
+        let spine = spine_of(&flatten(self, folds, false));
+        cache = self.spine_cache().lock().unwrap_or_else(|e| e.into_inner());
+        *cache = Some((key, spine.clone()));
+        spine
     }
 
     fn page(&self, folds: &Expansion<SortKey>, at: usize, limit: usize) -> Vec<Node> {

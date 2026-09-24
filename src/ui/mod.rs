@@ -15902,6 +15902,58 @@ mod tests {
         );
     }
 
+    /// **The spine cache must not outlive the folds it was walked for** — #285.
+    ///
+    /// `spine` is the whole cost of moving in the tree, so it is cached on a
+    /// fingerprint of the folds. The risk a cache brings is staleness, and here
+    /// staleness means the row count is wrong after opening a fold — which
+    /// shows up as motions that stop short of the bottom rather than as
+    /// anything that looks like a cache.
+    ///
+    /// The fingerprint is order-independent because the fold sets are
+    /// `HashSet`s; a hash that depended on iteration order would miss a hit it
+    /// should have had, intermittently, which no test would catch reliably.
+    /// This checks the direction that matters: a change must never *miss*.
+    #[test]
+    fn opening_a_fold_is_seen_through_the_spine_cache() {
+        let store = many_artists(40);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        let shut = ui.tree.total(&ui.library);
+        // The instrument: the count is asked for twice with nothing changed, so
+        // the second answer is a cache hit and has to agree with the first.
+        assert_eq!(
+            shut,
+            ui.tree.total(&ui.library),
+            "the cache disagrees with itself"
+        );
+        assert!(shut > 1, "one row cannot show a fold opening");
+
+        // **One fold, by hand.** `zR` moves the fold *level*, which the
+        // fingerprint hashes separately — so a fingerprint that ignored the
+        // hand-opened set entirely would still notice `zR` and this test would
+        // pass against it. Opening a single node is what goes into that set.
+        press(&mut ui, &ctx, "o");
+        let open = ui.tree.total(&ui.library);
+        assert!(
+            open > shut,
+            "opening one fold did not grow the tree: {shut} then {open} — \
+             the spine was served from a cache the folds had moved past"
+        );
+
+        press(&mut ui, &ctx, "o");
+        assert_eq!(
+            ui.tree.total(&ui.library),
+            shut,
+            "closing it again did not come back to where it started"
+        );
+
+        // And the level, which is the other half of what a fold state is.
+        press(&mut ui, &ctx, "z R");
+        assert!(ui.tree.total(&ui.library) > open, "zR saw nothing");
+    }
+
     /// **What the info window costs a keystroke** — #285, `just bench-panel`.
     ///
     /// #276 made the focus follow the cursor, and two things turned that into a

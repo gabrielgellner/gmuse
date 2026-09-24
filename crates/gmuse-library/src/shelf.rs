@@ -37,6 +37,23 @@ pub struct Line {
 /// Views 1 and 2. Same membership, two shapes.
 #[derive(Debug, Default)]
 pub struct Shelf {
+    /// The last spine walked, and the folds it was walked for — #285.
+    ///
+    /// **`spine` was the whole cost of moving in the tree.** `current_len` asks
+    /// for it on every keystroke, and it built every visible `Node` — display
+    /// strings and all — to reduce them to four bits a line: 1.6 ms on a
+    /// four-thousand-artist library with the folds open, felt as lag on `j`.
+    ///
+    /// Folds change on expand and collapse and on nothing else, so the same
+    /// answer was being rebuilt for every key that moved a cursor. **No
+    /// staleness against the library**, because a refold builds a new `Shelf`
+    /// and a new `Shelf` starts with an empty cache.
+    ///
+    /// **A `Mutex` rather than a `RefCell`**: the engine holds a `Shelf` and
+    /// `Answers` requires `Sync`, so a cache that was not would make the
+    /// projection unshareable. Uncontended, it is tens of nanoseconds against
+    /// the 1.6 ms it saves, and nothing in the audio path is anywhere near it.
+    spine_cache: std::sync::Mutex<Option<(u64, crate::browse::Spine)>>,
     members: HashSet<CopyId>,
     tree: BTreeMap<SortKey, BTreeMap<SortKey, Vec<CopyId>>>,
     /// What to *show* for each sort key.
@@ -433,6 +450,14 @@ impl Shelf {
         self.disc_formats
             .get(&(artist.clone(), album.clone(), disc))
             .cloned()
+    }
+
+    /// The spine cache, for `Browsing::spine` — #285.
+    ///
+    /// `pub(crate)` rather than the field itself, so nothing outside the
+    /// projection can hold a borrow across a walk.
+    pub(crate) fn spine_cache(&self) -> &std::sync::Mutex<Option<(u64, crate::browse::Spine)>> {
+        &self.spine_cache
     }
 
     pub fn artists(&self) -> impl Iterator<Item = (&SortKey, &BTreeMap<SortKey, Vec<CopyId>>)> {

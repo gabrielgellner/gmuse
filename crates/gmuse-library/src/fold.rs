@@ -67,6 +67,36 @@ pub struct Expansion<K> {
     eager: Option<u16>,
 }
 
+impl<K: std::hash::Hash + Eq> Expansion<K> {
+    /// A fingerprint of what is open, for a cache keyed on the folds — #285.
+    ///
+    /// **Order-independent, because the sets are `HashSet`s.** Iteration order
+    /// is not stable between runs or after a rehash, so the per-path hashes are
+    /// combined with `^` and `wrapping_add` rather than fed to one hasher in
+    /// sequence — a hash that depended on iteration order would miss a cache it
+    /// should hit, silently and intermittently, which is worse than not caching.
+    ///
+    /// Collisions are possible in principle and would show a stale row count.
+    /// They are not possible in practice at this size, and a wrong count is a
+    /// scrollbar being off rather than a wrong answer to anything.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let one = |path: &Path<K>| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut h);
+            h.finish()
+        };
+        let fold = |set: &HashSet<Path<K>>| {
+            set.iter()
+                .fold(0u64, |acc, p| (acc ^ one(p)).wrapping_add(1))
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.level.hash(&mut h);
+        self.eager.hash(&mut h);
+        h.finish() ^ fold(&self.opened).wrapping_mul(31) ^ fold(&self.closed)
+    }
+}
+
 /// By hand, not derived: `#[derive(Default)]` would demand `K: Default`, which
 /// a key type has no reason to satisfy — the empty state does not contain a
 /// `K` at all.
