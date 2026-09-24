@@ -317,6 +317,22 @@ somebody followed a link, typed `:info`, chose from the picker — deliberate, a
 moving the other windows is the point. §10's "both directions until one hurts" survives; what it costs is the assumption
 that a direction is the thing to switch off.
 
+#### Built — 2026-09-24, #281
+
+`relocate_to` is called from the three navigation sites and from nowhere else. It reaches every focus kind through
+`Librarian::covers`, which already answered "which recordings is this about" for the panel's own **filed in** section —
+the piece that looked missing and was not (`domain-model.md` §8, again).
+
+**Nearest ancestor falls out of asking for the exact seat first.** A record's focus wants the record's row and an
+artist's wants the artist's, so it asks for the deepest seat the kind implies, then a shallower one; and if the window
+holds neither — grouped by genre, say, where since #275 the grouping is per window — the cursor stays on the track the
+reveal opened the way to, which is the nearest thing that window does hold.
+
+**The rule is not testable by where the cursor lands, and that is worth knowing.** Relocating to a focus that came from
+the cursor walks to where the cursor already is: it is behaviourally identity, and only the 1.3 ms differs. Both of the
+first tests stayed green with relocation wired into the one place the measurement forbids. `Ui::relocations` counts
+instead.
+
 **A projection that cannot show the focus goes to the nearest ancestor it can.** A `Concept` has no row in the tree, so
 the tree goes to the nearest thing it does hold. This is the same bargain a diff view or a fold already makes — you land
 near the thing rather than on it, and you can see that you did. "No movement" was the alternative and it is the one that

@@ -749,6 +749,18 @@ pub struct Ui {
     // stack, and a saved view is one term in it.
     /// Smart playlists, from the config (§7, issue #15).
     pub playlists: crate::smart::SmartPlaylists,
+    /// How many times a projection has been walked to a focus — #281.
+    ///
+    /// **A counter, because the rule is about how often work happens and not
+    /// about where the cursor lands.** Relocating to a focus that came *from*
+    /// the cursor walks to where the cursor already is, so it is behaviourally
+    /// identity: no assertion about a position can tell "it did not relocate"
+    /// from "it relocated to here". What differs is the 1.3 ms
+    /// (`just bench-reveal`), and this is what makes that observable.
+    ///
+    /// Found by sabotage: wiring `relocate_to` into `track_focus` — the one
+    /// thing the measurement forbids — left both tests green (§13, 2026-09-24).
+    pub relocations: std::cell::Cell<u64>,
     /// Whether the programme is shown in the bottom panel — `gq` (#274).
     ///
     /// **Not a view, which is the whole point.** Toggling it does not change
@@ -856,6 +868,7 @@ impl Ui {
     fn bare(library: Box<dyn crate::browse::Holding>) -> Self {
         Self {
             stop: None,
+            relocations: std::cell::Cell::new(0),
             queue_panel: false,
             picker: None,
             focus: Vec::new(),
@@ -3019,6 +3032,7 @@ fn choose_from_picker(ui: &mut Ui, ctx: &Context<'_>) {
             ui.focus = vec![focus];
             ui.info_sel = 0;
             show_info(ui);
+            relocate_to(ui, ctx, focus);
         }
         // The view under the picker is still the one the crate was offered for, so the
         // subjects are read now rather than carried.
@@ -7319,6 +7333,8 @@ fn follow_link(ui: &mut Ui, ctx: &Context<'_>) {
         ui.focus.remove(0);
     }
     ui.info_sel = 0;
+    // **A navigation, so the projections follow** — #281.
+    relocate_to(ui, ctx, to);
 }
 
 /// Put the panel where the reader can see it, **without taking a window that is
@@ -7333,6 +7349,76 @@ fn show_info(ui: &mut Ui) {
         return;
     }
     switch_view(ui, View::Info);
+}
+
+/// **Walk the projections to what somebody just navigated to** — #281.
+///
+/// `just bench-reveal` measured what this costs: **1.3–1.7 ms**, dominated by
+/// the unfolded flatten `Browsing::find` needs before it can scan. That number
+/// is why this is called from the *navigation* sites and not from
+/// [`track_focus`]:
+///
+/// > **A projection relocates when somebody navigated, not when the cursor
+/// > drifted.**
+///
+/// A focus changes two ways and they are different acts. The cursor moved under
+/// it — #276, cheap, and moving other windows for it would pay a flatten per
+/// `j`. Or somebody followed a link, typed `:info`, chose from the picker:
+/// deliberate, a few a minute, and the one where moving the other windows is
+/// the point. That is sharper than the one-way fall-back `view-model.md` §10
+/// reached for, and it is what the measurement actually implies — the thing to
+/// switch off was never a direction.
+///
+/// **Unconditional, not only when a tree is on screen.** It is the same 1.3 ms
+/// either way and it means `g<Tab>` back to the library finds the cursor where
+/// you navigated, rather than the feature working only in a split.
+///
+/// `covers` is what makes every focus kind reachable: it answers "which
+/// recordings is this focus about" for all eight, and `copies_of` turns those
+/// into rows. It already existed for the panel's own "filed in" section.
+fn relocate_to(ui: &mut Ui, ctx: &Context<'_>, focus: crate::model::focus::Focus) {
+    ui.relocations.set(ui.relocations.get() + 1);
+    let recordings = ctx.library.covers(focus);
+    let Some(copy) = recordings.iter().find_map(|r| {
+        ctx.library
+            .copies_of(std::slice::from_ref(r))
+            .get(r)
+            .copied()
+    }) else {
+        return;
+    };
+    // Opens the way and lands on the track. For a recording that is the answer;
+    // for anything else it is how the ancestors get opened at all.
+    if !ui.tree.reveal(&ui.library, copy) {
+        return;
+    }
+
+    // **Nearest ancestor, and it falls out of trying the exact seat first**
+    // (§10). A focus that is *about* a record wants the record's row, and an
+    // artist wants the artist's — but a window grouped by genre has neither, and
+    // since #275 the grouping is per window. So ask for the deepest seat that
+    // fits the kind, then a shallower one, and if the tree holds neither the
+    // cursor stays on the track, which is the nearest thing it does hold.
+    use crate::model::focus::Focus;
+    let depth = match focus {
+        // The track itself is the seat; `reveal` already put the cursor there.
+        Focus::Recording(_) | Focus::Encoding(_) => return,
+        Focus::Release(_) | Focus::ReleaseGroup(_) | Focus::Work(_) => 2,
+        Focus::Artist(_) | Focus::Concept(_) | Focus::Collection(_) => 1,
+    };
+    let Some((artist, album)) = ui.library.locate(copy) else {
+        return;
+    };
+    for want in (1..=depth).rev() {
+        let path = match want {
+            1 => vec![artist.clone()],
+            _ => vec![artist.clone(), album.clone()],
+        };
+        if let Some(at) = ui.library.at(&ui.tree.folds(), &(path, None)) {
+            ui.tree.selected = at;
+            return;
+        }
+    }
 }
 
 /// Back to where the reader came from — #127.
@@ -7540,6 +7626,11 @@ fn land(
             ui.focus = vec![focus];
             ui.info_sel = 0;
             show_info(ui);
+            // **`:info artist "…"` reaches past the cursor** (#129), so it is a
+            // navigation and the projections follow it. `K` over a row is one
+            // too — it just happens to land where the cursor already is, which
+            // costs a reveal that changes nothing and keeps the rule simple.
+            relocate_to(ui, ctx, focus);
         }
         // **It does not choose — it offers** (#130). Looking at a list of
         // candidates and picking one is what a picker is for, and the
@@ -15697,6 +15788,85 @@ mod tests {
                 .lines()
                 .any(|l| l.contains("artist=") && l.contains('…')),
             "the query was cut rather than elided:\n{narrow}"
+        );
+    }
+
+    /// **What #281 is for**: `:info` on something reaches past the cursor, and
+    /// the library walks to it.
+    #[test]
+    fn a_navigation_walks_the_library_to_what_it_named() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // Somewhere other than the top, so "it moved" is not "it was already
+        // there". The instrument is that this cursor is genuinely elsewhere.
+        press(&mut ui, &ctx, "G");
+        let away = ui.tree.selected;
+        assert!(away > 0, "the fixture tree has one row; nothing to move to");
+        let walks = ui.relocations.get();
+
+        // Name a thing the cursor is not on, through the door `:info` uses.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"info artist="Anderson .Paak""#);
+        assert_eq!(
+            ui.view(),
+            View::Info,
+            "the panel did not open: {}",
+            ui.status
+        );
+        assert!(
+            ui.relocations.get() > walks,
+            "the navigation did not relocate anything"
+        );
+
+        // And it went to what was named, not merely somewhere.
+        assert_ne!(
+            ui.tree.selected, away,
+            "the library did not move to what was named"
+        );
+        let here = ui.tree.here(&ui.library).expect("a row under the cursor");
+        assert!(
+            format!("{here:?}").contains("Anderson"),
+            "it moved somewhere else: {here:?}"
+        );
+    }
+
+    /// **And the cursor drifting does not** — the rule `just bench-reveal`
+    /// produced, and the reason relocation is not wired into `track_focus`.
+    ///
+    /// **Asserted on the counter, not on the cursor.** Relocating to a focus
+    /// that came *from* the cursor walks to where the cursor already is, so it
+    /// is behaviourally identity — the first version of this test asserted the
+    /// cursor moved by exactly one row and stayed green with relocation wired
+    /// into `track_focus`, which is the thing the measurement forbids. What
+    /// differs is the 1.3 ms, and a count is what makes that observable (§13,
+    /// 2026-09-24).
+    #[test]
+    fn moving_the_cursor_does_not_relocate_anything() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+
+        // The panel beside the list, so the focus is tracking (#276).
+        press(&mut ui, &ctx, "<leader> i");
+        press(&mut ui, &ctx, "j");
+        let before = *ui.focus.last().expect("a focus");
+        let walks = ui.relocations.get();
+
+        press(&mut ui, &ctx, "j");
+        // The instrument: the focus really did change, so there was something
+        // that *could* have triggered a relocation.
+        assert_ne!(
+            *ui.focus.last().expect("a focus"),
+            before,
+            "the focus did not move; nothing could have relocated"
+        );
+        // The claim.
+        assert_eq!(
+            ui.relocations.get(),
+            walks,
+            "a cursor move relocated a projection — that is a flatten per `j`"
         );
     }
 
