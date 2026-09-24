@@ -2717,10 +2717,35 @@ fn two_clients_editing_the_queue_produce_a_stale_version() {
 
 /// A `queue` event says only its version — §7.8. A view re-reads; sending the
 /// entries would make every reorder carry the whole list.
+///
+/// **This raced the engine's startup announcement and failed about one run in
+/// six** — #283. There is one publish site for `Topic::Queue`, guarded by
+/// `version != announced` with `announced` starting at `0`, so the engine
+/// announces the queue it came up with — version 1 — on its first tick. This
+/// took the *first* event after enqueueing and asserted `version > 1`, which
+/// only holds if that announcement went out before the subscribe and was
+/// therefore missed. Usually it did. Under load the first tick lands late, the
+/// subscriber gets version 1, and the assertion fails on an event the enqueue
+/// did not cause.
+///
+/// **The `entries` assertion did not help, and that is the part worth keeping in
+/// mind.** The startup event has no `entries` either, so it passed on the wrong
+/// event too: both assertions were satisfied by an event the test was not
+/// testing. On the five runs in six that passed, the test was right by accident.
+///
+/// So it reads the version *before* the change rather than hard-coding 1, and
+/// reads events until one is above it. **Not a longer timeout** — the event
+/// arrives promptly; the test was looking at the wrong one.
 #[test]
 fn a_queue_change_is_announced_by_version() {
     let (engine, recording) = start_with_a_track("queue-event");
     let client = Client::connect(&engine.socket, "watcher", "0").expect("connect");
+
+    // The version this engine is already at, whatever it is.
+    let before = client.call("queue.get", None).expect("queue.get")["version"]
+        .as_u64()
+        .expect("queue.get carries a version");
+
     client
         .subscribe(&[gmuse_proto::Topic::Queue])
         .expect("subscribe");
@@ -2732,18 +2757,41 @@ fn a_queue_change_is_announced_by_version() {
         )
         .expect("append");
 
-    let event = client
-        .next_event(Duration::from_secs(10))
-        .expect("a queue event");
-    assert_eq!(event.topic, gmuse_proto::Topic::Queue);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut seen: Vec<u64> = Vec::new();
+    let event = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        // **The versions seen are the diagnostic**, so a timeout reports them
+        // rather than letting `next_event`'s own message win. `saw [1]` says
+        // "the startup announcement and nothing since" at a glance, which is the
+        // whole history of this test (#283).
+        let event = match client.next_event(left) {
+            Ok(event) => event,
+            Err(why) => panic!(
+                "no queue event above version {before} within ten seconds \
+                 ({why:?}); versions seen: {seen:?}"
+            ),
+        };
+        assert_eq!(event.topic, gmuse_proto::Topic::Queue);
+        // **Every event, not just the one we keep.** §7.8 is a property of the
+        // topic, so the announcement that arrives first has to obey it too.
+        assert!(
+            event.body.get("entries").is_none(),
+            "an event carried the entries: {}",
+            event.body
+        );
+        let version = event.body["version"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("an event without a version: {}", event.body));
+        if version > before {
+            break event;
+        }
+        seen.push(version);
+    };
+
     assert!(
-        event.body["version"].as_u64().is_some_and(|v| v > 1),
+        event.body["version"].as_u64().is_some_and(|v| v > before),
         "it carries the version: {}",
-        event.body
-    );
-    assert!(
-        event.body.get("entries").is_none(),
-        "and not the entries: {}",
         event.body
     );
 }
