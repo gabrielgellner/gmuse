@@ -1302,26 +1302,46 @@ pub enum Stop {
     Edit,
 }
 
-pub fn run<B>(terminal: &mut Terminal<B>, ui: &mut Ui, ctx: &Context<'_>) -> io::Result<Stop>
+/// How many keys one turn of the loop will take before it draws again.
+///
+/// A bound rather than "until the queue is empty", so a key held down cannot
+/// starve the frame: at sixty the screen still refreshes twice a second under a
+/// stream nothing could keep up with anyway.
+const MOST_KEYS_AT_ONCE: usize = 60;
+
+/// **Every key that has already arrived, then one draw** — #290.
+///
+/// The loop took *one* key per turn and drew after it, so spamming `j` asked for
+/// thirty full redraws a second. In the tree that is invisible: moving the cursor
+/// changes two lines, and the terminal is sent two lines. With the info panel
+/// open every keystroke changes the panel's whole content — half the screen —
+/// and the cursor visibly falls behind the keyboard, because the draws are
+/// queued behind each other and the input behind them.
+///
+/// Draining first is what every TUI does and what makes a held key feel like a
+/// held key: the keys that are already in the queue are applied, and the frame
+/// that gets drawn is the one you would have ended on anyway. The frames in
+/// between are work nobody sees.
+///
+/// **`poll` and `read` are parameters** so this is testable. Crossterm's queue
+/// is global and cannot be scripted; the loop's input path had no test at all
+/// before, which is why this is a function rather than four more lines in `run`.
+fn drain_input<P, R>(
+    ui: &mut Ui,
+    ctx: &Context<'_>,
+    mut poll: P,
+    mut read: R,
+    first_wait: Duration,
+) -> io::Result<()>
 where
-    B: ratatui::backend::Backend<Error = io::Error>,
+    P: FnMut(Duration) -> io::Result<bool>,
+    R: FnMut() -> io::Result<Event>,
 {
-    while !ui.quit {
-        if let Some(why) = ui.stop.take() {
-            return Ok(why);
-        }
-        terminal.draw(|frame| draw(frame, ui, ctx))?;
-        // Poll rather than block: the position display has to tick even when
-        // nobody is pressing anything.
-        //
-        // While a prefix is waiting to be revealed, poll only for what is left
-        // of its delay. Otherwise the popup appears whenever the 200ms tick
-        // next comes round, which is a different moment depending on where in
-        // the cycle the key landed — a 300ms delay showing at anywhere up to
-        // 500ms, and visibly inconsistent between presses.
-        if event::poll(ui.tick(Instant::now()))?
-            && let Event::Key(key) = event::read()?
-        {
+    if !poll(first_wait)? {
+        return Ok(());
+    }
+    for _ in 0..MOST_KEYS_AT_ONCE {
+        if let Event::Key(key) = read()? {
             // **A release reaches only a momentary binding** — #228.
             //
             // `is_press()` stays the door every other key comes through, so no
@@ -1339,6 +1359,38 @@ where
                 released(key, ui, ctx);
             }
         }
+        // **Stop at anything that wants the screen.** A quit, a rescan, or a
+        // prompt opening are all moments the next key should be read *after* a
+        // frame — draining past them would apply keys to a state the person
+        // never saw.
+        if ui.quit || ui.stop.is_some() || ui.prompt.is_some() || ui.picker.is_some() {
+            break;
+        }
+        if !poll(Duration::ZERO)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+pub fn run<B>(terminal: &mut Terminal<B>, ui: &mut Ui, ctx: &Context<'_>) -> io::Result<Stop>
+where
+    B: ratatui::backend::Backend<Error = io::Error>,
+{
+    while !ui.quit {
+        if let Some(why) = ui.stop.take() {
+            return Ok(why);
+        }
+        terminal.draw(|frame| draw(frame, ui, ctx))?;
+        // Poll rather than block: the position display has to tick even when
+        // nobody is pressing anything.
+        //
+        // While a prefix is waiting to be revealed, poll only for what is left
+        // of its delay. Otherwise the popup appears whenever the 200ms tick
+        // next comes round, which is a different moment depending on where in
+        // the cycle the key landed — a 300ms delay showing at anywhere up to
+        // 500ms, and visibly inconsistent between presses.
+        drain_input(ui, ctx, event::poll, event::read, ui.tick(Instant::now()))?;
         drain_player_events(ui, ctx);
         keep_up(ui, ctx);
         note_play_progress(ui, ctx);
@@ -16013,6 +16065,90 @@ mod tests {
         assert!(
             !std::rc::Rc::ptr_eq(&first, &moved),
             "a new focus was served the old page"
+        );
+    }
+
+    /// **Every key already in the queue is applied before the next draw** —
+    /// #290.
+    ///
+    /// The loop took one key per turn and drew after it, so spamming `j` asked
+    /// for a full redraw per keystroke. With the info panel open each of those
+    /// redraws changes half the screen, and the cursor falls behind the
+    /// keyboard — the draws queue and the input queues behind them.
+    ///
+    /// The loop's input path had no test before this, because crossterm's queue
+    /// is global; `poll` and `read` are parameters so a queue can be scripted.
+    #[test]
+    fn a_turn_of_the_loop_applies_every_key_already_waiting() {
+        // Enough rows that five `j` presses can move five rows — `fixture()`
+        // collapses to four, which is what the instrument below caught.
+        let store = many_artists(40);
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.set_view(View::Tree);
+
+        let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        // A `RefCell`, because both closures reach the same queue.
+        let queued = std::cell::RefCell::new(vec![down; 5]);
+        let at = ui.tree.selected;
+
+        drain_input(
+            &mut ui,
+            &ctx,
+            |_| Ok(!queued.borrow().is_empty()),
+            || Ok(Event::Key(queued.borrow_mut().pop().expect("polled first"))),
+            Duration::ZERO,
+        )
+        .expect("the scripted queue does not fail");
+
+        // The instrument: five `j` presses can actually move five rows here, or
+        // "it applied all five" is a cursor that hit the bottom.
+        assert!(
+            ui.tree.total(&ui.library) > at + 5,
+            "the fixture has fewer than five rows below the cursor"
+        );
+        assert_eq!(
+            ui.tree.selected,
+            at + 5,
+            "one turn of the loop applied {} of 5 queued keys — the rest wait \
+             behind a draw nobody needed",
+            ui.tree.selected - at
+        );
+    }
+
+    /// And it stops at a key that wants the screen, rather than applying the
+    /// next one to a state nobody has seen.
+    #[test]
+    fn draining_stops_when_a_key_opens_the_prompt() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        ui.set_view(View::Tree);
+
+        // `:` opens the prompt; the `j` behind it must not be typed into it.
+        let queued = std::cell::RefCell::new(vec![
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+        ]);
+        drain_input(
+            &mut ui,
+            &ctx,
+            |_| Ok(!queued.borrow().is_empty()),
+            || Ok(Event::Key(queued.borrow_mut().pop().expect("polled first"))),
+            Duration::ZERO,
+        )
+        .expect("the scripted queue does not fail");
+
+        assert!(ui.prompt.is_some(), "`:` did not open the prompt");
+        assert_eq!(
+            queued.borrow().len(),
+            1,
+            "it kept draining past the prompt opening"
+        );
+        assert_eq!(
+            ui.prompt.as_ref().map(|p| p.buffer.as_str()),
+            Some(""),
+            "the queued key was typed into the prompt"
         );
     }
 
