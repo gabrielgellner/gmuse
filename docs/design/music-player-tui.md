@@ -6268,6 +6268,46 @@ Append here as decisions are made. Format: date, decision, rationale.
   next thing if any of it is — a rating changes no tree node, and the cache is keyed by library version rather than by
   what a `Changed` could say — but that is a caching question over a fast tree, not a design question.
 
+- **2026-09-24** **An instrument computed from the code under test is the claim again, and it fails with the wrong
+  message** (#272–#283, milestone 15).
+
+  The 2026-09-12 entry above says: prove the harness saw something. Write the second assertion —
+  `assert!(variants.len() > 50)` before checking which are named. **This is the refinement that entry did not have**,
+  and it came from applying its own habit to a milestone's worth of changes: reverting each fix found **five** tests
+  green against broken code, and four of the five had a second assertion already. The second assertion was just derived
+  from the same thing it was vouching for.
+
+  **The rule.** The instrument has to be able to fail while the claim passes, and the claim while the instrument passes.
+  If one assertion can only fail when the other does, it is not an instrument — it is the claim written twice.
+
+  **The tell, and it is what makes this cheap to catch.** Sabotage the fix, and if the _instrument_ is what fires, with
+  a message blaming the fixture, the two are the same assertion. Twice this session a deliberately broken implementation
+  failed with "the cursor did not reach a different thing" and "the fixture cannot distinguish a repeat from a
+  selection" — both of which say the test's data is inadequate, when the data was fine and the code was broken. A
+  message that accuses the fixture during a sabotage is the diagnostic.
+
+  | what was green                  | why the instrument could not fail alone                                                              |
+  | ------------------------------- | ---------------------------------------------------------------------------------------------------- |
+  | `]b`'s wrap, at `usize::MAX`    | from index 0 the silently-wrapped answer **equals** the right one; the witness cannot discriminate   |
+  | the queue panel's shared cursor | asserted `queue_sel` after switching view — cannot fail while there is one field                     |
+  | the panel's half-screen cap     | `One Artist` stood for "the body survived" and is **also in the panel's own rows**                   |
+  | the panel following the cursor  | compared two focuses, so no tracking made both ends equal and the instrument fired                   |
+  | the queue event's `entries`     | the startup announcement has no `entries` either, so it passed on the event the test was not testing |
+
+  **The fix is always to compute the instrument some other way.** Ask `under_cursor` directly rather than comparing two
+  focuses. Assert `View::ALL[3] != View::Playlist` as pure data rather than comparing two `Ui`s. Read the version before
+  the change rather than hard-coding the one you expect. Start the wrap case from a non-zero index, where the two
+  arithmetics actually differ. Each is one line, and each is the difference between a test and a coincidence.
+
+  **And a corollary about where this bites hardest.** Two of the five were caught only because the sabotage was
+  _targeted_ — breaking the specific guard rather than the feature. A test can survive "delete the whole function" and
+  still be vacuous for the line that matters: the half-screen cap survived deleting the cap, because the page still
+  drew. So the revert to perform is the smallest one that makes the claim false.
+
+  **What this is not.** Not a reason to distrust the 2026-09-12 rule — four of these five had followed it, which is
+  exactly why the refinement is worth writing down rather than restating the original. And not a new process: still one
+  habit, still one extra assertion. The addition is _where the assertion gets its value from_.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

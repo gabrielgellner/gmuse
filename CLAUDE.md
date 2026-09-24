@@ -295,6 +295,17 @@ This bites here rather than everywhere because the interesting claims in this pr
 the wire, no second appender, no command accepted and ignored — and an absence is asserted by showing a set is empty.
 `assert!(x.is_empty())` passes identically whether nothing is wrong or nothing was looked at.
 
+**And the second assertion has to be computed some other way than the thing it vouches for** — the 2026-09-24 entry,
+which found five more green-against-broken-code tests where **four already had one**. The instrument must be able to
+fail while the claim passes, and the claim while the instrument passes; if one can only fail when the other does, it is
+the claim written twice. Ask `under_cursor` directly rather than comparing two focuses; assert
+`View::ALL[3] != View::Playlist` as pure data rather than comparing two `Ui`s; read the version before the change rather
+than hard-coding the one you expect.
+
+**The tell:** sabotage the fix, and if the _instrument_ is what fires — with a message blaming the fixture — the two are
+the same assertion. And **make the sabotage targeted**: a test can survive deleting the whole function and still be
+vacuous for the line that matters, so break the smallest thing that makes the claim false.
+
 ## A claim that nothing checks is the fourth way to be green and wrong
 
 §13's testing rule covers a predicate that is vacuously true and a harness that does less than it claims. **A sentence
