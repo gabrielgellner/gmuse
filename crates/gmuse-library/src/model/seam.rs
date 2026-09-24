@@ -375,6 +375,16 @@ pub struct Reach {
     of_group:
         BTreeMap<Id<crate::model::entity::ReleaseGroup>, Vec<Id<crate::model::entity::Release>>>,
     of_work: BTreeMap<Id<crate::model::entity::Work>, Vec<Id<Recording>>>,
+    /// Which crates hold a recording — #289.
+    ///
+    /// `crates_holding` scanned every collection entry, and the panel's **filed
+    /// in** section asks it once per recording the focus covers. So an artist
+    /// page was O(its recordings × every entry in every crate): **15.9 µs with
+    /// no crates, 269 µs with one, 6.1 ms with twenty.**
+    ///
+    /// Invisible to every fixture that measured this, because they all had no
+    /// crates at all. A library manager's fixtures should hold some.
+    in_crates: BTreeMap<Id<Recording>, Vec<Id<Collection>>>,
 }
 
 impl Reach {
@@ -402,7 +412,27 @@ impl Reach {
             of_release,
             of_group,
             of_work,
+            in_crates: BTreeMap::new(),
         }
+    }
+
+    /// The crates half, which needs the catalogue's entries rather than the
+    /// spine — filled by the same fold, straight after.
+    fn and_crates(mut self, entries: &BTreeSet<(Id<Collection>, OrdKey, Id<Recording>)>) -> Self {
+        for (collection, _, recording) in entries {
+            let held: &mut Vec<_> = self.in_crates.entry(*recording).or_default();
+            // **Deduped here, because `crates_holding` deduped there.** A crate
+            // holding one recording twice — two slots on a compilation — is one
+            // answer to "which crates hold this".
+            if held.last() != Some(collection) && !held.contains(collection) {
+                held.push(*collection);
+            }
+        }
+        self
+    }
+
+    fn crates(&self, recording: Id<Recording>) -> Vec<Id<Collection>> {
+        self.in_crates.get(&recording).cloned().unwrap_or_default()
     }
 
     fn release(&self, id: Id<crate::model::entity::Release>) -> Vec<Id<Recording>> {
@@ -1142,7 +1172,7 @@ impl Librarian {
             .collect();
 
         // **After the spine and before anything reads it** — #287.
-        l.reach = Reach::of(&l.spine);
+        l.reach = Reach::of(&l.spine).and_crates(&l.collected);
         l.draw();
         l
     }
@@ -1379,15 +1409,9 @@ impl Librarian {
     }
 
     /// The collections holding this recording.
+    /// **A lookup, not a scan of every entry** — #289. See [`Reach::in_crates`].
     pub fn crates_holding(&self, recording: Id<Recording>) -> Vec<Id<Collection>> {
-        let mut out: Vec<_> = self
-            .collected
-            .iter()
-            .filter(|(_, _, r)| *r == recording)
-            .map(|(c, _, _)| *c)
-            .collect();
-        out.dedup();
-        out
+        self.reach.crates(recording)
     }
 
     /// How many subjects this concept is asserted of.
@@ -2350,6 +2374,86 @@ pub const UNKNOWN_ARTIST: &str = "Unknown Artist";
 
 #[cfg(test)]
 mod tests {
+
+    /// **A page costs the same whether the library has crates or not** — #289,
+    /// `just bench-crates`.
+    ///
+    /// The panel's **filed in** section asks `crates_holding` once per recording
+    /// the focus covers, and that scanned every entry in every crate. An artist
+    /// page was **15.9 µs with no crates, 269 µs with one, 6.1 ms with twenty**,
+    /// and the info panel rebuilds its page on every cursor move (#276).
+    ///
+    /// **This was invisible to every fixture that had measured the panel**,
+    /// because none of them had a crate in it — #285's and #287's included. A
+    /// library manager's benches should hold some, which is the reason this one
+    /// varies the crates and holds everything else still.
+    #[test]
+    fn a_page_does_not_cost_more_because_the_library_has_crates() {
+        use crate::model::focus::Focus;
+        use crate::model::instance::{Instance, Scanned};
+        use std::time::Instant;
+
+        let page = |crates: usize| {
+            let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
+            let scanned: Vec<Scanned> = (1..=2_000u16)
+                .map(|n| Scanned {
+                    audio: crate::audio_id::AudioId {
+                        scheme: 1,
+                        hash: u128::from(n),
+                    },
+                    title: format!("Track {n:04}"),
+                    artist: format!("Artist {:03}", n % 100),
+                    album: Some(format!("Album {:03}", n % 100)),
+                    album_artist: Some(format!("Artist {:03}", n % 100)),
+                    track: Some(n % 20),
+                    length_ms: 200_000,
+                    ..Default::default()
+                })
+                .collect();
+            i.ingest(100, &scanned);
+            let recordings: Vec<_> = i.catalogue().recordings.keys().copied().collect();
+            for c in 0..crates {
+                let name = format!("crate {c}");
+                let collection = Id::<Collection>::derived(name.as_bytes());
+                for r in &recordings {
+                    i.append_fact(
+                        200,
+                        crate::facts::Fact::CollectionEntryAdded {
+                            collection,
+                            recording: *r,
+                            ord: crate::model::ord::OrdKey::first(),
+                        },
+                    );
+                }
+            }
+            let l = Librarian::from_catalogue(&i.catalogue());
+            let artist = *l.reference.artists.keys().next().expect("an artist");
+            let entries = l.collected.len();
+            let t = Instant::now();
+            for _ in 0..20 {
+                std::hint::black_box(crate::model::about::of(&l, Focus::Artist(artist), &[]));
+            }
+            (entries, t.elapsed() / 20)
+        };
+
+        let (none, bare) = page(0);
+        let (many, filed) = page(20);
+        eprintln!("\n  {none:>6} entries   artist page {bare:>9.1?}");
+        eprintln!("  {many:>6} entries   artist page {filed:>9.1?}\n");
+
+        // The instrument: there really are crates in the second one, or this is
+        // one measurement compared with itself.
+        assert_eq!(none, 0, "the bare library has crate entries");
+        assert!(many > 10_000, "only {many} entries — not enough to be felt");
+
+        // The claim. Generous, because a bench is not a stopwatch — and the
+        // regression it guards was 380×, not 3×.
+        assert!(
+            filed < bare * 5,
+            "a page costs {filed:?} with {many} crate entries against {bare:?} with \
+             none — `filed_in` is scanning them"
+        );
+    }
 
     /// **`covers` must cost less than the scan it replaced** — #287,
     /// `just bench-reach`.

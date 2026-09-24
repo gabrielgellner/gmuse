@@ -248,6 +248,10 @@ bench-reveal:
 bench-panel:
     @just _bench the_info_window_costs_a_still_cursor_nothing
 
+# Show that a page costs the same with crates as without (#289). Runs in `ci`.
+bench-crates:
+    @just _bench a_page_does_not_cost_more_because_the_library_has_crates
+
 # Show that a focus reaches its recordings by lookup, not by scan (#287).
 bench-reach:
     @just _bench covers_costs_less_than_the_scan_it_replaced
