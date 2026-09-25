@@ -860,6 +860,75 @@ mod tests {
         );
     }
 
+    /// **An edit needs a refill and keeps the position; a replacement keeps neither** — #301.
+    ///
+    /// `mutating` said the window was stale and nothing said where to refill it from, so
+    /// every queue edit resynced to the *head*: a track queued with `E` was inserted
+    /// correctly, and then the window that would have played it was replaced by the
+    /// programme's first entry. Reproduced against a running engine — a natural track end
+    /// after an enqueue played entry 0 rather than the entry queued.
+    #[test]
+    fn an_edit_is_mutating_without_replacing_the_programme() {
+        let edit = Ask::Enqueue {
+            rows: Vec::new(),
+            anchor: None,
+            at: Placement::Next,
+            base: None,
+        };
+        assert!(edit.mutating(), "an enqueue must still refill the window");
+        assert!(
+            !edit.replaces_the_programme(),
+            "an enqueue threw the play position away"
+        );
+
+        // **The instrument, and it can fail while the claim holds**: the predicate is not a
+        // constant `false`, and `mutating` does not already answer this question — if both
+        // asks agreed, this would add nothing and the bug would be unfixed.
+        let replacement = Ask::Play {
+            rows: Vec::new(),
+            window: 3,
+            base: None,
+        };
+        assert!(replacement.mutating());
+        assert!(
+            replacement.replaces_the_programme(),
+            "a genuine replacement was reported as an edit"
+        );
+        assert_ne!(
+            edit.replaces_the_programme(),
+            replacement.replaces_the_programme(),
+            "both asks answer alike, so this says no more than `mutating` already did"
+        );
+    }
+
+    /// **Why the predicate is right**, asserted on the programme rather than on the predicate.
+    ///
+    /// The position is worth keeping after an edit because it is still *there*; after a
+    /// replace it is not, and the head is then the only honest answer.
+    #[test]
+    fn an_enqueue_keeps_the_sounding_token_and_a_replace_does_not() {
+        let mut p = Programme::of([row(1), row(2), row(3)]);
+        let sounding = p.entries()[0].token;
+
+        p.enqueue(Some(sounding), [row(9)], Placement::Next);
+        // The instrument first: an enqueue that did nothing would keep the token too.
+        assert_eq!(
+            p.len(),
+            4,
+            "nothing was enqueued, so keeping a token proves nothing"
+        );
+        assert!(
+            p.position(sounding).is_some(),
+            "an enqueue invalidated the token the engine is playing"
+        );
+
+        p.replace([row(5), row(6)]);
+        assert!(
+            p.position(sounding).is_none(),
+            "a replace kept a token it is documented to invalidate"
+        );
+    }
+
     /// **`head` includes the first entry**, and `after` excludes the one it is given —
     /// the two halves of a window, which must not overlap or the engine plays a track
     /// twice.
@@ -1095,6 +1164,45 @@ impl Ask {
             | Ask::Remove { .. } => true,
             Ask::Start { .. }
             | Ask::Tail { .. }
+            | Ask::Head { .. }
+            | Ask::After { .. }
+            | Ask::Before { .. }
+            | Ask::Look { .. } => false,
+        }
+    }
+
+    /// **Whether applying this throws the play position away** — #301.
+    ///
+    /// [`Ask::mutating`] says the window has to be refilled; this says from *where*. The two
+    /// are not the same question and answering only the first is what made `e` and `E` skip:
+    /// every queue edit resynced to the **head**, so the track a person had just queued was
+    /// replaced in the window by the programme's first entry.
+    ///
+    /// An ask that calls [`Programme::replace`] genuinely invalidates every token, so there
+    /// is no position left to keep and the head is the only honest answer. Everything else —
+    /// an enqueue, a removal, a reorder, a mode change — leaves the entry that is sounding
+    /// exactly where it was, and the window should be refilled *after* it.
+    ///
+    /// This is `resync` against `resync_here` in the engine, and that distinction already
+    /// exists: a fold that moved a locator learned it the hard way, and the docstring there
+    /// records eight skips walking **&ME → &ME → 16 Horsepower → Tujamo**. The mutation path
+    /// never asked the question.
+    pub fn replaces_the_programme(&self) -> bool {
+        match self {
+            // These call `Programme::replace`, so every token stops matching.
+            Ask::Play { .. } | Ask::Open { .. } | Ask::Rescope { .. } | Ask::Start { .. } => true,
+            // Edits: the sounding entry keeps its token and its place.
+            Ask::Push { .. }
+            | Ask::Enqueue { .. }
+            | Ask::RemoveAt { .. }
+            | Ask::Clear { .. }
+            | Ask::Reorder { .. }
+            | Ask::Shuffle { .. }
+            | Ask::SetMode(_)
+            | Ask::Insert { .. }
+            | Ask::Remove { .. } => false,
+            // Reads, which never reach the guard that calls this.
+            Ask::Tail { .. }
             | Ask::Head { .. }
             | Ask::After { .. }
             | Ask::Before { .. }

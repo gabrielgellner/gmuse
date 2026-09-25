@@ -76,6 +76,15 @@ pub enum Ask {
     /// one, so the mutation has to say so or the change would not take effect until the
     /// window ran dry two tracks later.
     Resync,
+    /// **The programme was edited, not replaced; refill from where we are** — #301.
+    ///
+    /// The distinction [`Resync`] does not draw. An enqueue, a removal, a reorder or a mode
+    /// change leaves the sounding entry exactly where it was, so asking for the head throws
+    /// away a position that is perfectly good — and, worse, replaces the window with the
+    /// programme's first track, which is what made a track queued with `E` never play.
+    ///
+    /// [`Resync`]: Ask::Resync
+    ResyncHere,
 }
 
 /// What is sounding, for a client that asked instead of waiting.
@@ -442,6 +451,10 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
             // next track rather than two tracks later.
             Ok(Ask::Resync) => {
                 held.queue.resync();
+                false
+            }
+            Ok(Ask::ResyncHere) => {
+                held.queue.resync_here();
                 false
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => false,

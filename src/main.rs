@@ -3227,6 +3227,9 @@ fn run_engine(
             use gmuse_proto::{RpcError, error::code};
 
             let mutating = ask.mutating();
+            // **Refill from where we are unless the programme was actually replaced** — #301.
+            // `mutating` says the window is stale; this says where to refill it from.
+            let replaces = ask.replaces_the_programme();
             let Some(reply) = self.desk.programme(ask) else {
                 return Err(RpcError::new(
                     code::INTERNAL,
@@ -3237,7 +3240,11 @@ fn run_engine(
             if mutating {
                 // Best effort: a control thread that has stopped ticking is a separate
                 // failure, and the mutation landed either way.
-                self.control.ask(gmuse::engine::control::Ask::Resync);
+                self.control.ask(if replaces {
+                    gmuse::engine::control::Ask::Resync
+                } else {
+                    gmuse::engine::control::Ask::ResyncHere
+                });
             }
 
             match reply {
