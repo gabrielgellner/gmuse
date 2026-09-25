@@ -495,6 +495,12 @@ pub struct PlaylistRow {
 }
 
 /// Everything the UI draws and navigates.
+/// What [`Ui::grouped`] is keyed by: the pane, the list's shape, and whether dividers are on.
+///
+/// The pane's title discriminates, because several panes draw track lists from different
+/// lists in one frame and a shared cache keyed only by length would hand one another's rows.
+pub type GroupedKey = (String, usize, Option<CopyId>, Option<CopyId>, bool);
+
 pub struct Ui {
     /// The windows, and which one has the keys — **what `view`, `levels`,
     /// `split` and `previous_view` became** (#275).
@@ -853,6 +859,25 @@ pub struct Ui {
             std::rc::Rc<crate::model::about::About>,
         )>,
     >,
+    /// **The album-divided screen rows, kept between frames** — #295.
+    ///
+    /// Grouping a list by album has to read **every** row to find the boundaries, and
+    /// `draw_track_list` did that on every frame: #261 windowed what the list *formats* and
+    /// left what it *groups* whole. In view 2 — `Levels::Flat`, one row a track — that is the
+    /// library, and it cost **659-743ms a keystroke** measured on 7,289 rows against 12.4µs
+    /// for the same frame with `album_headers` off.
+    ///
+    /// **And it could not hit the row cache it was filling.** `warm` asks only for what is
+    /// not held, but `KEEP` is 500 and `keep` *clears* rather than evicting when a chunk
+    /// would overflow it — so naming 7,289 rows in chunks of 200 wipes the cache every third
+    /// chunk and guarantees its own miss next frame, taking the tree's and the panel's rows
+    /// with it. That is the thrash `draw_track_list`'s comment noticed and attributed to the
+    /// per-row path it had already replaced.
+    ///
+    /// The key is `(pane, how many, first, last, headers on)`: enough to tell one pane's list
+    /// from another's and to notice a toggle, while `refresh_library` clears this on a refold
+    /// through the same door as [`Ui::about`] — so nothing here can outlive the names it drew.
+    pub grouped: std::cell::RefCell<Option<(GroupedKey, std::rc::Rc<Vec<list::Row>>)>>,
     /// Sections the reader has folded away, by title.
     ///
     /// **Keyed by title rather than by position**, so a fold survives
@@ -937,6 +962,7 @@ impl Ui {
             // and eleven hundred is not, and what a reader opened the panel
             // for is almost never the log. One keystroke opens it.
             about: std::cell::RefCell::new(None),
+            grouped: std::cell::RefCell::new(None),
             info_folded: [crate::model::about::FACTS.to_string()]
                 .into_iter()
                 .collect(),
@@ -5608,6 +5634,8 @@ pub fn refresh_library(ui: &mut Ui, ctx: &Context<'_>) {
     // the door every projection goes through after a refold — so the cache is
     // dropped here rather than in each of the places that cause one.
     ui.about.replace(None);
+    // **And the album grouping** (#295): its headers are names, so a refold can rename one.
+    ui.grouped.replace(None);
     // **And what the focus was resolved for** (#285): a refold can put a
     // different row under the same cursor index, so the marker is as stale as
     // the page above it.
@@ -8918,15 +8946,51 @@ fn draw_tracks(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: 
 /// index, so this is the one place the two coordinate systems meet — every
 /// other caller counts tracks.
 fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, spec: TrackList<'_>) {
-    let mut rows = if spec.divide && ui.album_headers {
-        // Grouping by album reads every row, so the whole list is named before the first one
-        // is asked for — one trip rather than one per row (#261).
-        ctx.library.ahead(spec.ids);
-        list::rows(ctx.library, spec.ids)
+    // **Grouped once and kept, not once a frame** — #295. Finding album boundaries reads every
+    // row, which is the library in view 2; see [`Ui::grouped`] for the measurement and for why
+    // the read-ahead could not hit its own cache.
+    let grouped: std::rc::Rc<Vec<list::Row>> = if spec.divide && ui.album_headers {
+        // Compared part by part, so a hit allocates nothing: only the miss below owns a title.
+        let same = |had: &GroupedKey| {
+            had.0 == spec.title
+                && had.1 == spec.ids.len()
+                && had.2 == spec.ids.first().copied()
+                && had.3 == spec.ids.last().copied()
+                && had.4
+        };
+        let hit = ui
+            .grouped
+            .borrow()
+            .as_ref()
+            .filter(|(had, _)| same(had))
+            .map(|(_, rows)| std::rc::Rc::clone(rows));
+        match hit {
+            Some(rows) => rows,
+            None => {
+                let key: GroupedKey = (
+                    spec.title.to_string(),
+                    spec.ids.len(),
+                    spec.ids.first().copied(),
+                    spec.ids.last().copied(),
+                    true,
+                );
+                // One trip rather than one per row (#261), and now once per list rather than
+                // once per frame.
+                ctx.library.ahead(spec.ids);
+                let built = std::rc::Rc::new(list::rows(ctx.library, spec.ids));
+                ui.grouped.replace(Some((key, std::rc::Rc::clone(&built))));
+                built
+            }
+        }
     } else {
-        spec.ids.iter().copied().map(list::Row::Track).collect()
+        std::rc::Rc::new(spec.ids.iter().copied().map(list::Row::Track).collect())
     };
+    // **The section marker is not cached**, because it moves independently of the grouping and
+    // is set on a search rather than a scroll — so the rare frame that has one pays a clone
+    // and the common frame keeps the shared list.
+    let mut sectioned: Option<Vec<list::Row>> = None;
     if let Some((at, ref text)) = spec.section {
+        let mut rows = (*grouped).clone();
         // Counted in tracks, then converted — the two coordinate systems meet
         // here, as they do for `selected` just below.
         let mut seen = 0usize;
@@ -8941,14 +9005,16 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
             })
             .unwrap_or(rows.len());
         rows.insert(screen_row, list::Row::Header(text.clone()));
+        sectioned = Some(rows);
     }
+    let rows: &[list::Row] = sectioned.as_deref().unwrap_or(&grouped);
     // **A screenful, not the list** — #261, and the same change the tree pane got. This built a
     // `ListItem` for every row and called `ctx.library.listed` once for each: fine while that
     // was a map lookup, and *four thousand socket round trips a frame* once the library moved
     // to the engine. The queue is where it showed, because "up next" is the whole projection
     // rather than a playlist — reported as the view being very laggy, and the tree being laggy
     // afterwards, which was this thrashing the row cache on the way past.
-    let at = list::row_of_track(&rows, spec.selected).unwrap_or(0);
+    let at = list::row_of_track(rows, spec.selected).unwrap_or(0);
     let height = view_height(area);
     let top = spec.scroll.window(at, rows.len(), height);
     let shown = &rows[top.min(rows.len())..(top + height).min(rows.len())];
@@ -18183,6 +18249,89 @@ mod tests {
         let (fg2, bg2) = cursor_row_colours(&ui, &ctx, &title);
         assert_eq!(fg2, Color::Green, "the cursor masked the playing mark");
         assert_eq!(bg2, bg, "the selection surface should be unchanged");
+    }
+
+    /// **The album grouping is computed once, not once a frame** — #295.
+    ///
+    /// Finding album boundaries reads every row, and view 2's list is the library: measured on
+    /// 7,289 rows it was **731ms a frame**, against 41ns through the cache and 13.7µs for the
+    /// same frame with the dividers off. The windowing #261 added covers what a list *formats*,
+    /// not what it *groups*.
+    #[test]
+    fn a_second_frame_reuses_the_album_grouping() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+        assert!(
+            ui.album_headers,
+            "the dividers are what costs, so they must be on"
+        );
+
+        // **The instrument**: nothing has grouped yet, so "the same list came back" below
+        // cannot hold for the wrong reason for ever.
+        assert!(
+            ui.grouped.borrow().is_none(),
+            "something had already grouped before the first frame"
+        );
+
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(90, 20)).unwrap();
+        terminal.draw(|f| draw(f, &ui, &ctx)).unwrap();
+        let first = ui
+            .grouped
+            .borrow()
+            .as_ref()
+            .map(|(_, rows)| std::rc::Rc::clone(rows))
+            .expect("the first frame did not group anything");
+
+        // **The second instrument, computed from the rows and not from the cache.** Dividers
+        // were really inserted, so the branch under test is the expensive one rather than the
+        // `else` that maps ids straight through — which would make the claim below trivial.
+        assert!(
+            first.len() > ui.library.sorted().len(),
+            "no dividers were built, so this is not the grouped path: {} rows for {} tracks",
+            first.len(),
+            ui.library.sorted().len()
+        );
+
+        terminal.draw(|f| draw(f, &ui, &ctx)).unwrap();
+        let second = ui
+            .grouped
+            .borrow()
+            .as_ref()
+            .map(|(_, rows)| std::rc::Rc::clone(rows))
+            .expect("the second frame dropped the grouping");
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "the second frame grouped the whole list again"
+        );
+    }
+
+    /// **A refold drops the grouping**, because its headers are names — #295.
+    ///
+    /// The dividers carry `file_under` and `album`, so a grouping kept across a refold would
+    /// draw the names the library used to have. It goes out through the same door as
+    /// [`Ui::about`] rather than at each of the places that cause one.
+    #[test]
+    fn a_refold_drops_the_album_grouping() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = ui_of(&store, true);
+        flat_view(&mut ui);
+
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(90, 20)).unwrap();
+        terminal.draw(|f| draw(f, &ui, &ctx)).unwrap();
+        // The instrument: there is something to drop, asserted before dropping it.
+        assert!(
+            ui.grouped.borrow().is_some(),
+            "nothing was cached, so clearing it proves nothing"
+        );
+
+        refresh_library(&mut ui, &ctx);
+        assert!(
+            ui.grouped.borrow().is_none(),
+            "the grouping survived a refold and can now draw stale names"
+        );
     }
 
     /// A pane that is not focused still shows where its cursor is, dimmed —
