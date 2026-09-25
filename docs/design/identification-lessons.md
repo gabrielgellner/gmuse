@@ -278,6 +278,7 @@ Kept because every rule above was written against a guess first and a measuremen
 14. Every line a pass declines to act on has to be visible in what it prints.
 15. **Prefer refusing to guessing** — a fold is the one thing this model cannot repair, and `library-api.md` §7 already
     says a library that accepts anything and marks it provisional fills with entries nobody will ever fix.
+16. A percentage over one item is not agreement — a gate's strength is a property of its input, not of the rule.
 
 ---
 
@@ -373,9 +374,52 @@ to protect it. Fold to ASCII through NFKD; do not strip.
 
 ---
 
-## 20. Related
+## 20. A gate's strength is a property of its input
+
+`ingest` accepts only an exact tracklist agreement, and that is a strong check because a tracklist is hard to match by
+accident. On a **one-track release it is one title compared to one title**, and it prints the same word it prints for
+thirteen:
+
+```text
+tracklist: exact (100%), 1 ours vs 1 theirs
+```
+
+Measured while bringing in four dangling singles on 2026-09-25. MusicBrainz returns nine releases for `Burn` / Ellie
+Goulding, of which **two are one-track and titled exactly `Burn`**; both score 100 and both satisfy `exact` identically.
+The pass took the first, which is **Withdrawn**. The other is **Official**, and `status` was in the same response that
+named the winner.
+
+**Identity survived it, and not by design.** Both pressings carry recording `87257b49`, and a recording is what a row
+hangs on, so the arbitrary choice was invisible. `Come With Me Now` landed the same way on a **Promotion** pressing. The
+verdict that reads strongest anywhere in the flow is, on this material, a coin flip that happened to land well twice.
+
+> **`exact` describes the comparison, not the evidence.** A percentage over one item carries no information, and a gate
+> cannot report confidence without also reporting how much there was to agree about.
+
+**This sharpens #163 rather than repeating it.** #163 observes that a one-track slice of a 100-track chart can never
+match a release, and concludes that an album-shaped miss now costs _effort_ rather than correctness, because the refusal
+is safe. The one-track _release_ is the other half of that shape and it does not refuse — it agrees, at full confidence,
+on almost nothing. A miss costs effort; a gate that cannot fail costs correctness. What kept that cost off the log here
+was #160's recording-id requirement downstream, not anything the gate did.
+
+**The independent axis was free and is unread.** The file's `TSRC` is `GBUM71303482`; MusicBrainz serves `isrcs` on a
+recording and holds exactly that for `87257b49`, against `GBUV71300663` for the rival 238s `Burn`. So the ISRC
+corroborates the winner and rejects the loser on an axis that is neither the name the search was made with nor the
+duration — the §2 and §19 property that makes an axis worth having. Nothing reads it: `isrc` does not appear in the Rust
+side at all, and `external` reads only Beatport and YouTube ids out of URL and comment frames, which is #100's
+shape-blindness turning up in a second field.
+
+**Measured before proposing it**, because the obvious use is the wrong one: of 600 sampled library files, **428 (71%)
+carry an ISRC** and 587 (98%) carry a MusicBrainz recording id, with only **5** holding an ISRC and no recording id. As
+a rung on #89's ladder it would earn five files. As corroboration for a thin match it can speak for 71% of the library.
+Those are different jobs, and the coverage number that matters is different for each.
+
+---
+
+## 21. Related
 
 #160 (what the ingest flow should be — the standing question this feeds) · #57 (AcoustID, the rung the ladder is
 missing) · #143 (a path is evidence, on the weakest rung) · #152, #157 (joined credits, in the artist field and the
-genre field) · #20, #51 (singles, which have no album-shaped stage to be refused by) · `library-api.md` §7 (the
-strictness that was written and not implemented)
+genre field) · #20, #51 (singles, which have no album-shaped stage to be _checked_ by — §20) · #163 (the album-shaped
+passes) · #100 (an id in a frame shape nothing reads) · `library-api.md` §7 (the strictness that was written and not
+implemented)

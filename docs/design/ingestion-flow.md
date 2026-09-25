@@ -65,12 +65,16 @@ label or anything else no authority holds.
 
 That makes the **step 2 / step 7 split visible as the problem it is.** `ingest` matches a whole _album_ and `identify`
 searches for a _recording_, and only the first runs before the declaration — so a single, a DJ-pool rip or a track
-sliced off a chart compilation walks past the album-shaped gate with nothing to catch it. `Till Dawn` is the worked case
-in §4: refused by every route here, and found at score 100 by one recording search. A refused file is not forgotten: its
-bytes are described and held and its tags' claim is recorded, so it appears on `shelf query --unidentified` as a row
-with an encoding, a locator and no recording. An ordinary `identified` proposal against that encoding catalogues it —
-from the claim, without re-reading the file. `identify propose` reads that list directly: a row with no recording is the
-ordinary case, and the proposal names the encoding either way.
+sliced off a chart compilation walks past the album-shaped gate with nothing to catch it.
+
+**And a single released _as_ a single does worse than walk past it: it is stamped.** A one-track release makes the
+tracklist check one title against one title, which prints `exact (100%)` — the flow's strongest verdict — on evidence
+that cannot distinguish two pressings of the same song. Measured in §5.2, and the lesson is `identification-lessons.md`
+§20. `Till Dawn` is the worked case in §4: refused by every route here, and found at score 100 by one recording search.
+A refused file is not forgotten: its bytes are described and held and its tags' claim is recorded, so it appears on
+`shelf query --unidentified` as a row with an encoding, a locator and no recording. An ordinary `identified` proposal
+against that encoding catalogues it — from the claim, without re-reading the file. `identify propose` reads that list
+directly: a row with no recording is the ordinary case, and the proposal names the encoding either way.
 
 ---
 
@@ -212,6 +216,28 @@ back to hand-work.
   directory to `.departed`, including thirty-one images and sleeve notes, leaving the FLAC album with no cover while
   every neighbouring album has one. Nothing is lost and it is reversible, which is §6 working; but a format swap wants
   the art to stay, and copying it across is hand work.
+
+- **A one-track tracklist cannot refuse anything, and says `exact` while not refusing.** This is the singles case of
+  #163, and it fails in the opposite direction to the one #163 describes: not a miss, but full confidence over one
+  comparison. Two one-track `Burn` pressings both satisfy it, and the pass took the **Withdrawn** one over the
+  **Official** one because MusicBrainz scored it first. `identification-lessons.md` §20 has the measurement and the free
+  second axis (`isrcs`) that nothing reads. Until something does, **assert the pressing by hand for a single** — the
+  `--release` escape hatch, used the way §5.1 says it should be, after looking at the release group.
+
+- **The fingerprint is the adjudicator for a single, and it cannot run until after the declaration.** Step 8 reads
+  `shelf query --unidentified`, so it is a post-import pass by construction. But for a one-track release the question
+  _which recording is this_ is sharpest **before** import, because that is the question step 2 just answered without
+  evidence. On `Rattle` it was decisive: AcoustID returned `ead84d80` (`Bingo Players — Rattle`, 287.0s, on 11 releases)
+  and `67c985f7` (`Bingo Players feat. Far East Movement — Get Up (Rattle) (original remix)`, 287.0s, on 1) —
+  **identical lengths**, so §12 separates nothing. What separated them was §4's rule that a credit is a list: ours has
+  one member. The same response also carried `Lana Del Rey — Video Games (Joy Orbison remix)` at 289s, a §19 bad link
+  the name check correctly refuses.
+
+- **`genre` has nothing to reach for on a single.** Discogs is reached through a MusicBrainz _release_ relationship, and
+  none of four single pressings had one — `source: current-only` on all four. So `Rattle` was filed with **no genre at
+  all** and `Come With Me Now` with **`Blues`**, both reported as "already correct", because the fallback compares
+  against what is already there and there was nothing better. Picking the Official pressing did not help; re-running
+  after the re-match produced the same four `current-only` rows. §4's release/genre coupling, in its null form.
 
 - **`rsgain` runs after import, and #140 means the library does not see it.** Step 6 is after step 5 for a good reason —
   album gain is computed per folder and import is what makes the folder. But writing ReplayGain is a retag, and a retag
@@ -360,8 +386,74 @@ entering at all.
 the first release I put through it was the pressing `ingest`'s own search had surfaced — a vinyl, for a digital
 download. The refusal was protecting against something real, and the escape hatch does not ask what the 15% was.
 
+## 5.2 Worked example: four dangling singles, September 2026
+
+The first run through with no album anywhere in it — four loose MP3s from 2014 off an external drive, which is the
+material #20 and #51 are about. All four entered and all four are correct. What follows is what that cost, because the
+flow's own verdicts were the least reliable part of it.
+
+```sh
+# 1. paths survey FIRST — and on one of the four it was the whole ballgame
+uv run gmuse-tools paths survey ~/staged-singles
+#    2 only-in-path: artist + title of the untagged file
+
+# 2. ingest — accepted two at `exact (100%)`, refused two, and the acceptances
+#    were worth less than the refusals (see §4, and identification-lessons §20)
+
+# 3. the two repairs nothing owns
+#    a) strip a DJ-pool `(Original Mix)` off one title   -> 0% becomes 100%
+#    b) promote the filename into tags on a file with none -> searchable at all
+
+# 4. fingerprint every one of them BY HAND, outside the flow, before importing
+# 5. assert the Official pressing with --release where step 2 took a worse one
+# 6. import, into the collection each one is actually for
+# 7. rsgain, then import again — a retag changes nothing (#140)
+```
+
+**Each file failed differently, and the four together cover the shape.**
+
+| file                        | what it arrived with                           | what step 2 did                              |
+| --------------------------- | ---------------------------------------------- | -------------------------------------------- |
+| `Ellie Goulding — Burn`     | full tags, ISRC, album `Burn - Single`         | `exact (100%)` onto a **Withdrawn** pressing |
+| `01 Stay`                   | full tags, but only a track number in the name | `exact (100%)`, and correct                  |
+| `Bingo players — Rattle`    | artist + title only, `(Original Mix)`          | `weak (0%)` — refused on the suffix          |
+| `KONGOS — Come With Me Now` | **no tags at all**, a DASH remux               | nothing to search with                       |
+
+**The untagged file is why step 1 is step 1.** Its artist and title existed only in its filename, `paths survey` named
+exactly that, and `shelf render` renamed it to `01 Come With Me Now.mp3` on the way in — so the evidence was consumed in
+the one window where it existed. Rule 9, on a file where the rule was the only thing standing between the library and a
+row with no name.
+
+**Two independent routes agreed on all four recordings**, which is the property worth having and the reason this run is
+recorded as correct rather than as done: the tracklist match reads _tags_ and the fingerprint reads _audio_, so their
+agreement is §1's corroboration rather than a rule agreeing with itself. Where they would have disagreed is the case
+step 2 cannot see, and on `Rattle` they very nearly did.
+
+**Six stages ran with no input**: `paths survey`, `tags survey` (4 already modern and alone), `genre propose`,
+`shelf import`, `rsgain`, and the re-import. **Five interventions were needed**, and only one was judgement — which
+collection. The other four were the gaps in §4: a title suffix, a file with no tags, a pressing asserted by hand twice,
+and a fingerprint run outside the flow that the flow only offers after import.
+
+**And #20's layout question got answered by accident.** `shelf render` filed each single as
+`{artist}/{title}/01 {title}.mp3` — a one-track album folder named after the song, which is none of #20's three
+candidate layouts. It also **sidesteps the `rsgain` trap #20 raises**: album gain is computed per folder, and a folder
+holding one track makes album gain equal track gain (`-10.89 dB` for both, on `Burn`), so `replaygain=auto` has nothing
+meaningless to average. That is worth deciding on purpose rather than inheriting.
+
+**One oddity, reported and not acted on.** The step 7 re-import printed
+`possibly already held: 1 track(s) are filed under "Kongos" / "Come With Me Now", and this is 1` followed by
+`No MusicBrainz id connects them, so this is a name agreeing with a name` — for a file whose `UFID` recording id it had
+written itself minutes earlier. Nothing acted on it, the hint is documented as a hint, and the row count moved by
+exactly +4 (7,283 → 7,287) with one encoding per recording. But the id-level arm of the already-held check did not
+connect a file to itself across a retag, which is either a deliberate exclusion of the file's own encoding or a gap, and
+nothing written down says which.
+
+---
+
 ## 6. Related
 
 `library-api.md` §7 (import is strict, and the pipeline that feeds it) · `layers.md` (who may call whom) ·
 `storage-layout.md` §10 (ingest renders on the way in) · #143 (paths first) · #140 (a retag changes nothing) · #62 (a
-second copy is reported, not swallowed) · #154 (naming an artist)
+second copy is reported, not swallowed) · #154 (naming an artist) · #20, #51 (singles, and the DJ crate at scale) · #163
+(the album-shaped passes) · #100 (an id in a frame shape nothing reads) · `identification-lessons.md` §20 (why `exact`
+on one track is not evidence)
