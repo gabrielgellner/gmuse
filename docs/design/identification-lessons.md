@@ -75,6 +75,26 @@ The same mistake appeared three times in one evening.
 
 > **A credit is a list. Comparing it as a string is comparing a spelling.**
 
+**And a tracklist is a list, which `ingest` compares as strings.** Its gate accepts only an exact agreement, and that
+strength is worth having; what it compares is spellings. Measured on a self-titled _Possessed by Paul James_ against the
+release MusicBrainz holds for it, **five of six differences were typography and one was content**:
+
+| ours                      | theirs                    | what differs          |
+| ------------------------- | ------------------------- | --------------------- |
+| `Warden's Wife`           | `Warden’s Wife`           | U+0027 against U+2019 |
+| `Men Men Men`             | `Men, Men, Men`           | commas                |
+| `Foot in Heaven/Hell`     | `Foot in Heaven / Hell`   | spaces around a slash |
+| `Diddly Bo Traditional`   | `Diddly Bo (traditional)` | parentheses and case  |
+| `Color of My Bloody Nose` | `Colorofmybloodynose`     | spaces                |
+| `Fiddle F**k Explicit`    | `Fiddle Fuck`             | **the title itself**  |
+
+The apostrophe is §19's fold arriving in a second place: `Lvis Mejía` needed NFKD rather than a strip, and so does this.
+Folding typography would leave the one difference that is a fact about the record — a store censored a word — and that
+is the difference a person should be shown. It would not have let this album in, because 13 tracks against 14 is not a
+spelling either; it would have stopped the gate from listing five non-problems beside the real one.
+
+> **Fold what the typographer chose; keep what the editor chose.**
+
 And the corollary that keeps it honest: **the separator does not carry the answer.** `Drum & Bass` is one genre and
 `Rock , Experimental` is two; `Itch-E & Scratch-E` is one act and `Armand Van Helden,Dizzee Rascal` is two. Of nine
 genre terms carrying a separator, **eight are legitimate compound names covering 502 files.** A rule that split them

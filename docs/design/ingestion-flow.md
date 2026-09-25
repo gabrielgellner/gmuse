@@ -14,19 +14,21 @@ library.
 ```
 a download arrives
   1. paths survey        read what only the filename knows        <- must be first
-  2. ingest apply        match the album to MusicBrainz, tag it
-  3. tags apply          one format: ID3v2.4, no ID3v1, no APE
-  4. genre propose/apply the `Broad; Style` convention
-  5. shelf import        catalogue, render, place                 <- the declaration
-  6. rsgain easy         ReplayGain, on the album in its final home
-  7. identify + apply    MusicBrainz for whatever step 2 missed
-  8. identify fingerprint what it sounds like, for what no name reached
-  9. joined + apply      is a credit one artist or several
- 10. version propose     which rendering of a song this is
- 11. ingest tracklist    what the record has, including what you do not
- 12. shelf slots --work
+  2. quality survey      what the bytes are, before you keep them
+  3. ingest apply        match the album to MusicBrainz, tag it
+  4. tags apply          one format: ID3v2.4, no ID3v1, no APE
+  5. genre propose/apply the `Broad; Style` convention
+  6. shelf import        catalogue, render, place                 <- the declaration
+  7. rsgain easy         ReplayGain, on the album in its final home
+  8. quality propose     record what the bytes are, keyed by encoding
+  9. identify + apply    MusicBrainz for whatever step 3 missed
+ 10. identify fingerprint what it sounds like, for what no name reached
+ 11. joined + apply      is a credit one artist or several
+ 12. version propose     which rendering of a song this is
+ 13. ingest tracklist    what the record has, including what you do not
+ 14. shelf slots --work
      + identify fingerprint  which recording is actually in each seat  <- listens twice
- 13. audit               what is still wrong
+ 15. audit               what is still wrong
 ```
 
 **Two orderings are load-bearing and both were learned by breaking them.**
@@ -39,31 +41,31 @@ unconfirmable.
 `rsgain` runs **after** `shelf import`, because it computes album gain per folder and import is what puts the album in
 its folder.
 
-**Step 5 measures the length, and every later step uses that one.** `audio_id` walks every audio packet to hash it, and
+**Step 6 measures the length, and every later step uses that one.** `audio_id` walks every audio packet to hash it, and
 each packet carries the duration of its own frames — so counting them is exact and costs nothing. Every pass that wants
 a duration reads it off the work list rather than asking a tagging library, which computes
 `size / first frame's bitrate` where a file has no Xing header: measured on this library, **34 files wrong by more than
 two seconds, one claiming 1735s for a 287s track**. Duration is what corroborates a MusicBrainz match and what buckets a
 duplicate candidate, so one bad number made a file both unidentifiable and undiscoverable.
 
-**Fingerprinting appears twice, and they are different questions.** At step 8 it asks _what is this_ — the rung for a
-file no name reached, which is why it runs after `identify` rather than instead of it. At step 12 it asks _which of
+**Fingerprinting appears twice, and they are different questions.** At step 10 it asks _what is this_ — the rung for a
+file no name reached, which is why it runs after `identify` rather than instead of it. At step 14 it asks _which of
 these two_ — a contested position (#168) is the one case a name cannot settle at all, because both claimants are called
 the same thing and sit on the same record. Measured over the first 80 such copies here, duration left **36 of 80
 undecidable** and a fingerprint identified 36, of which **16 moved the file to a different recording**.
 `shelf slots --work` emits exactly those copies in the shape `identify fingerprint` already reads.
 
-**Step 12 can only run after step 11**, for the reason step 6 runs after step 5: a position is not contested until a
-tracklist has said what belongs in it. On a clean import nothing reaches step 12 at all — five Die Antwoord albums went
-through this flow and produced no contested seat, because the album match at step 2 named all 57 files and nothing later
+**Step 14 can only run after step 13**, for the reason step 7 runs after step 6: a position is not contested until a
+tracklist has said what belongs in it. On a clean import nothing reaches step 14 at all — five Die Antwoord albums went
+through this flow and produced no contested seat, because the album match at step 3 named all 57 files and nothing later
 disagreed.
 
-**Step 5 now refuses what nothing has named** (#160). `shelf import` used to catalogue anything readable and rest on
+**Step 6 now refuses what nothing has named** (#160). `shelf import` used to catalogue anything readable and rest on
 `Basis::Audio` whatever carried no MusicBrainz id — which is how 479 recordings arrived on their bytes in a single run.
 It refuses instead, printing `artist`, `title` and the path for each, and `--unidentified` is the door out for a white
 label or anything else no authority holds.
 
-That makes the **step 2 / step 7 split visible as the problem it is.** `ingest` matches a whole _album_ and `identify`
+That makes the **step 3 / step 9 split visible as the problem it is.** `ingest` matches a whole _album_ and `identify`
 searches for a _recording_, and only the first runs before the declaration — so a single, a DJ-pool rip or a track
 sliced off a chart compilation walks past the album-shaped gate with nothing to catch it.
 
@@ -144,7 +146,7 @@ A recording with no MusicBrainz id is minted from its **audio bytes**. A second 
 to replace an MP3, a re-rip, a friend's copy — hashes differently by design, so it becomes a **second recording**
 carrying its own ratings and plays.
 
-That is what makes step 2 matter more than it looks. Five FLAC albums brought in without it produced **67 new recordings
+That is what makes step 3 matter more than it looks. Five FLAC albums brought in without it produced **67 new recordings
 for music the library already had**. Retagging both copies from one MusicBrainz release turned 30 of them into what they
 actually are: **one recording, two encodings**, which is the shape `library-api.md` §2.1 settled on for `replace`.
 
@@ -224,9 +226,9 @@ back to hand-work.
   second axis (`isrcs`) that nothing reads. Until something does, **assert the pressing by hand for a single** — the
   `--release` escape hatch, used the way §5.1 says it should be, after looking at the release group.
 
-- **The fingerprint is the adjudicator for a single, and it cannot run until after the declaration.** Step 8 reads
+- **The fingerprint is the adjudicator for a single, and it cannot run until after the declaration.** Step 10 reads
   `shelf query --unidentified`, so it is a post-import pass by construction. But for a one-track release the question
-  _which recording is this_ is sharpest **before** import, because that is the question step 2 just answered without
+  _which recording is this_ is sharpest **before** import, because that is the question step 3 just answered without
   evidence. On `Rattle` it was decisive: AcoustID returned `ead84d80` (`Bingo Players — Rattle`, 287.0s, on 11 releases)
   and `67c985f7` (`Bingo Players feat. Far East Movement — Get Up (Rattle) (original remix)`, 287.0s, on 1) —
   **identical lengths**, so §12 separates nothing. What separated them was §4's rule that a credit is a list: ours has
@@ -239,7 +241,7 @@ back to hand-work.
   against what is already there and there was nothing better. Picking the Official pressing did not help; re-running
   after the re-match produced the same four `current-only` rows. §4's release/genre coupling, in its null form.
 
-- **`rsgain` runs after import, and #140 means the library does not see it.** Step 6 is after step 5 for a good reason —
+- **`rsgain` runs after import, and #140 means the library does not see it.** Step 7 is after step 6 for a good reason —
   album gain is computed per folder and import is what makes the folder. But writing ReplayGain is a retag, and a retag
   behind the library's back changes nothing: the loudness reaches the log only when the album is named to `shelf import`
   again. §5 does exactly that for tags and the step list does not say to do it for gain.
@@ -276,6 +278,68 @@ back to hand-work.
   The fingerprint one is the worst of them: _nothing has linked this audio_ is the finding that rung exists to produce,
   so a silence could manufacture the conclusion the pass is trusted for. `joined`'s is next, because it memoises per
   name — one throttle stood for that artist for the rest of the run.
+
+- **~~The spectral measurement was in no step of this list.~~** Fixed above, and recorded because of what the absence
+  cost: `quality` was mentioned nowhere in this document — not the order, not the table, not the gaps — while
+  `CLAUDE.md` says in as many words that **the measurement is the record**. The two halves go in different places:
+  `quality survey` reads bytes on disk, so it can refuse a bad file **before** it is kept; `quality propose` measures
+  library copies and is keyed by encoding, so it has to come after the declaration.
+
+  **And putting it in the list is not enough to make it run** — the next bullet is why: the seventeen files imported on
+  2026-09-25 are still `cutoff_hz=None` after step 8 was run over the whole library.
+
+- **`quality propose` cannot see the music that was just imported, and calls it "nothing to measure".** It asks the
+  library for every copy and skips a row carrying no locator, on sound reasoning: nothing here holds a copy, so there is
+  nothing to measure, and a missing measurement and a measurement of nothing are different facts. But the view it asks
+  is not the one `shelf query` answers from, and the two disagree about holdings:
+
+  | asked of                          | Possessed by Paul James | Ellie Goulding        |
+  | --------------------------------- | ----------------------- | --------------------- |
+  | `shelf query --every-copy` (Rust) | 25 rows, 25 locators    | 1 row, 1 locator      |
+  | `lib.query(every_copy=True)` (py) | 25 rows, **0 locators** | 1 row, **0 locators** |
+
+  Measured: **361 of 7,542 rows carry no locator** in the view `quality propose` reads, and every one of the seventeen
+  files imported that day is among them — so a full pass proposed **7,181 measurements, 0 new, 7,181 already known**,
+  and the music it was run for was not in it. Nor is it only new music: Billy Bragg, Bob Dylan and Bruce Springsteen
+  rows sit in the 361 while `shelf query` locates all of theirs.
+
+  **The skip is silent and indistinguishable from a real one.** `361 row(s) had nothing to measure` is the same sentence
+  for a file that could not be decoded and a file the view cannot see, so the stage reports success and the rows stay
+  unmeasured with nothing to surface them. `quality survey` measures the same thirteen files in seconds, because it is
+  handed a directory and never asks the library where anything is.
+
+- **`quality propose` also takes no work list, so bringing in one album re-asks the whole library.** By design — a
+  measurement is keyed by an encoding (#183, #198), and `--analyser` is what makes a re-measure find stale rows. The
+  effect at ingest time is that step 8 for a 13-track album is a pass over every copy the library holds: about fourteen
+  minutes here, against seconds for `quality survey` on the thirteen. The stage is right and its granularity is wrong
+  for this position in the order.
+
+- **No stage will take an album you have most of.** MusicBrainz's only self-titled _Possessed by Paul James_ has 14
+  tracks; the download has 13, and the 14th is `[unknown]`. `ingest` refuses at `close (86%)`, and asserting the release
+  refuses harder — **`REFUSED — the track counts differ, which no override should paper over`**, which is right, because
+  positional track numbers from a 14-track release could land on the wrong 13 files. So `--release` is not the escape
+  hatch here, and there is no other.
+
+  What worked was outside the flow: fingerprint all 13, check the recordings against the release, and write 13
+  `identified` proposals. All 13 returned exactly one candidate at 0.92-0.93 with durations inside half a second, and
+  they are tracks 1-13 **in order** — so the answer was never in doubt and no stage could act on it. §5.3 is the run.
+
+- **A refusal for want of an identity is the door, and it is a good one.** `shelf import` refused all 13 and still held
+  their bytes and recorded their tags' claim, which put them on `shelf query --unidentified` with an encoding and a
+  locator and **no recording minted**. So the partial album never needed `--unidentified` and nothing rested on its
+  bytes. This is the one part of the above that the flow does describe, and it did exactly what it says.
+
+- **An `identified` proposal binds an identity and asserts no credit.** After applying the 13, every row had the right
+  MusicBrainz recording, its title and a displayed artist — and `--filter 'artist="Possessed by Paul James"'` returned
+  **12**, the album's 13 invisible, because the filter resolves through credits and `RecordingCatalogued` is not one.
+  The credit arrived only with the import that followed. So the state between an identification and the next import is
+  catalogued and unbrowsable, which is #154's shape reached from the other side.
+
+- **`shelf import` reports "resting on their bytes" for files whose binding held.** Re-importing the 13 after they were
+  identified printed `13 resting on their bytes, 0 confirmed` and then placed them correctly, with the MusicBrainz ids
+  intact and no second row: the count describes **what the tags claimed**, not what landed, and the binding somebody
+  already made is what actually won (§5). It is the one number a person checks to see whether an import went well, and
+  on every re-import of a file identified out of band it reads as a failure that did not happen.
 
 - **Choosing a release means choosing a medium, and the tool shows the tracklist.** _Classics_ has twenty pressings in
   its release group. `ingest`'s own search surfaced a 2×12" vinyl at 85%, and asserting it with `--release` wrote
@@ -447,6 +511,53 @@ written itself minutes earlier. Nothing acted on it, the hint is documented as a
 exactly +4 (7,283 → 7,287) with one encoding per recording. But the id-level arm of the already-held check did not
 connect a file to itself across a retag, which is either a deliberate exclusion of the file's own encoding or a gap, and
 nothing written down says which.
+
+---
+
+## 5.3 Worked example: an album you have 13 of 14 of, September 2026
+
+_Possessed by Paul James_, self-titled, bought from the same store as §5.1's _Feed the Family_ and carrying the same
+`(Explicit)` marker on the folder. It went in correctly and **no stage could take it** — every route through §1 refused,
+each for a defensible reason.
+
+```sh
+# 1. paths survey — 2 differs, both filesystem substitutions, tag right both times
+#    `Fiddle F**k` -> `F__k`, `Foot in Heaven/Hell` -> `Heaven_Hell`
+
+# 2. quality survey — 13 of 13 `no sharp cutoff`, cliffs 6-13 dB. Real lossless.
+
+# 3. ingest — found the right release unaided and refused
+#    tracklist: close (86%), 13 ours vs 14 theirs
+#    ingest --release <id>  ->  REFUSED — the track counts differ
+
+# 4. fingerprint all 13 by hand, and check them against the release
+#    13/13 one candidate each, 0.92-0.93, tracks 1-13 in order
+
+# 5. shelf import --write  ->  13 refused for want of an identity,
+#    bytes held, claims recorded, on the work list, nothing on bytes
+# 6. shelf apply 13 `identified` proposals  ->  the recordings are MusicBrainz's
+# 7. shelf import --write again  ->  places them AND asserts the credits
+# 8. rsgain, genre, import once more for #140
+```
+
+**The `(Explicit)` trap did not repeat, and that is the point.** §5.1 stripped a suffix welded into twelve of twelve
+titles, and §4 says the uniformity is what licensed it. Here the album **tag** is clean — `Possessed by Paul James`, the
+marker is on the folder only — and just **one of 13** titles carries it: `Fiddle F**k Explicit`, censored by the store
+against MusicBrainz's `Fiddle Fuck`. A rule that had learned §5.1's lesson too well would have stripped a word off a
+title that means it.
+
+**Five of the six tracklist differences were typography.** `Warden's` against `Warden’s`, `Men Men Men` against
+`Men, Men, Men`, `Foot in Heaven/Hell` against `Foot in Heaven / Hell`, `Diddly Bo Traditional` against
+`Diddly Bo (traditional)`, `Color of My Bloody Nose` against `Colorofmybloodynose`. One — the censored title — was
+content. See `identification-lessons.md` §4: the comparison is reading spellings.
+
+**The count is the part no fold can fix.** 13 against 14 is not a spelling, and the missing track is MusicBrainz's
+`[unknown]` — a hidden track this copy does not have. Even a perfect title match could never reach `exact`, which is why
+`--release` was reached for and why refusing it was right.
+
+**What a person did, and what nothing owns:** unpacking, running the fingerprint, checking 13 recordings against a
+release, and writing the proposals. The judgement was one decision — the collection — plus merging the artist first,
+which held.
 
 ---
 
