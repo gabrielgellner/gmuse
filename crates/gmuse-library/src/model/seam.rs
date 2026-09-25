@@ -2067,12 +2067,15 @@ impl crate::model::rows::Listing for Librarian {
         crate::model::about::label_of(self, focus)
     }
 
+    /// **Whatever the caller read**, because a `Librarian` has no log — #256 gave
+    /// it to the `Desk`. `Shown` with an empty slice therefore means "open, and
+    /// nothing happened", which is the honest answer here.
     fn about(
         &self,
         focus: crate::model::focus::Focus,
-        happened: &[Happened],
+        history: crate::model::about::History<'_>,
     ) -> crate::model::about::About {
-        crate::model::about::of(self, focus, happened)
+        crate::model::about::of(self, focus, history.given())
     }
 
     /// Whether any narrower-of edge places a concept on this axis.

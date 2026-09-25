@@ -627,7 +627,7 @@ mod tests {
         focus: Focus,
     ) -> About {
         let happened = l.facts_about(records, focus);
-        l.about(focus, &happened)
+        l.about(focus, History::Shown(&happened))
     }
 
     fn library() -> (
@@ -885,7 +885,7 @@ mod tests {
     #[test]
     fn the_history_is_built_only_when_it_is_asked_for() {
         let (l, recording, _records) = library();
-        let without = l.about(Focus::Recording(recording), &[]);
+        let without = l.about(Focus::Recording(recording), History::Folded);
         assert!(rows(&without, FACTS).is_empty(), "it was built anyway");
         assert!(
             without.sections.iter().any(|s| s.title == FACTS),
@@ -939,7 +939,7 @@ mod tests {
                 .expect("no keep row")
         };
 
-        let source = l.about(Focus::Encoding(flac), &[]);
+        let source = l.about(Focus::Encoding(flac), History::Folded);
         assert!(
             keep(&source).starts_with("yes"),
             "the acquired file read as disposable: {}",
@@ -954,7 +954,7 @@ mod tests {
             "the original does not name what was made from it"
         );
 
-        let made = l.about(Focus::Encoding(opus), &[]);
+        let made = l.about(Focus::Encoding(opus), History::Folded);
         assert!(
             keep(&made).starts_with("no"),
             "the derived copy read as irreplaceable: {}",
@@ -977,7 +977,7 @@ mod tests {
     fn a_file_with_no_source_is_kept() {
         let (l, _, _records) = library();
         let only = l.every_copy()[0];
-        let about = l.about(Focus::Encoding(only), &[]);
+        let about = l.about(Focus::Encoding(only), History::Folded);
         assert!(rows(&about, "what it is").iter().any(|r| matches!(
             r,
             Row::Fact { label, value } if label == "keep" && value.starts_with("yes")
@@ -1076,7 +1076,7 @@ mod perf {
             .into_iter()
             .map(|focus| {
                 let t = std::time::Instant::now();
-                let about = l.about(focus, &[]);
+                let about = l.about(focus, History::Folded);
                 let took = t.elapsed();
                 eprintln!(
                     "  {:<12} {took:>9.1?}  ({} sections)",
@@ -1109,6 +1109,47 @@ pub enum Found {
     /// only report it — the names alone would make the picker go and find them
     /// again, which is a second search that could disagree with the first.
     Several(Vec<(Focus, String)>),
+}
+
+/// **Whether a page carries its history** — #256, #293.
+///
+/// The history used to be a `bool` and the rows came from `Librarian.records`; #256
+/// gave the log to the `Desk`, so the caller reads it and hands it in. That works
+/// until the caller has no log: an attached view's log is the *engine's*, and
+/// `Remote::about` ignored the argument and had the engine read its own.
+///
+/// **Which meant the engine read the log whether or not the panel was showing
+/// it.** The section is folded by default, so an attached view paid for history
+/// nobody was looking at, on every page build — #256's cost, reintroduced over
+/// the wire because the wire could not say "not the history".
+///
+/// So the caller says which of two things is true, and each side of the seam does
+/// what it can: the one holding the log reads it, the one that was handed it uses
+/// what it was given.
+#[derive(Debug, Clone, Copy)]
+pub enum History<'a> {
+    /// The facts section is folded. Nobody will read it, so nobody should.
+    Folded,
+    /// The section is open. The slice is what the **caller's** log said, and is
+    /// empty when the caller has no log to read — which is an attached view, and
+    /// is why this is not simply a slice.
+    Shown(&'a [crate::model::seam::Happened]),
+}
+
+impl<'a> History<'a> {
+    /// What the caller handed in, or nothing.
+    pub fn given(self) -> &'a [crate::model::seam::Happened] {
+        match self {
+            History::Folded => &[],
+            History::Shown(h) => h,
+        }
+    }
+
+    /// Whether the section is open, which is all a remote implementation can
+    /// act on: it has no log of its own to hand over.
+    pub fn is_shown(self) -> bool {
+        matches!(self, History::Shown(_))
+    }
 }
 
 /// Resolve a name to a thing — #129.

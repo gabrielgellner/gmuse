@@ -455,16 +455,21 @@ pub trait Listing {
     /// and `about` is the expensive one.
     fn label_of(&self, focus: crate::model::focus::Focus) -> String;
 
-    /// **The history is handed in, not found here** — #256.
+    /// **The history is handed in, not found here** — #256, and the caller says
+    /// whether it is wanted at all — #293.
     ///
     /// It used to be a `bool`, and the rows came from `Librarian.records` — a clone of
     /// the whole log carried by every fold so that this one surface could read it. The
-    /// log's owner answers now (`Desk::history`), and an empty slice is a caller that
-    /// did not ask.
+    /// log's owner answers now (`Desk::history`).
+    ///
+    /// A slice alone could not carry the *question*, only an answer: an attached view
+    /// has no log to read, so it passed an empty one and the engine read its own
+    /// regardless — including when the section was folded, which is the default. See
+    /// [`crate::model::about::History`].
     fn about(
         &self,
         focus: crate::model::focus::Focus,
-        happened: &[crate::model::seam::Happened],
+        history: crate::model::about::History<'_>,
     ) -> crate::model::about::About;
 
     /// Does this facet have a hierarchy to climb? — #79.

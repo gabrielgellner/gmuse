@@ -6905,11 +6905,20 @@ pub fn info_about(ui: &Ui, ctx: &Context<'_>) -> Option<std::rc::Rc<crate::model
     } else {
         Vec::new()
     };
+    // **The question, not only the answer** — #293. `Folded` is what stops an
+    // attached view paying for a log read nobody is looking at; `Shown` with an
+    // empty slice is "open, and this side has no log to read from", which is an
+    // attached view and is the case the engine answers for itself.
+    let asked = if history {
+        crate::model::about::History::Shown(&happened)
+    } else {
+        crate::model::about::History::Folded
+    };
     let built = Instant::now();
     let about = std::rc::Rc::new(crate::model::rows::Listing::about(
         ctx.library,
         focus,
-        &happened,
+        asked,
     ));
     // **Only when it was actually built**, so a slow frame's line can say
     // whether the page was the reason — #291.
@@ -7771,7 +7780,11 @@ fn under_cursor(
         else {
             return Err("this album names no recording — nothing to say about it".to_string());
         };
-        let about = crate::model::rows::Listing::about(listing, Focus::Recording(recording), &[]);
+        let about = crate::model::rows::Listing::about(
+            listing,
+            Focus::Recording(recording),
+            crate::model::about::History::Folded,
+        );
         let group = about
             .sections
             .iter()
@@ -20392,9 +20405,9 @@ mod a_pane_asks_for_a_screenful {
         fn about(
             &self,
             focus: crate::model::focus::Focus,
-            happened: &[crate::model::seam::Happened],
+            history: crate::model::about::History<'_>,
         ) -> crate::model::about::About {
-            self.inner.about(focus, happened)
+            self.inner.about(focus, history)
         }
         fn places(&self, facet: crate::model::id::Id<crate::model::entity::Facet>) -> bool {
             self.inner.places(facet)

@@ -791,15 +791,20 @@ impl crate::model::rows::Listing for Remote {
         .unwrap_or_default()
     }
 
+    /// **The history is the engine's to read, and the panel's to ask for** —
+    /// #293.
+    ///
+    /// A claim's basis is the library's to state (`info-panel.md`), so this side
+    /// never hands one over. What it *can* say is whether the section is open —
+    /// and until #293 it could not, so the engine read the log on every page
+    /// build including the folded default. `--log` measured that at 116 ms a
+    /// frame.
     fn about(
         &self,
         focus: crate::model::focus::Focus,
-        _happened: &[crate::model::seam::Happened],
+        history: crate::model::about::History<'_>,
     ) -> crate::model::about::About {
-        // **The history is the engine's**, not this side's. A claim's basis is the library's to
-        // state (`info-panel.md`), and a panel handed one could be handed a different one — so
-        // the argument is ignored here and the engine reads its own.
-        self.about_of(focus).0
+        self.about_of(focus, history.is_shown()).0
     }
 
     fn places(&self, facet: Id<crate::model::entity::Facet>) -> bool {
@@ -967,7 +972,11 @@ impl Remote {
         .unwrap_or((None, None))
     }
 
-    fn about_of(&self, focus: crate::model::focus::Focus) -> (crate::model::about::About, String) {
+    fn about_of(
+        &self,
+        focus: crate::model::focus::Focus,
+        history: bool,
+    ) -> (crate::model::about::About, String) {
         let empty = || crate::model::about::About {
             kind: String::new(),
             title: String::new(),
@@ -976,7 +985,10 @@ impl Remote {
         };
         self.read(
             "query.about",
-            serde_json::json!({ "focus": serde_json::to_value(focus).unwrap_or_default() }),
+            serde_json::json!({
+                "focus": serde_json::to_value(focus).unwrap_or_default(),
+                "history": history,
+            }),
         )
         .map(|r| {
             let at = |key: &str| r.get(key).cloned().unwrap_or(serde_json::Value::Null);

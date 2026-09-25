@@ -3598,15 +3598,28 @@ fn run_engine(
                         "chosen": lib.chosen(recording, &here, &[]),
                     })
                 }
-                Request::QueryAbout { focus } => {
+                Request::QueryAbout { focus, history } => {
                     let focus = serde_json::from_value(focus)
                         .map_err(|e| RpcError::invalid_params("focus", e.to_string()))?;
                     // **The history comes from here, not from the client.** A claim's basis is
                     // the library's to state (`info-panel.md`), and a panel that was handed one
                     // could be handed a different one.
-                    let happened = self.desk.history(focus);
+                    //
+                    // **But only when the panel is showing it** — #293. The section is folded by
+                    // default, and reading the log for a page nobody has unfolded was 116 ms a
+                    // frame on an attached view, measured with `--log`.
+                    let happened = if history {
+                        self.desk.history(focus)
+                    } else {
+                        Vec::new()
+                    };
+                    let asked = if history {
+                        gmuse::model::about::History::Shown(&happened)
+                    } else {
+                        gmuse::model::about::History::Folded
+                    };
                     serde_json::json!({
-                        "about": lib.about(focus, &happened),
+                        "about": lib.about(focus, asked),
                         "label": lib.label_of(focus),
                     })
                 }

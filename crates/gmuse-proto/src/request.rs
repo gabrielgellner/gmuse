@@ -230,7 +230,18 @@ pub enum Request {
         here: Vec<String>,
     },
     /// **What the library says about one thing, and who said it** — `info-panel.md`, #261.
-    QueryAbout { focus: serde_json::Value },
+    ///
+    /// `history` says whether the panel is *showing* the facts section — #293. It
+    /// is not a client offering its own basis, which stays the library's to state:
+    /// it is the one thing only the client knows, and without it the engine read
+    /// the log on every page build including the folded default.
+    ///
+    /// Absent means `false`, so a client from before #293 stops paying for a log
+    /// read it never displayed rather than losing rows it was showing.
+    QueryAbout {
+        focus: serde_json::Value,
+        history: bool,
+    },
     /// **What to call one thing, without building the page about it** — #292.
     ///
     /// `Listing::label_of` exists locally for exactly this reason (#128): a
@@ -914,9 +925,14 @@ impl Request {
                 #[derive(Deserialize)]
                 struct P {
                     focus: serde_json::Value,
+                    #[serde(default)]
+                    history: bool,
                 }
                 let p: P = typed(method, params)?;
-                Ok(Self::QueryAbout { focus: p.focus })
+                Ok(Self::QueryAbout {
+                    focus: p.focus,
+                    history: p.history,
+                })
             }
             method::QUERY_LABEL => {
                 #[derive(Deserialize)]

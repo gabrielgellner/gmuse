@@ -55,7 +55,11 @@ fn main() {
     println!("  facts_about over those     {walked_few:>9.1?}");
 
     let t = std::time::Instant::now();
-    let about = gmuse::model::rows::Listing::about(&library, focus, &happened);
+    let about = gmuse::model::rows::Listing::about(
+        &library,
+        focus,
+        gmuse::model::about::History::Shown(&happened),
+    );
     let assembled = t.elapsed();
 
     println!(

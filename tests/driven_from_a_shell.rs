@@ -4610,8 +4610,9 @@ fn a_remote_read_answers_what_a_local_one_does() {
         !local.label_of(focus).is_empty(),
         "an unlabelled thing agrees with anything"
     );
-    let mine = local.about(focus, &[]);
-    let theirs = remote.about(focus, &[]);
+    use gmuse::model::about::History;
+    let mine = local.about(focus, History::Folded);
+    let theirs = remote.about(focus, History::Folded);
     assert_eq!(theirs.title, mine.title, "the panel titles differ");
     assert_eq!(theirs.kind, mine.kind, "the panel kinds differ");
     assert!(
@@ -4622,6 +4623,31 @@ fn a_remote_read_answers_what_a_local_one_does() {
         theirs.sections.len(),
         mine.sections.len(),
         "the panels have different numbers of sections"
+    );
+
+    // **Folded means the log is not read, and open means it is** — #293. The
+    // engine is the only side that can read it for an attached view, so the
+    // client says which, and this is the assertion that says the flag is
+    // carried rather than defaulted.
+    let shown = remote.about(focus, History::Shown(&[]));
+    let rows = |a: &gmuse::model::about::About| -> usize {
+        a.sections
+            .iter()
+            .find(|s| s.title == gmuse::model::about::FACTS)
+            .map_or(0, |s| s.rows.len())
+    };
+    // The instrument: there is something in this recording's history to find,
+    // or "open has more than folded" is two zeroes agreeing.
+    assert!(
+        rows(&shown) > 0,
+        "the log says nothing happened to this recording, so asking changes nothing"
+    );
+    assert_eq!(
+        rows(&theirs),
+        0,
+        "a folded facts section came back with {} rows — the engine read the log \
+         for a section nobody is looking at",
+        rows(&theirs)
     );
 }
 
