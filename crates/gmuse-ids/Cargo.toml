@@ -1,6 +1,6 @@
 [package]
 name = "gmuse-ids"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "What the catalogue's things are called, and what they are"

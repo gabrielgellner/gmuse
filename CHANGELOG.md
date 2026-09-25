@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-09-25
+
+### Performance
+
+- The panel says whether it is showing the history — #293 ([`83902e3`](https://gitlab.com/gabrielgellner/gmuse/-/commit/83902e33e971d96f9f4832c691956d591d8cf322))
+
 ## [0.2.0] - 2026-09-24
 
 ### Bug Fixes
@@ -628,6 +634,8 @@ All notable changes to this project will be documented in this file.
 - The accounting counter is global, so its window is one ([`b4a6c72`](https://gitlab.com/gabrielgellner/gmuse/-/commit/b4a6c723d9cc4f739120852d3452553ca6d257fd))
 - What two processes cost at rest, measured against the target ([`8ea3290`](https://gitlab.com/gabrielgellner/gmuse/-/commit/8ea329093b20f042081144064dca7875638ef097))
 - Which facts change the past, and the net for an incremental fold ([`a5f1102`](https://gitlab.com/gabrielgellner/gmuse/-/commit/a5f11025478a3aa22e207a2e3b04bc68f9faa20f))
+
+[0.2.1]: https://gitlab.com/gabrielgellner/gmuse/-/compare/v0.2.0...v0.2.1
 
 [0.2.0]: https://gitlab.com/gabrielgellner/gmuse/-/compare/v0.1.0...v0.2.0
 
