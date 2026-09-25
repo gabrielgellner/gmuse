@@ -1577,6 +1577,93 @@ fn a_restored_queue_reaches_an_engine_that_has_none() {
     );
 }
 
+/// **A queue edit refused as stale is still owed** — #294.
+///
+/// The version is optimistic concurrency: a refusal means the engine applied *nothing*.
+/// `queue.enqueue` treated it as a failure and dropped the rows, so a keypress landed
+/// nowhere and said so in a status line that the next frame overwrote — reported as "even
+/// when I do `E` it is not playing, or queueing", with
+/// `refused: the engine refused: the queue is at version 4 (1001)` in the session log.
+///
+/// **An append is the same append against a later version**, which is what makes the retry
+/// sound and is why `queue.set` does not get one.
+#[test]
+fn an_enqueue_refused_as_stale_is_retried_and_lands() {
+    let (engine, recording) = start_with_a_track("stale-enqueue");
+    let data = engine.dir.join("xdg").join("gmuse");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+
+    let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+    let device = gmuse::model::id::Id::derived(machine.as_bytes());
+    let desk = gmuse::librarian::Desk::read_only(Default::default(), device, 0, data.clone());
+    let held = desk.current();
+    let ctx = gmuse::ui::Context {
+        library: &held.library,
+        player: None,
+        gapless: None,
+    };
+    let row = gmuse::model::rows::Listing::rows(&held.library)
+        .into_iter()
+        .find(|id| {
+            gmuse::model::rows::Listing::recording_of(&held.library, *id).map(|x| x.to_string())
+                == Some(recording.to_string())
+        })
+        .expect("the imported row");
+
+    let mut ui = gmuse::ui::Ui::new(Default::default());
+    ui.engine = Some(std::sync::Arc::clone(&client));
+    gmuse::ui::read_the_queue(&mut ui, &ctx);
+    let held_version = ui.queue_version();
+    assert!(held_version > 0, "the view never read a version");
+
+    // **Move the engine under it, the way another view or a mode change does.** A second
+    // client's edit is a real bump, not a number poked into this view.
+    let other = Client::connect(&engine.socket, "other", "0").expect("connect");
+    let bumped = other
+        .call(
+            "queue.enqueue",
+            Some(serde_json::json!({ "recordings": [recording.clone()], "at": "queued" })),
+        )
+        .expect("the other view's enqueue");
+    let engine_version = bumped["version"].as_u64().expect("a version");
+
+    // **The instrument, computed from the other client's reply and not from `ui`.** Without
+    // this the assertion below passes just as well when no version ever went stale, which is
+    // the whole shape §13 warns about.
+    assert_ne!(
+        engine_version, held_version,
+        "the engine's version did not move, so nothing was stale and the retry is untested"
+    );
+    assert_eq!(
+        ui.queue_version(),
+        held_version,
+        "the view resynced on its own, so the stale path is not the one under test"
+    );
+
+    let before = other.call("queue.get", None).expect("queue.get")["entries"]
+        .as_array()
+        .map(|e| e.len())
+        .expect("entries");
+
+    // The edit whose version is now stale.
+    gmuse::ui::enqueue_with_the_engine(&mut ui, &ctx, &[row], true, None);
+
+    let after = other.call("queue.get", None).expect("queue.get")["entries"]
+        .as_array()
+        .map(|e| e.len())
+        .expect("entries");
+    assert_eq!(
+        after,
+        before + 1,
+        "a stale refusal dropped the enqueue instead of retrying it"
+    );
+    assert!(
+        ui.queue_version() > engine_version,
+        "the retry landed but the view kept a version the engine has moved past"
+    );
+}
+
 /// **Emptying the queue reaches the engine, because the engine is whose queue it is** — #233.
 ///
 /// `:clear-queue` is a local edit like any other, and travels by the one path that keeps the

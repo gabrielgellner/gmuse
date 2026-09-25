@@ -5974,12 +5974,83 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
     }
 }
 
+/// **A versioned queue edit, resynced once if the version moved under it** — #294.
+///
+/// A `STALE_VERSION` refusal means the engine applied **nothing**, so the edit is still
+/// owed. `enqueue`, `remove` and `clear` each name what they touch — rows to append,
+/// tokens to drop, "the hand-queued run" — and adding or subtracting from whatever is
+/// there now is the *same* edit, so it is computed again against the engine's version and
+/// sent once more rather than dropped on the floor.
+///
+/// **`queue.set` deliberately does not come through here.** It replaces the whole
+/// programme with the caller's page, so a retry would overwrite the very edit whose
+/// arrival caused the refusal — the lost update the version exists to prevent. See
+/// [`push_the_queue`], which re-reads and shows the engine's instead.
+///
+/// The refusal was not merely reported before this existed: the keypress did nothing, said
+/// so in a status line that a moment later was overwritten, and left the row unqueued —
+/// reported as "even when I do `E` it is not playing, or queueing".
+fn versioned_queue_call(
+    ui: &mut Ui,
+    client: &std::sync::Arc<gmuse_client::Client>,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, gmuse_client::ClientError> {
+    let with_base = |base: u64, mut params: serde_json::Value| {
+        if base > 0
+            && let Some(map) = params.as_object_mut()
+        {
+            map.insert("base_version".into(), base.into());
+        }
+        params
+    };
+    let call = |params| client.call_within(method, Some(params), std::time::Duration::from_secs(2));
+
+    let first = call(with_base(ui.queue_version, params.clone()));
+    let stale = first.as_ref().err().is_some_and(|e| {
+        e.rpc()
+            .is_some_and(|r| r.code == gmuse_proto::error::code::STALE_VERSION)
+    });
+    if !stale {
+        if let Ok(answer) = &first {
+            ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
+        }
+        return first;
+    }
+
+    // **The version alone, not the whole mirror.** `read_the_queue` also pairs every
+    // recording to a copy, which is the expensive half and is not what a retry needs; the
+    // caller reads the mirror back once the edit has landed.
+    let fresh = client
+        .call_within(
+            gmuse_proto::request::method::QUEUE_GET,
+            None,
+            std::time::Duration::from_secs(2),
+        )
+        .ok()
+        .and_then(|a| a["version"].as_u64());
+    let Some(fresh) = fresh else { return first };
+    ui.audit.line(
+        "queue",
+        &format!("{method} was stale; retrying against version {fresh}"),
+    );
+    ui.queue_version = fresh;
+    let again = call(with_base(fresh, params));
+    if let Ok(answer) = &again {
+        ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
+    }
+    again
+}
+
 /// **Queue rows with the engine**, at `next` or after what was queued by hand.
 ///
-/// One call, versioned against the last read like every other queue edit; a refused
-/// version is reported and the mirror re-read, which is what `push_the_queue` does for
-/// a stale `queue.set`.
-fn enqueue_with_the_engine(
+/// One call, versioned against the last read like every other queue edit; a stale version
+/// is resynced and the edit sent once more by [`versioned_queue_call`], because a refusal
+/// means nothing was applied and an append is the same append against a later version.
+///
+/// `pub` for the integration test that proves the retry, the way [`read_the_queue`] and
+/// [`push_the_queue`] already are.
+pub fn enqueue_with_the_engine(
     ui: &mut Ui,
     ctx: &Context<'_>,
     ids: &[CopyId],
@@ -6002,23 +6073,18 @@ fn enqueue_with_the_engine(
         "recordings": recordings,
         "at": if next { "next" } else { "queued" },
     });
-    if let Some(map) = params.as_object_mut() {
-        if ui.queue_version > 0 {
-            map.insert("base_version".into(), ui.queue_version.into());
-        }
-        if let Some(token) = after {
-            map.insert("after".into(), token.into());
-        }
+    if let Some(map) = params.as_object_mut()
+        && let Some(token) = after
+    {
+        map.insert("after".into(), token.into());
     }
-    match client.call_within(
+    if let Err(e) = versioned_queue_call(
+        ui,
+        &client,
         gmuse_proto::request::method::QUEUE_ENQUEUE,
-        Some(params),
-        std::time::Duration::from_secs(2),
+        params,
     ) {
-        Ok(answer) => {
-            ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
-        }
-        Err(e) => ui.notify(format!("the engine did not queue it: {e}")),
+        ui.notify(format!("the engine did not queue it: {e}"));
     }
 }
 
@@ -6030,21 +6096,14 @@ fn remove_with_the_engine(ui: &mut Ui, tokens: Vec<u64>) {
     if tokens.is_empty() {
         return;
     }
-    let mut params = serde_json::json!({ "tokens": tokens });
-    if ui.queue_version > 0
-        && let Some(map) = params.as_object_mut()
-    {
-        map.insert("base_version".into(), ui.queue_version.into());
-    }
-    match client.call_within(
+    let params = serde_json::json!({ "tokens": tokens });
+    if let Err(e) = versioned_queue_call(
+        ui,
+        &client,
         gmuse_proto::request::method::QUEUE_REMOVE,
-        Some(params),
-        std::time::Duration::from_secs(2),
+        params,
     ) {
-        Ok(answer) => {
-            ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
-        }
-        Err(e) => ui.notify(format!("the engine did not remove it: {e}")),
+        ui.notify(format!("the engine did not remove it: {e}"));
     }
 }
 
@@ -6053,21 +6112,14 @@ fn clear_queued_with_the_engine(ui: &mut Ui) {
     let Some(client) = ui.engine.clone() else {
         return;
     };
-    let mut params = serde_json::json!({ "queued_only": true });
-    if ui.queue_version > 0
-        && let Some(map) = params.as_object_mut()
-    {
-        map.insert("base_version".into(), ui.queue_version.into());
-    }
-    match client.call_within(
+    let params = serde_json::json!({ "queued_only": true });
+    if let Err(e) = versioned_queue_call(
+        ui,
+        &client,
         gmuse_proto::request::method::QUEUE_CLEAR,
-        Some(params),
-        std::time::Duration::from_secs(2),
+        params,
     ) {
-        Ok(answer) => {
-            ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
-        }
-        Err(e) => ui.notify(format!("the engine did not clear it: {e}")),
+        ui.notify(format!("the engine did not clear it: {e}"));
     }
 }
 
