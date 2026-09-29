@@ -27,6 +27,16 @@ where the two disagree the ID3 value is the newer one.
 
 The exception is lyrics, which is why this pass migrates before it deletes.
 
+**A second ID3v2 tag can sit behind the first, and 39% of the staging tree has
+one** (#303). A tag declares its own length, so another begins where it ends,
+and mutagen's `ID3(path)` reads the leading one and stops — which is why these
+files were counted as "already modern and alone". They are not merely untidy:
+on the Dido albums the two tags named *different* MusicBrainz recordings, so
+which identity the file had depended on which tag a reader preferred. Found by
+`id3_chain`, compared by `id3_conflicts`, and cut by `strip_extra_id3_bytes`.
+Where the two disagree the row is reported and **not** marked to apply, because
+which tag is right is a judgement and not always the first one.
+
 **A malformed APE tag is removed by position** (#144). `ape_of` refuses one,
 which is right for reading and was wrong for removing: 64 blocks survived a
 full pass because the tool counted them as absent, and every one of them was
@@ -44,9 +54,12 @@ from __future__ import annotations
 
 import collections
 import csv
+import io
 import json
+import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Final
+from typing import Final, NamedTuple
 
 import typer
 from mutagen import MutagenError
@@ -72,6 +85,19 @@ GAIN_KEYS: Final = frozenset(
 )
 
 TRUTHY: Final = frozenset({"y", "yes", "1"})
+
+#: Review column -> the line the survey prints for it. A table rather than a
+#: chain of `if`s so adding a column cannot quietly go uncounted.
+TALLY_LINES: Final = {
+    "upgrade": "ID3v2.3 -> v2.4",
+    "drop_ape": "APEv2 to remove",
+    "drop_id3v1": "ID3v1 to remove",
+    "drop_extra_id3": "stacked ID3v2 to remove",
+    "carry_id3": "frames to carry out of a stacked tag",
+    "id3_differs": "stacked tags differ on content — the leading one is kept",
+    "id3_conflict": "stacked tags disagree — left for a person",
+    "salvage_lyrics": "lyrics to migrate into ID3",
+}
 MODERN: Final = (2, 4, 0)
 
 #: What an APEv2 tag looks like from the outside — #144. Found this way it can
@@ -86,6 +112,26 @@ APE_MAGIC: Final = b"APETAGEX"
 FOOTER_LEN: Final = 32
 APE_VERSIONS: Final = frozenset({1000, 2000})
 TAIL_SCAN: Final = 64 * 1024
+
+#: What an ID3v2 tag looks like from the outside — #303, and the same reading
+#: as `APE_MAGIC` above for the same reason.
+#:
+#: **A tag carries its own length, so a second one begins where the first
+#: ends.** Nothing that parses only the leading tag can see it: mutagen's
+#: `ID3(path)` reads one and stops, so a stacked file reported as "alone". On
+#: the staging tree 39% of mp3s are stacked, and the two tags can name
+#: *different* MusicBrainz recordings — so which identity a file has depends
+#: on which tag a reader happens to prefer.
+ID3_MAGIC: Final = b"ID3"
+ID3_HEADER_LEN: Final = 10
+ID3_FOOTER_FLAG: Final = 0x10
+#: An ID3v2 header this tool can size. A v2.5 would frame its length some other
+#: way, and guessing at one is how a strip cuts into audio.
+ID3_MAX_MAJOR: Final = 4
+#: A stop, so a file of nonsense cannot spin here.
+ID3_MAX_CHAIN: Final = 8
+#: One tag is the ordinary case; this many means something is stacked behind it.
+ID3_STACKED: Final = 2
 
 
 def ape_of(path: Path) -> APEv2 | None:
@@ -146,6 +192,187 @@ def ape_span(path: Path) -> tuple[int, int] | None:
         if is_header and 0 <= start < size < end:
             return start, size
     return None
+
+
+def _synchsafe(four: bytes) -> int:
+    """An ID3v2 size: four bytes, seven bits each."""
+    return (four[0] << 21) | (four[1] << 14) | (four[2] << 7) | four[3]
+
+
+def id3_chain(path: Path) -> list[tuple[tuple[int, int], int, int]]:
+    """Every ID3v2 tag stacked at the head of the file — #303.
+
+    Returns `(version, start, span)` per tag, in file order. One entry is the
+    ordinary case; more than one is the thing this exists to find.
+
+    **By position, like `ape_span`**, and for the neighbouring reason: mutagen
+    reads the leading tag and stops, so everything behind it was invisible to
+    the check that then called the file "alone".
+    """
+    found: list[tuple[tuple[int, int], int, int]] = []
+    size = path.stat().st_size
+    try:
+        with path.open("rb") as handle:
+            off = 0
+            while off + ID3_HEADER_LEN <= size and len(found) < ID3_MAX_CHAIN:
+                handle.seek(off)
+                head = handle.read(ID3_HEADER_LEN)
+                if len(head) < ID3_HEADER_LEN or head[:3] != ID3_MAGIC:
+                    break
+                major, minor, flags = head[3], head[4], head[5]
+                if major > ID3_MAX_MAJOR:
+                    break
+                span = ID3_HEADER_LEN + _synchsafe(head[6:10])
+                if flags & ID3_FOOTER_FLAG:
+                    span += ID3_HEADER_LEN
+                # A tag that claims to end past EOF frames nothing, and a
+                # zero-length one would not advance: either way, stop rather
+                # than compute an offset into the audio.
+                if span <= ID3_HEADER_LEN or off + span > size:
+                    break
+                found.append(((major, minor), off, span))
+                off += span
+    except OSError:
+        return []
+    return found
+
+
+def extra_id3_span(path: Path) -> tuple[int, int] | None:
+    """Where everything after the *first* ID3v2 tag sits, or None — #303."""
+    chain = id3_chain(path)
+    if len(chain) < ID3_STACKED:
+        return None
+    start = chain[1][1]
+    _, last_start, last_span = chain[-1]
+    return start, last_start + last_span
+
+
+def _identity_of(blob: bytes) -> dict[str, str]:
+    """The fields in one tag that say what the file *is*."""
+    try:
+        tag = ID3(io.BytesIO(blob))
+    except (MutagenError, ID3NoHeaderError, OSError, ValueError):
+        return {}
+    said: dict[str, str] = {}
+    for frame in tag.getall("TXXX"):
+        if frame.desc.lower().startswith("musicbrainz"):
+            said[frame.desc] = str(frame)
+    for frame in tag.getall("UFID"):
+        said[f"UFID:{frame.owner}"] = frame.data.decode("ascii", "replace")
+    return said
+
+
+#: The frames that say *which recording this is*. A disagreement here decides
+#: what `shelf import` mints, so it is the one that stops the pass (#303).
+#: Everything else a tag holds is content, and this module does not own
+#: content — `ingestion-flow.md` §4.
+def is_identity(key: str) -> bool:
+    """Whether a frame name is one that settles identity."""
+    return key.startswith("UFID:") or key.upper().startswith("TXXX:MUSICBRAINZ")
+
+
+#: How many frame names a review cell lists before it says "and N more". The
+#: point of the cell is to let a person judge, and a hundred names does not.
+KEYS_SHOWN: Final = 8
+
+
+def key_label(keys: Iterable[str]) -> str:
+    """Frame names fit to sit in a TSV cell.
+
+    **A frame name can hold raw bytes.** `PRIV:WM/WMCollectionID` carries a
+    binary owner, tabs and newlines included, and writing one into the review
+    file ended the survey with `holds a tab or newline` — the column broke the
+    format it was describing the file in.
+    """
+    clean = sorted({re.sub(r"[^\x20-\x7e]+", "?", k)[:60] for k in keys})
+    if len(clean) > KEYS_SHOWN:
+        return "; ".join(clean[:KEYS_SHOWN]) + f"; and {len(clean) - KEYS_SHOWN} more"
+    return "; ".join(clean)
+
+
+def _frames_of(blob: bytes) -> dict[str, object]:
+    """Every frame in one tag, keyed the way ID3 itself keys them."""
+    try:
+        tag = ID3(io.BytesIO(blob))
+    except (MutagenError, ID3NoHeaderError, OSError, ValueError):
+        return {}
+    return dict(tag.items())
+
+
+class Stacked(NamedTuple):
+    """What the tags behind the leading one say that it does not — #303."""
+
+    #: Identity frames both tags carry, differently. No rule settles these.
+    conflicts: list[str]
+    #: Other frames both carry differently. The leading tag is kept and these
+    #: are listed, because this module normalises format and not content.
+    differs: list[str]
+    #: Frames only the stacked tags hold. Carried across, never dropped.
+    salvage: dict[str, object]
+
+
+def id3_split(path: Path) -> Stacked:
+    """Sort the stacked tags into what blocks, what is noted, and what moves.
+
+    Three outcomes, and the middle one was learned twice:
+
+    - **conflicts** — two MusicBrainz ids for one file, as the Dido albums had.
+      Which one the file means depends on who reads it, so a person decides.
+    - **differs** — `1` against `1/10`, `1988` against `1988-04`. `paths.py`
+      already paid for this one: *comparing spellings finds differences that
+      are not there*. Every one of 93 stacked files on one album reported a
+      `TRCK` conflict and not one of them was a disagreement, which buried the
+      case that was.
+    - **salvage** — frames only the stacked tags hold, including the art and
+      the ids. Carried over before the cut, the way lyrics are carried out of
+      an APE tag. The first cut of this fix dropped them, which on this
+      material meant deleting the better record.
+    """
+    chain = id3_chain(path)
+    if len(chain) < ID3_STACKED:
+        return Stacked([], [], {})
+    data = path.read_bytes()
+    keeping = _frames_of(data[chain[0][1] : chain[0][1] + chain[0][2]])
+    conflicts: list[str] = []
+    differs: list[str] = []
+    salvage: dict[str, object] = {}
+    for _, start, span in chain[1:]:
+        for key, frame in _frames_of(data[start : start + span]).items():
+            if key not in keeping:
+                salvage.setdefault(key, frame)
+            elif str(keeping[key]) != str(frame):
+                into = conflicts if is_identity(key) else differs
+                if key not in into:
+                    into.append(key)
+    return Stacked(sorted(conflicts), sorted(differs), salvage)
+
+
+def id3_conflicts(path: Path) -> list[str]:
+    """Identity frames the stacked tags disagree about. See `id3_split`."""
+    return id3_split(path).conflicts
+
+
+def strip_extra_id3_bytes(path: Path) -> bool:
+    """Cut every ID3v2 tag after the first. True if anything was removed.
+
+    **Verified the way `strip_ape_bytes` is**, and for the stronger reason:
+    this cuts bytes out of the middle of a file rather than off its end, so a
+    mis-sized tag would take audio with it. The MPEG duration must agree
+    before and after, and no stacked tag may remain; otherwise the file goes
+    back exactly as it was.
+    """
+    span = extra_id3_span(path)
+    if span is None:
+        return False
+    start, end = span
+    before = mp3_seconds(path)
+    original = path.read_bytes()
+    path.write_bytes(original[:start] + original[end:])
+    if mp3_seconds(path) != before or extra_id3_span(path) is not None:
+        path.write_bytes(original)
+        why = f"refused: cutting the stacked ID3v2 tag changed {path.name}"
+        raise ValueError(why)
+    return True
 
 
 def strip_ape_bytes(path: Path) -> bool:
@@ -230,18 +457,31 @@ def plan(path: Path) -> dict[str, object] | None:
     drop_ape = ape is not None or ape_span(path) is not None
     drop_v1 = has_id3v1(path)
     upgrade = id3 is not None and id3.version < MODERN
+    # **"Alone" has to mean alone** (#303). It used to mean no APEv2 and no
+    # ID3v1, and said nothing about a second ID3v2 tag stacked behind the
+    # first — which mutagen never reads and 39% of the staging tree carries.
+    stacked = max(len(id3_chain(path)) - 1, 0)
+    split = id3_split(path) if stacked else Stacked([], [], {})
 
-    if not (drop_ape or drop_v1 or upgrade):
+    if not (drop_ape or drop_v1 or upgrade or stacked):
         return None
 
     extra = sorted(k for k in (ape or {}) if k.lower() not in GAIN_KEYS and k.lower() != "lyrics")
     unreadable = drop_ape and ape is None
     return {
-        "apply": "y",
+        # **A conflict is not marked for applying.** Keeping the leading tag is
+        # the right answer only when something authoritative wrote it; on an
+        # untouched download the stacked one can be the better-sourced. Two
+        # tags that agree are merely redundant and go through as usual.
+        "apply": "" if split.conflicts else "y",
         "id3": version,
         "upgrade": "y" if upgrade else "",
         "drop_ape": "y" if drop_ape else "",
         "drop_id3v1": "y" if drop_v1 else "",
+        "drop_extra_id3": str(stacked) if stacked else "",
+        "carry_id3": key_label(split.salvage),
+        "id3_differs": key_label(split.differs),
+        "id3_conflict": key_label(split.conflicts),
         "salvage_lyrics": f"{len(lyrics)} chars" if salvage else "",
         "ape_other": "unreadable — stripped by position" if unreadable else "; ".join(extra),
         "path": str(path),
@@ -263,14 +503,9 @@ def survey(root: Path, out: Path) -> None:
             tally["already modern and alone"] += 1
             continue
         rows.append(row)
-        if row["upgrade"]:
-            tally["ID3v2.3 -> v2.4"] += 1
-        if row["drop_ape"]:
-            tally["APEv2 to remove"] += 1
-        if row["drop_id3v1"]:
-            tally["ID3v1 to remove"] += 1
-        if row["salvage_lyrics"]:
-            tally["lyrics to migrate into ID3"] += 1
+        for column, line in TALLY_LINES.items():
+            if row[column]:
+                tally[line] += 1
     # **Written even when it is empty** — a survey that found nothing used to
     # leave the last one that found something standing, so a clean library went
     # on being described by a stale file listing work already done.
@@ -281,15 +516,45 @@ def survey(root: Path, out: Path) -> None:
     print(f"\n{len(rows)} file(s) -> {out}")
 
 
+def merge_stacked(path: Path) -> tuple[bool, int]:
+    """Carry what only the stacked tags hold, then cut them off — #303.
+
+    Returns `(stripped, frames carried)`. The salvage is read before the cut
+    because after it those tags are gone, and written after it because
+    `id3.save` rewrites the leading tag and would move every offset the cut
+    depends on.
+    """
+    salvage = id3_split(path).salvage
+    if not strip_extra_id3_bytes(path):
+        return False, 0
+    if salvage:
+        carried = id3_of(path) or ID3()
+        for frame in salvage.values():
+            carried.add(frame)
+        carried.save(path, v2_version=4, v1=0)
+    return True, len(salvage)
+
+
 def normalise(path: Path, *, write: bool) -> str:
     """Bring one file to ID3v2.4 alone. Returns what happened."""
+    if not write:
+        return "would normalise"
+
+    # **Stacked tags go first** (#303), before anything is read to be written
+    # back: `id3.save` rewrites the leading tag and treats whatever follows as
+    # audio, so stripping afterwards would be measuring offsets against a file
+    # that had already moved underneath them.
+    #
+    # **And what only they hold is carried across before they go**, the way
+    # lyrics are carried out of an APE tag below. On this material the leading
+    # tag is the poorer one — no MusicBrainz ids, no art — so a strip that did
+    # not salvage would delete the better record.
+    stripped, carried_n = merge_stacked(path)
+
     ape = ape_of(path)
     id3 = id3_of(path)
     lyrics = ape_lyrics(ape)
     moved = bool(lyrics) and not has_uslt(id3)
-
-    if not write:
-        return "would normalise"
 
     # Lyrics first, and saved before the APE tag goes: a crash between the two
     # should lose the deletion, never the words.
@@ -303,13 +568,21 @@ def normalise(path: Path, *, write: bool) -> str:
         # block rather than rewriting it.
         id3.save(path, v2_version=4, v1=0)
 
+    # **Every removal is named, not just the last one.** Returning early on
+    # the APE branch hid the stacked merge on 9 of 11 files that had both:
+    # the work happened and the line said something else, which is the kind
+    # of report that makes a pass look like it did less than it did.
+    did = []
+    if stripped:
+        did.append(f"stacked ID3v2 merged in ({carried_n} frame(s) carried)" if carried_n else "stacked ID3v2 stripped")
     if ape is not None:
         ape.delete(path)
     elif strip_ape_bytes(path):
         # A tag mutagen would not parse, cut off by its own length (#144).
-        return "unreadable APE stripped by position"
-
-    return "lyrics migrated, normalised" if moved else "normalised"
+        did.append("unreadable APE stripped by position")
+    if moved:
+        did.append("lyrics migrated")
+    return ", ".join([*did, "normalised"])
 
 
 def snapshot_row(path: Path) -> dict[str, object]:
@@ -326,11 +599,19 @@ def snapshot_row(path: Path) -> dict[str, object]:
     """
     ape = ape_of(path)
     id3 = id3_of(path)
+    chain = id3_chain(path)
+    # **What the stacked tags claimed** (#303). Stripping one drops fields no
+    # other tag holds, and the identity fields are the ones worth being able
+    # to look up afterwards — the whole point of the strip is that they may
+    # have disagreed.
+    data = path.read_bytes() if len(chain) >= ID3_STACKED else b""
+    stacked = [_identity_of(data[s : s + n]) for _, s, n in chain[1:]]
     return {
         "path": str(path),
         "id3_version": ".".join(str(n) for n in id3.version) if id3 else "",
         "had_id3v1": "y" if has_id3v1(path) else "",
         "ape": json.dumps({k: str(ape[k]) for k in ape}, ensure_ascii=False) if ape else "",
+        "extra_id3": json.dumps(stacked, ensure_ascii=False) if stacked else "",
     }
 
 
