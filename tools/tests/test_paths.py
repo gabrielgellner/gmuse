@@ -26,6 +26,8 @@ from gmuse_tools.paths import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import pytest
 
 
@@ -211,3 +213,98 @@ def test_a_survey_that_found_nothing_overwrites_the_one_that_found_something(tmp
     write_tsv(out, [{"verdict": "differs", "path": "/m/a.mp3"}])
     write_tsv(out, [])
     assert out.read_text() == ""
+
+
+def fixed_tags(**tags: str) -> Callable[[Path], dict[str, str]]:
+    """A stand-in for `tags_of` that reads nothing and says this."""
+
+    def read(_: Path) -> dict[str, str]:
+        return tags
+
+    return read
+
+
+# --- A stump in a title, which nothing looked for — issue #302 ---------------
+#
+# `truncation` ran over `album` and `artist` only, and the two filename
+# patterns both need a ` - ` separator, so on a canonical `NN Title.mp3` no
+# title was ever compared against the path. Three stumps in one album reported
+# as zero findings.
+
+
+def test_a_filename_that_extends_a_thirty_character_title_confirms_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A title's corroborator is the filename, one rung along from the folder."""
+    album = tmp_path / "Britney Spears" / "In the Zone"
+    album.mkdir(parents=True)
+    stump = "Me Against the Music (feat. Ma"
+    assert len(stump) == 30, "the fixture has to be an ID3v1 field wide"
+    monkeypatch.setattr("gmuse_tools.paths.tags_of", fixed_tags(title=stump, album="In the Zone"))
+    at = album / "01 Me Against the Music (feat. Madonna).mp3"
+    at.write_bytes(b"\x00")
+    cut = [f for f in findings(at) if "title truncated" in f.what]
+    assert len(cut) == 1
+    assert cut[0].verdict == "only in path", "the filename continues it, so it is a proposal"
+    assert cut[0].from_path == "Me Against the Music (feat. Madonna)"
+
+
+def test_a_title_cut_to_twenty_nine_is_caught_when_the_filename_continues_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ID3v1 pads to 30 and the trailing blank is stripped on the way out.
+
+    `(I Got That) Boom Boom (feat.` is 29 characters and is the same artefact,
+    which an exact-length test misses.
+    """
+    album = tmp_path / "Britney Spears" / "In the Zone"
+    album.mkdir(parents=True)
+    stump = "(I Got That) Boom Boom (feat."
+    assert len(stump) == 29, "one short of the field, which is the point"
+    monkeypatch.setattr("gmuse_tools.paths.tags_of", fixed_tags(title=stump, album="In the Zone"))
+    at = album / "02 (I Got That) Boom Boom (feat. Ying Yang Twins).mp3"
+    at.write_bytes(b"\x00")
+    cut = [f for f in findings(at) if "title truncated" in f.what]
+    assert [f.verdict for f in cut] == ["only in path"]
+
+
+def test_a_twenty_nine_character_title_nothing_continues_is_not_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Plenty of real titles are 29 characters, so that length alone says nothing.
+
+    The 30-character file beside it is the instrument: it fires on the same
+    code path, so silence here is a decision and not a detector that is off.
+    """
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+
+    short = "Twenty Nine Characters Long!!"
+    assert len(short) == 29
+    monkeypatch.setattr("gmuse_tools.paths.tags_of", fixed_tags(title=short, album="Album"))
+    at = album / f"01 {short}.mp3"
+    at.write_bytes(b"\x00")
+    assert [f for f in findings(at) if "title truncated" in f.what] == []
+
+    exact = "Exactly Thirty Characters Long"
+    assert len(exact) == 30
+    monkeypatch.setattr("gmuse_tools.paths.tags_of", fixed_tags(title=exact, album="Album"))
+    other = album / f"02 {exact}.mp3"
+    other.write_bytes(b"\x00")
+    still = [f for f in findings(other) if "title truncated" in f.what]
+    assert [f.verdict for f in still] == ["suspect"], "the detector is attached and chose to say less"
+
+
+def test_the_album_and_artist_stumps_still_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """#302 added a field; it must not have moved the two that were there."""
+    album = tmp_path / "Artist" / "AVE MARIA - SACRED ARIAS AND CHORUSES"
+    album.mkdir(parents=True)
+    monkeypatch.setattr(
+        "gmuse_tools.paths.tags_of",
+        fixed_tags(album="AVE MARIA - SACRED ARIAS AND C", artist="Artist", title="Ave Maria"),
+    )
+    at = album / "01 Ave Maria.mp3"
+    at.write_bytes(b"\x00")
+    cut = [f for f in findings(at) if "album truncated" in f.what]
+    assert [f.verdict for f in cut] == ["only in path"]
+    assert cut[0].from_path == "AVE MARIA - SACRED ARIAS AND CHORUSES"

@@ -54,6 +54,16 @@ if TYPE_CHECKING:
 ID3V1_FIELD: Final = 30
 ID3V1_LEN: Final = 128
 
+#: Lengths that can be an ID3v1 stump. 30 is the field; 29 is the same cut with
+#: the padding blank stripped on the way out, which is how
+#: `(I Got That) Boom Boom (feat.` arrived — and why a length alone does not
+#: settle it (#302).
+STUMP_LENGTHS: Final = frozenset({ID3V1_FIELD - 1, ID3V1_FIELD})
+
+#: The track number a rendered filename carries and a title tag does not, so
+#: the two can be compared: `01 Title` -> `Title`.
+TRACK_NUMBER: Final = re.compile(r"^\d+\s*[-_.]?\s+")
+
 #: A beat of slack when comparing tempos, and two when asking whether one is
 #: the other doubled — a filename holds a rounded value and a tag an analyser's.
 BEAT: Final = 1.0
@@ -252,19 +262,39 @@ def truncation(path: Path, tags: dict[str, str]) -> Iterator[Finding]:
     this must run before `tags normalise` strips them. Where the folder name
     continues the tag the truncation is confirmed rather than suspected, and the
     folder is the better record.
+
+    **`title` is checked too, and was not** (#302). The loop ran over `album`
+    and `artist`, and nothing else compared a title against the path — the two
+    filename patterns below both need a ` - ` separator, so on a canonical
+    `NN Title.mp3` no title comparison happened anywhere. Three stumps in one
+    album reported as zero findings, and repairing them by hand took `ingest`
+    from 79% to 93%. A title's corroborator is the **filename**, which is the
+    same evidence one rung along: the folder continues an album, the file name
+    continues a title.
     """
     v1 = has_id3v1(path)
-    for field, against in (("album", path.parent.name), ("artist", path.parent.parent.name)):
-        value = tags.get(field if field == "album" else "album_artist", "") or tags.get(field, "")
-        if len(value) != ID3V1_FIELD:
+    sources = (
+        ("album", path.parent.name, tags.get("album", "")),
+        ("artist", path.parent.parent.name, tags.get("album_artist", "") or tags.get("artist", "")),
+        ("title", TRACK_NUMBER.sub("", path.stem), tags.get("title", "")),
+    )
+    for field, against, value in sources:
+        if len(value) not in STUMP_LENGTHS:
             continue
-        confirmed = len(against) > ID3V1_FIELD and norm(against).startswith(norm(value)[:25])
+        confirmed = len(against) > len(value) and norm(against).startswith(norm(value)[:25])
+        # **A 29 is only a stump when something continues it.** ID3v1 pads its
+        # field to 30 and readers strip the trailing blank, so a value cut at
+        # the boundary can arrive one short — `(I Got That) Boom Boom (feat.`
+        # is the worked case. Plenty of real titles are 29 characters, though,
+        # so that length on its own is not evidence and is dropped here.
+        if len(value) < ID3V1_FIELD and not confirmed:
+            continue
         # **Confirmed is when the folder continues the tag.** Without that all
         # this has is a length, and some albums really are 30 characters — so
         # the rest are `suspect`, which is a quieter thing to be.
         yield Finding(
             path,
-            f"{field} truncated at 30 chars" + (" (ID3v1 present)" if v1 else ""),
+            f"{field} truncated at {len(value)} chars" + (" (ID3v1 present)" if v1 else ""),
             against if confirmed else "",
             value,
             "only in path" if confirmed else "suspect",
