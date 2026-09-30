@@ -64,6 +64,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 import gmuse_core
+
+from gmuse_tools.library import open_library
 import typer
 
 from gmuse_tools import bronze
@@ -538,7 +540,7 @@ def attributed(out: Path, review: Path) -> None:
     for the 7.3% resting on bytes, and those stay with `survey`'s
     corroboration — this pass has nothing to ask about them.
     """
-    lib = gmuse_core.Library.open()
+    lib = open_library()
     rows = lib.query()
     con = bronze.open_cache()
     got = attribute(rows, lambda mbid: credited_on(con, mbid))
@@ -669,7 +671,7 @@ def register(app: typer.Typer) -> None:
     @sub.command("remixed")
     def remixed_cmd() -> None:
         """Split a performer-and-remixer credit, where MusicBrainz, the tag and the title agree."""
-        lib = gmuse_core.Library.open()
+        lib = open_library()
         rows = lib.query()
         con = bronze.open_cache()
         got = remixed(rows, lambda mbid: credited_on(con, mbid))
@@ -726,7 +728,7 @@ def propose(root: Path, out: Path, *, offline: bool = False) -> None:
     `feat.` credits that corroborate each other. Settling on the narrow corpus
     decided 4 credits; on the wide one, 57.
     """
-    lib = gmuse_core.Library.open()
+    lib = open_library()
     rows = lib.query()
     corpus = sorted({r["artist"] for r in rows if r.get("artist")} | set(credits_under(root)))
     decided = settle(corpus, offline=offline)

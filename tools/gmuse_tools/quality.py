@@ -54,6 +54,8 @@ from pathlib import Path
 from typing import Final
 
 import gmuse_core
+
+from gmuse_tools.library import open_library
 import numpy as np
 import typer
 from mutagen import File as MutagenFile
@@ -401,7 +403,7 @@ def measured_rows() -> list[dict[str, object]]:
     every copy is the question this pass is actually about.
     """
     out: list[dict[str, object]] = []
-    for row in gmuse_core.Library.open().query(every_copy=True):
+    for row in open_library().query(every_copy=True):
         locator, cutoff = row.get("locator"), row.get("cutoff_hz")
         if not locator or cutoff is None:
             continue
@@ -636,18 +638,25 @@ def propose(out: Path, analyser: int) -> None:
     zero**. A missing measurement and a measurement of nothing are different
     facts, and only one of them is true.
     """
-    lib = gmuse_core.Library.open()
+    lib = open_library()
     lines: list[str] = []
-    skipped = moved = 0
+    unlocatable = unreadable = unidentifiable = moved = 0
     for row in lib.query(every_copy=True):
         encoding, locator = row.get("encoding"), row.get("locator")
         if not encoding or not locator:
-            # Nothing here holds a copy, so there is nothing to measure.
-            skipped += 1
+            # **Not a measurement that failed** — #298. Nothing here holds a
+            # copy, so no analyser was ever asked. Counted apart from the two
+            # below because it is the one that can mean the *view* is wrong
+            # rather than the file: an 18-day-old `gmuse_core` put 595 copies
+            # in this bucket and the sentence they were printed under read
+            # exactly like a file that could not be decoded.
+            unlocatable += 1
             continue
         found = measure(locator)
         if found is None:
-            skipped += 1
+            # The analyser was asked and could not answer — a track too short
+            # or too quiet to have a spectrum. A real finding about the file.
+            unreadable += 1
             continue
 
         # **Name the bytes that were just measured, not the row that pointed
@@ -661,7 +670,10 @@ def propose(out: Path, analyser: int) -> None:
         # `apply` reports it as not held rather than believing it.
         measured_as = lib.encoding_at(locator)
         if measured_as is None:
-            skipped += 1
+            # The bytes were read but could not be named, so there is nothing
+            # to propose against. Distinct from both above: the file is here
+            # and it is readable.
+            unidentifiable += 1
             continue
         if measured_as != encoding:
             moved += 1
@@ -694,8 +706,19 @@ def propose(out: Path, analyser: int) -> None:
     lib.propose(lines, out)
 
     print(f"{len(lines)} measurement(s) -> {out}")
-    if skipped:
-        print(f"  {skipped} row(s) had nothing to measure and were left out, not proposed as zero")
+    # **Three sentences, because they are three different facts** — #298. They
+    # were one counter under "had nothing to measure", which is true of a file
+    # that could not be decoded and equally true of a row the view could not
+    # locate — and only the first is about the music.
+    if unlocatable:
+        print(
+            f"  {unlocatable} row(s) name no copy this device holds — nothing was measured,"
+            f" and nothing was proposed as zero"
+        )
+    if unreadable:
+        print(f"  {unreadable} file(s) the analyser could not measure, not proposed as zero")
+    if unidentifiable:
+        print(f"  {unidentifiable} file(s) whose bytes could not be named, so nothing to propose against")
     if moved:
         print(
             f"  {moved} file(s) are not the bytes the library says live there — "

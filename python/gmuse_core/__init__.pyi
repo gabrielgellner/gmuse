@@ -9,6 +9,14 @@ large enough that keeping this in step is the harder job.
 from pathlib import Path
 from typing import Any
 
+__version__: str
+"""The crate version this extension was compiled from — #298.
+
+Not the wheel's `dist-info` version, which describes what was installed. This
+is a property of the bytes that are loaded, which is the thing that can be out
+of step with the source tree beside them.
+"""
+
 class Library:
     """A read handle. **Opens no music file.**
 

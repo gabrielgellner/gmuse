@@ -237,5 +237,19 @@ fn gmuse_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "__doc__",
         "gmuse's library, for the tools that prepare files for it.",
     )?;
+    // **Which library a tool is actually running against** — #298.
+    //
+    // The extension is a build artefact and nothing made it say so, which is
+    // how `quality propose` came to be run against an 18-day-old fold: it saw
+    // 7,292 encodings where the CLI saw 7,887, skipped the 595 it could not
+    // locate, and reported success. Both processes read the same log and the
+    // same snapshot — the disagreement was entirely that one of them was old
+    // code.
+    //
+    // `CARGO_PKG_VERSION` at compile time, so it is a property of the bytes
+    // that are loaded rather than of anything on disk beside them: a wheel's
+    // `dist-info` describes what was installed, and this describes what is
+    // running.
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

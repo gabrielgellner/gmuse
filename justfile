@@ -334,10 +334,26 @@ bench:
 check: fmt-check lint lint-yaml
     cargo check --all-targets --all-features
 
+# The tools' own tests — #298.
+#
+# **In the gate, because nothing ran them.** `pytest` was a dev dependency with
+# a config section and no caller, so 223 tests were coverage in the sense that
+# they existed. That is the shape `CLAUDE.md` names about `just stale-claims`:
+# a check nothing runs looks exactly like a check that passes.
+#
+# `--reinstall-package` first, because the thing under test is a compiled
+# extension built from the crate beside it and nothing else resyncs it. An
+# 18-day-old `gmuse_core` is what #298 turned out to be, and a gate that tests
+# the Python against a stale build of the Rust is testing two different
+# libraries.
+[group('test')]
+tools-test:
+    cd tools && uv sync --quiet --reinstall-package gmuse-core && uv run pytest -q
+
 # Full local gate: format, lint, typecheck, tests, release build.
 # Enforced by the pre-push hook — see `just hooks-install`.
 [group('test')]
-ci: check test build
+ci: check test tools-test build
 
 # ── Hooks ─────────────────────────────────────────────────────────────────────
 

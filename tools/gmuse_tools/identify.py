@@ -77,6 +77,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 import gmuse_core
+
+from gmuse_tools.library import open_library
 import mutagen
 import typer
 
@@ -881,7 +883,7 @@ def work_list(*, limit: int | None = None, unidentified: bool = True) -> list[Wo
     about and this disk does not hold — and there is nothing for a pass that
     reads audio to do with one.
     """
-    return as_work(gmuse_core.Library.open().query(unidentified=unidentified), limit=limit)
+    return as_work(open_library().query(unidentified=unidentified), limit=limit)
 
 
 def as_work(rows: Iterable[dict[str, object]], *, limit: int | None = None) -> list[Work]:

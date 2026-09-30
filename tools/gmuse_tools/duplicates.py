@@ -66,6 +66,8 @@ from pathlib import Path
 from typing import Final
 
 import gmuse_core
+
+from gmuse_tools.library import open_library
 import mutagen
 import typer
 
@@ -504,7 +506,7 @@ def register(app: typer.Typer) -> None:
         handed it, which meant a list built without `--every-copy` could not
         find a second copy however hard it looked.
         """
-        rows = gmuse_core.Library.open().query(every_copy=True)
+        rows = open_library().query(every_copy=True)
         copies = [c for c in (read(row) for row in rows) if c is not None]
         found = examine(copies, workers=workers, floor=floor, any_artist=any_artist)
         if as_json:

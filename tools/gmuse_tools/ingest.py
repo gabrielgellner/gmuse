@@ -47,6 +47,8 @@ from pathlib import Path
 from typing import Any, Final
 
 import gmuse_core
+
+from gmuse_tools.library import open_library
 import typer
 from mutagen import File
 from mutagen.flac import FLAC
@@ -1221,7 +1223,7 @@ def tracklist(root: Path, out: Path) -> None:
     folders that look incomplete would mean trusting the count we are trying to
     establish.
     """
-    lib = gmuse_core.Library.open()
+    lib = open_library()
     named, held = releases_named(lib), releases_held(lib)
     folders = sorted({f.parent for f in walk(root)})
     lines: list[str] = []
@@ -1318,7 +1320,7 @@ def basis(root: Path, out: Path) -> None:
     Touches no network, unlike the rest of `ingest`: the answer is already in
     the tags, and what was missing was a fact to put it in.
     """
-    lib = gmuse_core.Library.open()
+    lib = open_library()
     named, held = releases_named(lib), releases_held(lib)
     folders = sorted({f.parent for f in walk(root)})
     lines: list[str] = []

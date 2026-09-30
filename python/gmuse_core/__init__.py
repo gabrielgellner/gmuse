@@ -6,6 +6,6 @@ re-export, because a package directory would otherwise shadow the extension it
 is meant to carry.
 """
 
-from .gmuse_core import Library
+from .gmuse_core import Library, __version__
 
-__all__ = ["Library"]
+__all__ = ["Library", "__version__"]

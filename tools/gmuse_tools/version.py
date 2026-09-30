@@ -51,6 +51,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import gmuse_core
+
+from gmuse_tools.library import open_library
 import typer
 
 from gmuse_tools.genre.common import out_path, write_tsv
@@ -301,7 +303,7 @@ def run(out: Path, review: Path) -> None:
     person has not curated — a bracket is a title until a vocabulary term says
     otherwise.
     """
-    lib = gmuse_core.Library.open()
+    lib = open_library()
     rows = lib.query()
     lines, unknown = survey(rows)
 
