@@ -574,16 +574,43 @@ pub(crate) fn apply_one(cat: &mut Catalogue, stamp: &Stamp, fact: &Fact) {
             sample_rate,
             channels,
         } => {
-            cat.encodings.entry(*encoding).or_insert(Encoded {
-                audio: *audio,
-                // The binding, if one was ranked before these bytes were described.
-                recording: cat.bound.get(encoding).copied(),
-                format: *format,
-                bitrate: *bitrate,
-                length_ms: *length_ms,
-                sample_rate: *sample_rate,
-                channels: *channels,
-            });
+            // **The latest description, not the first** — #309.
+            //
+            // This was `or_insert`, so an encoding kept whatever it was first
+            // described as and every later description was recorded and then
+            // ignored. That is the opposite of the convention every other
+            // descriptive fact here follows — `EncodingClaimed` says it in as
+            // many words, "last writer wins, as every descriptive fact does" —
+            // and nothing at this site argued for the exception.
+            //
+            // What it cost, measured: 32 encodings in four albums read as up to
+            // six times their length — *Neon Bible*'s `My Body Is a Cage` at
+            // 1,735.7s for a track that decodes to 287.4s. **The correct
+            // length was already in the log for all 32.** Each was described
+            // twice: on 2026-09-06 by the bitrate estimate, and on 2026-09-09
+            // at 13:20 UTC by the frame count `4f95d56` introduced. The fix had
+            // reached every one of them, and the fold threw it away.
+            //
+            // That is why a re-import could not repair it, and rightly wrote
+            // nothing: the description it produced was already in the log, so
+            // `drop_repeats_since` dropped it as a repeat.
+            //
+            // **The binding stays the binding's.** `recording` is read from
+            // `cat.bound` — the map `EncodingBound` owns — exactly as before,
+            // so a re-description can never move an encoding to a different
+            // recording.
+            cat.encodings.insert(
+                *encoding,
+                Encoded {
+                    audio: *audio,
+                    recording: cat.bound.get(encoding).copied(),
+                    format: *format,
+                    bitrate: *bitrate,
+                    length_ms: *length_ms,
+                    sample_rate: *sample_rate,
+                    channels: *channels,
+                },
+            );
         }
         Fact::EncodingBound { encoding, from, to } => {
             let key = (*encoding, from.map(|f| cat.merges.resolve(f)));
@@ -2439,6 +2466,72 @@ mod identification_tests {
             }
             .blast(),
             Blast::Narrow,
+        );
+    }
+
+    /// **An encoding is what it was last described as** — #309.
+    ///
+    /// The case that happened, with its numbers: `My Body Is a Cage` was
+    /// described on 2026-09-06 as 1,735.7s by a bitrate estimate, then again on
+    /// 2026-09-09 as 287.4s by counting frames. Both were in the log. The fold
+    /// kept the first, so the library read six times too long while holding
+    /// the right answer — and 32 encodings in four albums were the same.
+    #[test]
+    fn a_later_description_replaces_an_earlier_one_and_keeps_the_binding() {
+        use crate::model::encoding::Format;
+        let enc = Id::<crate::model::entity::Encoding>::derived(b"my body is a cage");
+        let rec = Id::<Recording>::derived(b"the recording it is bound to");
+        let audio = crate::audio_id::AudioId {
+            scheme: 1,
+            hash: 309,
+        };
+        let described = |length_ms: u32| Fact::EncodingDescribed {
+            encoding: enc,
+            audio,
+            format: Some(Format::Mp3),
+            bitrate: 32,
+            length_ms,
+            sample_rate: Some(44_100),
+            channels: Some(2),
+        };
+        let records = log([
+            Fact::EncodingBound {
+                encoding: enc,
+                from: None,
+                to: rec,
+            },
+            described(1_735_700),
+            described(287_399),
+        ]);
+
+        // **The instrument**, off the log rather than off the fold: two
+        // descriptions of one encoding, with different lengths, the correct one
+        // stamped later. Without it the claim below passes on a fixture that
+        // describes the encoding once, or twice identically, or in the other
+        // order — none of which poses the question.
+        let lengths_in_stamp_order: Vec<u32> = records
+            .iter()
+            .filter_map(|r| match &r.fact {
+                Fact::EncodingDescribed { length_ms, .. } => Some(*length_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lengths_in_stamp_order,
+            vec![1_735_700, 287_399],
+            "the fixture does not describe one encoding twice, stale first"
+        );
+
+        let cat = fold(&records);
+        let held = cat.encodings.get(&enc).expect("the encoding was folded");
+        assert_eq!(
+            held.length_ms, 287_399,
+            "the first description outlived a later one"
+        );
+        assert_eq!(
+            held.recording,
+            Some(rec),
+            "re-describing the bytes moved or dropped their binding"
         );
     }
 }

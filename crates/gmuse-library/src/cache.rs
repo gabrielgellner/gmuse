@@ -62,7 +62,14 @@ pub fn measurements_path() -> PathBuf {
     default_path().with_file_name("measurements.postcard")
 }
 
-/// Bump on any change to `Reads`, `Seen` or `Scanned`.
+/// Bump on any change to `Reads`, `Seen` or `Scanned` — **or to how any field
+/// of `Scanned` is measured**, even where its type is unchanged.
+///
+/// The second half is #309. A read is cached by a file's size and mtime, so a
+/// better measurement is never run on a file that has not changed: it is
+/// handed the answer the old code gave. `4f95d56` changed how `length_ms` is
+/// measured and left the shape alone, and only an unrelated shape change two
+/// days later (the bump to 2) flushed the stale reads. That was luck.
 ///
 /// 2 — the cache holds a whole [`crate::model::ingest::Scanned`] rather than
 /// just the audio measurement (#190), so a v1 file describes a different
@@ -158,12 +165,21 @@ pub fn projection_path(data_dir: &Path) -> PathBuf {
     default_path().with_file_name(format!("projection-{}.postcard", id.as_uuid().simple()))
 }
 
-/// Bump on any change to `Catalogue`, `Position` or anything they hold.
+/// Bump on any change to `Catalogue`, `Position` or anything they hold — **or
+/// to what the fold computes from the log**, even where the shape is unchanged.
 ///
 /// **Which is often**, and deliberately cheap: the snapshot is derived, so a
 /// bump costs one slow run and never a migration. That is the invariant that
 /// makes changing the projection's shape ordinary rather than dangerous.
-const PROJECTION_VERSION: u32 = 2;
+///
+/// 3 — #309. The fold began keeping an encoding's *latest* description rather
+/// than its first. Nothing about the catalogue's shape changed, so by the old
+/// rule this would not have been bumped — and every existing snapshot would
+/// have gone on serving the first-description answer, because a snapshot is
+/// trusted whenever the log's print matches and fixing the fold does not
+/// change the log. A fix that is correct and invisible is the failure #309 is
+/// about, and the rule above is widened so the next one is not.
+const PROJECTION_VERSION: u32 = 3;
 
 /// **What the logs looked like when a snapshot was taken** — #194.
 ///

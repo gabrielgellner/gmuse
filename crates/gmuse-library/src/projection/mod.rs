@@ -418,6 +418,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A re-description arriving on its own keeps the encoding's binding** — #309.
+    ///
+    /// Where the fix could actually break. A *full* fold re-ranks every binding
+    /// at the end, so there a description's `recording` is always overwritten
+    /// and cannot matter — which is why a test through `rebuild` alone passed
+    /// with the binding deliberately dropped. `apply` re-ranks only for
+    /// placements and bindings, and `EncodingDescribed` is narrow, so on the path
+    /// a running engine takes a re-description is folded with **no** re-rank:
+    /// whatever `recording` it writes is what the library believes.
+    #[test]
+    fn a_redescription_advanced_on_its_own_keeps_the_binding() {
+        use crate::model::encoding::Format;
+        use crate::model::entity::{Encoding, Recording};
+        let d = device(309);
+        let enc = Id::<Encoding>::derived(b"my body is a cage");
+        let rec = Id::<Recording>::derived(b"the recording it is bound to");
+        let described = |length_ms: u32| Fact::EncodingDescribed {
+            encoding: enc,
+            audio: crate::audio_id::AudioId {
+                scheme: 1,
+                hash: 309,
+            },
+            format: Some(Format::Mp3),
+            bitrate: 32,
+            length_ms,
+            sample_rate: Some(44_100),
+            channels: Some(2),
+        };
+        let mut clock = HybridClock::new(d);
+        let mut stamped = |wall: i64, fact: Fact| Record {
+            stamp: clock.stamp(wall),
+            fact,
+        };
+        let before: BTreeSet<Record> = [
+            stamped(
+                1_000,
+                Fact::EncodingBound {
+                    encoding: enc,
+                    from: None,
+                    to: rec,
+                },
+            ),
+            stamped(1_001, described(1_735_700)),
+        ]
+        .into_iter()
+        .collect();
+        let mut both = before.clone();
+        both.insert(stamped(5_000, described(287_399)));
+
+        let mut advanced = Projected::rebuild(&before);
+        // **The instrument**: the new description really went through `apply`,
+        // one narrow fact, rather than being refused into a full refold — which
+        // would re-rank and make the claim below true for the wrong reason.
+        assert_eq!(
+            advanced.advance(&both).applied(),
+            1,
+            "the re-description was not applied incrementally, so the re-rank-free path was not exercised"
+        );
+
+        let held = advanced.catalogue().encodings.get(&enc).expect("folded");
+        assert_eq!(
+            held.length_ms, 287_399,
+            "the later description did not take"
+        );
+        assert_eq!(
+            held.recording,
+            Some(rec),
+            "advancing a re-description dropped the binding"
+        );
+        assert_eq!(
+            advanced.catalogue(),
+            Projected::rebuild(&both).catalogue(),
+            "advancing a re-description did not land where rebuilding would"
+        );
+    }
+
     /// **A snapshot older than the log is caught up, not thrown away.**
     ///
     /// The ordinary case once this is wired in: something appended since the
