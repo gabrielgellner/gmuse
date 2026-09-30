@@ -15,6 +15,8 @@ import subprocess
 from pathlib import Path
 from typing import Final
 
+from gmuse_tools.text import fold_accents
+
 AUDIO: Final = (".mp3", ".flac", ".ogg", ".opus", ".m4a", ".wav", ".aac", ".wma")
 
 #: Terms whose casing no source gets right, applied to the final term.
@@ -259,8 +261,25 @@ def compare_key(title: str) -> str:
     (Interluuube)` and `Sleepless (Stephan Bodzin Remix)` keep their suffixes,
     which is the line worth holding: a remix is a different recording and a
     guest is not.
+
+    **Accents are folded, not kept** — #296. `\u00e9`.isalnum() is `True`, so
+    `Electric Caf\u00e9` and `Electric Cafe` used to key differently, and
+    [`tracklist_match`] below intersects *sets* of these — no threshold, so one
+    accent is a hard miss worth a whole track. Measured on the Kraftwerk 2009
+    remasters: seven tracks, every duration within 2s, one accented character,
+    and the verdict came back `named (86%)` rather than `exact`. `exact` is the
+    only verdict a tool acts on unattended, so on an unpinned run that is the
+    difference between accepting a correct release and refusing it. 53 titles
+    across 33 album folders in this library key differently for this reason.
+
+    **The alphabet policy stays `str.isalnum`**, which is why this does not
+    just call `identify.folded`: that keeps `[a-z0-9]`, and a title in a
+    non-Latin script would fold to the empty string — whereupon every such
+    title keys alike and the set intersection calls them the same track. No
+    title here is entirely non-Latin today; the guard is for the library this
+    one is growing into.
     """
-    return "".join(c for c in FEATURING.sub("", title).lower() if c.isalnum())
+    return "".join(c for c in fold_accents(FEATURING.sub("", title)).lower() if c.isalnum())
 
 
 #: Below this share of matching titles a candidate is not worth offering.

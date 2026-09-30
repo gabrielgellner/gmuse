@@ -78,6 +78,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 import gmuse_core
 
+from gmuse_tools.text import fold_accents
+
 from gmuse_tools.library import open_library
 import mutagen
 import typer
@@ -1249,9 +1251,7 @@ def folded(text: str) -> str:
     `lvismejia` and `lvismeja`, which then do not match — and the first version
     of this check refused both of that artist's tracks for exactly that reason.
     """
-    decomposed = unicodedata.normalize("NFKD", text or "")
-    without_marks = "".join(c for c in decomposed if not unicodedata.combining(c))
-    return re.sub(r"[^a-z0-9]", "", without_marks.lower())
+    return re.sub(r"[^a-z0-9]", "", fold_accents(text).lower())
 
 
 def named_in(credit: str) -> set[str]:
