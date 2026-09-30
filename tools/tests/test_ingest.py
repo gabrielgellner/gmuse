@@ -498,3 +498,74 @@ class TestASilentServerIsNotAnEmptyAnswer:
         monkeypatch.setattr(ing, "cache", lambda: None)
         with pytest.raises(ing.bronze.UnansweredError):
             ing.identify("Possessed by Paul James", "Feed the Family", ["Texas Rose"])
+
+
+def test_the_album_artist_is_the_artist_and_not_the_credit() -> None:
+    """One artist credited two ways must still file under one name — #306.
+
+    MusicBrainz holds one Kylie Minogue, `2fddb92d`. *Fever* and *Greatest
+    Hits 87–97* credit her as `Kylie`; *The Maxis* credits `Kylie Minogue`.
+    `albumartist` drives `file_under`, which is a directory, and keying it on
+    the credit filed one artist into two folders — 287 files under
+    `Kylie Minogue/` and 24 under `Kylie/`.
+
+    **The instrument is the artist id**, computed off the fixture rather than
+    off either rendered name: asserting only that both come out `Kylie Minogue`
+    passes just as well on a fixture that describes two different artists who
+    happen to share a name, which is the thing this is meant to rule out.
+    """
+    from gmuse_tools.ingest import credit  # noqa: PLC0415
+
+    KYLIE = {"id": "2fddb92d-24b2-46a5-bf28-3aed46f4684c", "name": "Kylie Minogue", "sort-name": "Minogue, Kylie"}
+    as_kylie = [{"name": "Kylie", "artist": KYLIE}]
+    as_full = [{"name": "Kylie Minogue", "artist": KYLIE}]
+
+    # The instrument: these are one artist, and they really do print differently.
+    assert as_kylie[0]["artist"]["id"] == as_full[0]["artist"]["id"], "the fixture is two artists"
+    assert as_kylie[0]["name"] != as_full[0]["name"], "the fixture does not differ by credit"
+
+    # The claim: what a directory is named by agrees; what performed it does not.
+    assert credit(as_kylie).filed == credit(as_full).filed == "Kylie Minogue"
+    assert credit(as_kylie).joined == "Kylie"
+    assert credit(as_full).joined == "Kylie Minogue"
+
+
+def test_a_real_collaboration_still_files_under_both_with_its_join_phrase() -> None:
+    """The fold must not flatten a genuine multi-artist credit — #306.
+
+    The join phrases come from the credit either way, so where the credit names
+    and the artist names agree — the ordinary case — nothing changes. Guarded
+    because taking the artists' own names is exactly the change that could have
+    dropped the ` & ` and minted one artist called `AB`.
+    """
+    from gmuse_tools.ingest import credit  # noqa: PLC0415
+
+    both = [
+        {
+            "name": "Stephan Bodzin",
+            "artist": {"id": "a", "name": "Stephan Bodzin", "sort-name": "Bodzin, Stephan"},
+            "joinphrase": " & ",
+        },
+        {"name": "Marc Romboy", "artist": {"id": "b", "name": "Marc Romboy", "sort-name": "Romboy, Marc"}},
+    ]
+    assert len({a["artist"]["id"] for a in both}) == 2, "the fixture is not two artists"
+    assert credit(both).filed == "Stephan Bodzin & Marc Romboy"
+    assert credit(both).filed == credit(both).joined
+    assert credit(both).names == ["Stephan Bodzin", "Marc Romboy"]
+
+
+def test_a_featured_guest_keeps_its_join_phrase_through_the_fold() -> None:
+    """The fix changes which *name* each credit contributes, never how many.
+
+    Guarded alongside the collaboration above because a guest credit is the
+    shape where a careless join would drop a name entirely.
+    """
+    from gmuse_tools.ingest import credit  # noqa: PLC0415
+
+    guest = [
+        {"name": "Kylie Minogue", "artist": {"id": "k", "name": "Kylie Minogue"}, "joinphrase": " feat. "},
+        {"name": "Nick Cave", "artist": {"id": "n", "name": "Nick Cave"}},
+    ]
+    assert credit(guest).joined == "Kylie Minogue feat. Nick Cave"
+    assert credit(guest).filed == "Kylie Minogue feat. Nick Cave"
+    assert credit(guest).names == ["Kylie Minogue", "Nick Cave"]

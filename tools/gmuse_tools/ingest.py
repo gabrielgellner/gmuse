@@ -112,9 +112,10 @@ UNSAFE: Final = str.maketrans(UNSAFE_MAP)
 
 @dataclass(frozen=True)
 class Credit:
-    """A MusicBrainz artist credit, in the four shapes the tags want."""
+    """A MusicBrainz artist credit, in the shapes the tags want."""
 
     joined: str
+    filed: str
     names: list[str]
     ids: list[str]
     sort: str
@@ -508,9 +509,26 @@ def credit(artist_credit: list[dict[str, Any]]) -> Credit:
     the credit itself carries. The list is what `ARTISTS` gets, which is the
     field that lets one album file under each of its artists (#60) and the one
     thing no string split can reconstruct afterwards.
+
+    **`filed` is the same join over the artists' own names** — #306, and the
+    difference is the whole issue. `a["name"]` is the *credit*: what this one
+    release chose to print. `a["artist"]["name"]` is the **artist**. They are
+    usually the same string and sometimes not: MusicBrainz holds one Kylie
+    Minogue, `2fddb92d`, and *Fever* and *Greatest Hits 87–97* credit her as
+    `Kylie` while *The Maxis* credits `Kylie Minogue`.
+
+    `albumartist` drives `file_under`, which is a directory, and
+    `storage-layout.md` says the tree may use **structural facts only** — who
+    made it. Keyed on the credit instead, those three releases filed one artist
+    into two folders: 287 files under `Kylie Minogue/` and 24 under `Kylie/`.
+
+    The join phrases come from the credit either way, so a real collaboration
+    still reads as one: `Stephan Bodzin & Marc Romboy` is unchanged, because
+    there the credit names and the artist names agree.
     """
     return Credit(
         joined="".join(a.get("name", "") + a.get("joinphrase", "") for a in artist_credit),
+        filed="".join(a["artist"]["name"] + a.get("joinphrase", "") for a in artist_credit),
         names=[a["artist"]["name"] for a in artist_credit],
         ids=[a["artist"]["id"] for a in artist_credit],
         sort="".join(a["artist"].get("sort-name", "") + a.get("joinphrase", "") for a in artist_credit),
@@ -551,7 +569,10 @@ def write_vorbis(path: Path, release: dict[str, Any], disc: dict[str, Any], trac
     put("title", track["title"])
     put("album", release["title"])
     put("artist", performer.joined)
-    put("albumartist", album.joined)
+    # **The artist, not the credit** — #306. `TPE1`/`artist` above keeps the
+    # credit, because "A feat. B" is what performed this track; this one
+    # becomes a directory and must name who made it.
+    put("albumartist", album.filed)
     put("artistsort", performer.sort)
     put("albumartistsort", album.sort)
     put("artists", performer.names)
@@ -602,7 +623,8 @@ def write_id3(path: Path, release: dict[str, Any], disc: dict[str, Any], track: 
     tag.setall("TIT2", [TIT2(encoding=3, text=track["title"])])
     tag.setall("TALB", [TALB(encoding=3, text=release["title"])])
     tag.setall("TPE1", [TPE1(encoding=3, text=performer.joined)])
-    tag.setall("TPE2", [TPE2(encoding=3, text=album.joined)])
+    # **The artist, not the credit** — #306, as for `albumartist` above.
+    tag.setall("TPE2", [TPE2(encoding=3, text=album.filed)])
     tag.setall("TSOP", [TSOP(encoding=3, text=performer.sort)])
     tag.setall("TSO2", [TSO2(encoding=3, text=album.sort)])
     tag.setall("TRCK", [TRCK(encoding=3, text=f"{track['position']}/{len(disc['tracks'])}")])
