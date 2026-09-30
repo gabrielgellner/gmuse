@@ -9,7 +9,7 @@ gmuse-tools identify fetch|propose      what a recording is
 gmuse-tools quality  survey|propose     what the bytes are
 gmuse-tools genre    fetch|propose|hierarchy|apply|snapshot
 gmuse-tools cache    stats|prune        what an authority said
-gmuse-tools audit    library|dj|duplicates  what is wrong
+gmuse-tools audit    library|dj|identity|bindings|duplicates  what is wrong
 gmuse-tools paths    survey             what a path knows
 gmuse-tools covers   survey|apply       the art out of the tags
 gmuse-tools tags     normalise
@@ -38,6 +38,7 @@ from __future__ import annotations
 import typer
 
 from gmuse_tools import (
+    audit_bindings,
     audit_dj,
     audit_identity,
     audit_library,
@@ -95,6 +96,7 @@ ingest.register(app)
 audit_library.register(audit_app)
 audit_dj.register(audit_app)
 audit_identity.register(audit_app)
+audit_bindings.register(audit_app)
 duplicates.register(audit_app)
 genre_fetch.register(genre_app)
 genre_propose.register(genre_app)
