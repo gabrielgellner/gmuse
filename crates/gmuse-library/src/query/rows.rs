@@ -277,17 +277,102 @@ pub fn rows(
         if catalogue.bound.contains_key(encoding) {
             continue;
         }
+        // **This device's copy**, by the rule `open` follows for a named
+        // row: a locator is where *this* machine can reach the bytes, and
+        // a holding on another device is not an answer to "open this".
+        //
+        // Lifted out of the row so the filter below is asked about the same
+        // one — `path=` and `filename=` read it, and a filter answering about
+        // a locator the row will not carry is worse than not filtering.
+        let locator = library
+            .holdings_of(*encoding)
+            .into_iter()
+            .find(|(d, _)| *d == device.to_string())
+            .map(|(_, l)| l);
+        // **Asked about this row too** — #305.
+        //
+        // This loop pushed straight into `out` and never mentioned `keep`, so
+        // every row it produced was on the list whatever the filter said:
+        // measured, `artist="Zzzz No Such Artist"` returned **68 rows** on a
+        // library of 8,165, and `artist="Kraftwerk"` returned the 90 that
+        // matched plus the same 68. Byte-identical across filters, because the
+        // set never depended on one.
+        //
+        // What that cost is not cosmetic. `--every-copy` exists for passes
+        // about the bytes and `--help` advertises exactly one,
+        // `--filter 'cutoff<17000 and cliff>2500' --every-copy` — the re-buy
+        // list #87 asks for, which `CLAUDE.md` makes a decision brief. Rows
+        // arriving in it untested against its own stated condition is the
+        // failure that rule exists to prevent: a reader cannot tell which rows
+        // were judged.
+        //
+        // **Kept on the list, not dropped from it.** The comment above is
+        // right that these belong here; the bug was only that the filter
+        // stopped at the loop before.
+        if let Some(keep) = &keep {
+            // A claim has no recording, so it has no `CopyId` and `describe`
+            // has nothing to look up — `row_of_copy` returns `None` for
+            // exactly these. The row is built from what a claim *does* know,
+            // and every field it does not have stays `None`, which is what
+            // makes a predicate over one **false** rather than absent.
+            //
+            // `ReleaseType::Album` and `Held::Unknown` come in via `Default`
+            // and are the same defaults every untyped row in the library
+            // carries — "a default rather than a claim", as `ReleaseType`
+            // says of itself — so this invents nothing here that is not
+            // already true elsewhere.
+            let described = crate::model::rows::Drawn {
+                title: title.clone(),
+                title_if_named: (!title.is_empty()).then(|| title.clone()),
+                artist: (!artist.is_empty()).then(|| artist.clone()),
+                file_under: artist.clone(),
+                duration: std::time::Duration::from_millis(u64::from(
+                    catalogue
+                        .encodings
+                        .get(encoding)
+                        .map(|e| e.length_ms)
+                        .unwrap_or_default(),
+                )),
+                held: locator.is_some(),
+                // **The per-copy fields, off the copy this row is about** —
+                // the same read the loop above makes, so `verdict=`,
+                // `cutoff<` and `bitrate<` mean here what they mean there.
+                bitrate: library.encodings.encodings.get(encoding).map(|e| e.bitrate),
+                cutoff_hz: catalogue.measurements.get(encoding).map(|m| m.cutoff_hz),
+                cliff_db: catalogue
+                    .measurements
+                    .get(encoding)
+                    .and_then(|m| m.cliff_db),
+                verdict: library
+                    .encodings
+                    .encodings
+                    .get(encoding)
+                    .map(|e| e.verdict()),
+                sample_rate: library
+                    .encodings
+                    .encodings
+                    .get(encoding)
+                    .and_then(|e| e.sample_rate),
+                channels: library
+                    .encodings
+                    .encodings
+                    .get(encoding)
+                    .and_then(|e| e.channels),
+                ..Default::default()
+            };
+            let subject = crate::model::rows::Subject {
+                row: described.listed(),
+                locator: locator.as_deref(),
+                recording: None,
+            };
+            if !keep(&subject) {
+                continue;
+            }
+        }
         out.push(Queried {
             recording: None,
             encoding: Some(*encoding),
-            // **This device's copy**, by the rule `open` follows for a named
-            // row: a locator is where *this* machine can reach the bytes, and
-            // a holding on another device is not an answer to "open this".
-            locator: library
-                .holdings_of(*encoding)
-                .into_iter()
-                .find(|(d, _)| *d == device.to_string())
-                .map(|(_, l)| l),
+            locator,
             title: title.clone(),
             artist: artist.clone(),
             length_ms: catalogue
@@ -1141,5 +1226,176 @@ mod tests {
         assert!(row.locator.is_none());
         assert!(row.encoding.is_none());
         assert_eq!(row.title, "On the NAS");
+    }
+
+    /// **A filter reaches the bytes nothing has named** — #305.
+    ///
+    /// `rows` builds its list in two loops, and only the first asked `keep`.
+    /// The second — the #160 claims — pushed straight into `out`, so every row
+    /// it produced was on the list whatever the filter said. Measured on the
+    /// real library: `artist="Zzzz No Such Artist"` returned **68 rows** out of
+    /// 8,165, and the same 68 rode along behind every other filter.
+    ///
+    /// Two halves, and each has to be able to fail while the other passes.
+    /// Dropping the claims outright would satisfy the first and break the
+    /// second; never filtering them satisfies the second and breaks the first.
+    #[test]
+    fn a_filter_that_matches_nothing_does_not_return_the_unnamed_bytes() {
+        use crate::operations::populate::Admits;
+
+        // **Two roots, because the two rows are made two different ways.** An
+        // ordinary row is minted by a scan that admits anything; a claim is
+        // what the gate leaves behind when it does not. One root cannot be
+        // both, and a library of claims alone would let the first half below
+        // pass against a list that is empty for the wrong reason.
+        let ordinary = dir("filter-claims-named");
+        let gated = dir("filter-claims-held");
+        let named = ordinary.join("named.wav");
+        let held = gated.join("held.wav");
+        wav(&named, 2000);
+        wav(&held, 1000);
+
+        let mut i = crate::model::instance::Instance::new(device());
+        crate::operations::populate::populate(
+            &mut i,
+            std::slice::from_ref(&ordinary),
+            100,
+            Admits::Anything,
+            &mut crate::model::ingest::Reads::default(),
+        );
+        // The gate (#160): nothing names this one, so it is held back as a
+        // claim rather than catalogued.
+        let report = crate::operations::populate::populate(
+            &mut i,
+            std::slice::from_ref(&gated),
+            100,
+            Admits::Identified,
+            &mut crate::model::ingest::Reads::default(),
+        );
+        assert_eq!(report.unidentified.len(), 1, "the gate did not hold it");
+        // **Both roots in one call.** `reconcile` publishes what this device
+        // holds, so reconciling one root at a time retracts the other's
+        // holdings — the ordinary row came back with no locator and no
+        // encoding, and `filename=` had nothing to match.
+        crate::operations::populate::reconcile(
+            &mut i,
+            &[ordinary.clone(), gated.clone()],
+            100,
+            &mut crate::model::ingest::Reads::default(),
+        );
+
+        // Which encoding is which, **asked of the catalogue rather than of
+        // `rows`** — the instrument has to be computed some other way than the
+        // thing it vouches for (§13).
+        let before = Projected::rebuild(i.records());
+        let librarian = Librarian::from_catalogue(before.catalogue());
+        let locator_of = |e: &Id<crate::model::entity::Encoding>| {
+            librarian
+                .holdings_of(*e)
+                .into_iter()
+                .find(|(d, _)| *d == device().to_string())
+                .map(|(_, l)| l)
+                .expect("a holding on this device")
+        };
+        let claims: Vec<_> = before
+            .catalogue()
+            .claims
+            .keys()
+            .copied()
+            .filter(|e| !before.catalogue().bound.contains_key(e))
+            .collect();
+        assert_eq!(claims.len(), 1, "no claim to leak — nothing is under test");
+        let held_enc = claims[0];
+        assert_eq!(
+            locator_of(&held_enc),
+            held.display().to_string(),
+            "the claim is not the gated file"
+        );
+
+        // The claim is given an artist to filter on, so the positive half
+        // below is not asking about an empty string.
+        let mut log = i.records().clone();
+        log.extend(records(
+            200,
+            [Fact::EncodingClaimed {
+                encoding: held_enc,
+                artist: "Solo Claimant".to_string(),
+                title: "Nothing Named This".to_string(),
+            }],
+        ));
+        // **Not `scanned_plus`.** That rescans under `Admits::Anything`, which
+        // mints a recording for every file it finds — including the one the
+        // gate held back, so the claim under test would stop being one and the
+        // test would pass against a library that has nothing to leak.
+        let projection = Projected::rebuild(&log);
+
+        // **The instrument**, both halves computed off the catalogue rather
+        // than off the list this test is about.
+        //
+        // Unbound claims, not `claims.len()`: binding an encoding does not
+        // retract what its tags claimed, it makes the loop skip it — so the
+        // map still holds both and the count that matters is the one the loop
+        // actually walks.
+        let catalogue = projection.catalogue();
+        let unbound = catalogue
+            .claims
+            .keys()
+            .filter(|e| !catalogue.bound.contains_key(*e))
+            .count();
+        assert_eq!(
+            unbound, 1,
+            "no unnamed bytes survived to be filtered — the harness is testing nothing"
+        );
+        assert_eq!(
+            catalogue.recordings.len(),
+            1,
+            "no ordinary row to be narrowed to"
+        );
+
+        let ask = |filter: &str| {
+            let expr = crate::query::filter::Expr::parse(filter).expect("a filter");
+            rows_from(
+                &projection,
+                device(),
+                300,
+                Only::Everything,
+                Copies::Every,
+                Some(&expr),
+            )
+        };
+
+        // Half one: a filter that matches nothing returns nothing.
+        assert!(
+            ask(r#"artist="Zzzz No Such Artist""#).is_empty(),
+            "the unnamed bytes rode along behind a filter that matches nothing"
+        );
+        // And a filter that matches only the named row returns only it — the
+        // shape the live library showed as 158 rows for the 90 that matched.
+        let only_named = ask(r#"filename="named.wav""#);
+        assert_eq!(
+            only_named.len(),
+            1,
+            "a claim came back with an unrelated row"
+        );
+        assert!(
+            only_named[0].recording.is_some(),
+            "that is the claim, not the ordinary row"
+        );
+
+        // Half two: a claim is kept when it *does* match. It belongs on this
+        // list — the bug was never that it is here, only that nothing asked.
+        let only_claim = ask(r#"artist="Solo Claimant""#);
+        assert_eq!(
+            only_claim.len(),
+            1,
+            "the claim was dropped rather than filtered"
+        );
+        assert!(only_claim[0].recording.is_none(), "that is not the claim");
+        assert_eq!(only_claim[0].encoding, Some(held_enc));
+        assert_eq!(
+            only_claim[0].locator.as_deref(),
+            Some(held.display().to_string().as_str()),
+            "the row a pass would open is not the one the filter matched"
+        );
     }
 }
