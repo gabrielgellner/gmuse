@@ -298,6 +298,39 @@ impl Instance {
         // the cheapest rung there is.
         let known = self.catalogue();
 
+        // **Which artists already have a name** — #308, built once for the
+        // batch rather than kept on the instance, because this type owns a
+        // clock and a log and nothing derived that could drift out of step
+        // with them.
+        //
+        // `ArtistNamed` is a last-writer register, so restating it renames an
+        // artist the library already holds to whatever spelling *this* file
+        // used. That is not hypothetical: artist `6b7f8083` is one Kylie
+        // Minogue, named so by 410 assertions, and importing three releases
+        // that credit her as `Kylie` renamed her library-wide. She has also
+        // been asserted as `Various Artists` and `Nick Cave & the Bad Seeds`,
+        // from a compilation and a duet — had either been last, her whole
+        // catalogue would carry that name, and only assertion order did not.
+        //
+        // Measured before the guard: of 1,422 artists named, 47 had been given
+        // more than one name and **29 were showing one that was not the name
+        // most assertions gave them** — `MGMT` as `The Management`, `Bush` as
+        // `Bush X`, `UMFANG` as `Umfang`.
+        //
+        // **The rule `proposal.rs` already follows**, which is what makes this
+        // a hole rather than a new policy: it names an artist "only where it
+        // minted", for this reason in those words. The guard below is that
+        // rule reaching the import path. Correcting a name afterwards stays
+        // possible and stays something you *say* — `Proposal::Named`, #154.
+        let mut named: std::collections::HashSet<Id<Artist>> = self
+            .records
+            .iter()
+            .filter_map(|r| match &r.fact {
+                Fact::ArtistNamed { artist, .. } => Some(*artist),
+                _ => None,
+            })
+            .collect();
+
         for s in scan {
             let artist = Id::<Artist>::of_artist(s.artist_mbid, &s.artist);
             let encoding = Id::<Encoding>::of_audio(&s.audio);
@@ -340,7 +373,13 @@ impl Instance {
             // the other renamed Early James to `Early James & Sierra Ferrell`
             // across the library. The string is kept — as `as_credited` on the
             // credit, which is what a sleeve printed and where it belongs.
-            if !s.credit_is_joined {
+            //
+            // **And only where this artist has no name yet** — #308. A joined
+            // credit is one way a credit string is not a name; a credit that
+            // simply prints the act differently is the other, and only the
+            // first was guarded. `insert` answers and records in one step, so
+            // the second file of a batch cannot undo the first.
+            if !s.credit_is_joined && named.insert(artist) {
                 self.append(
                     now,
                     Fact::ArtistNamed {
@@ -383,13 +422,19 @@ impl Instance {
             // beside it rather than on it.
             for (role, name) in crate::model::qualifier::credits_in(&s.title) {
                 let who = Id::<Artist>::of_artist(None, &name);
-                self.append(
-                    now,
-                    Fact::ArtistNamed {
-                        artist: who,
-                        name: name.clone(),
-                    },
-                );
+                // Guarded like the two credits, though this id is derived from
+                // the very name being asserted and so cannot disagree with it.
+                // Uniform because the next reader should not have to work out
+                // which of the three was safe.
+                if named.insert(who) {
+                    self.append(
+                        now,
+                        Fact::ArtistNamed {
+                            artist: who,
+                            name: name.clone(),
+                        },
+                    );
+                }
                 self.credit(
                     now,
                     CreditOn::Recording(recording),
@@ -480,7 +525,13 @@ impl Instance {
                 // artist's and the string is the whole credit, so writing one
                 // as the other is a global rename. The string is kept on the
                 // credit below, which is where a sleeve's wording belongs.
-                if !s.album_credit_is_joined {
+                //
+                // **And only where this artist has no name yet** — #308. This
+                // is the site that renamed Kylie Minogue: her id comes from
+                // the album artist's MusicBrainz id, so it is stable while the
+                // credit string varies by release, and every import restated
+                // the name from whichever string that release printed.
+                if !s.album_credit_is_joined && named.insert(group_artist) {
                     self.append(
                         now,
                         Fact::ArtistNamed {
@@ -2842,6 +2893,85 @@ mod credit_tests {
                 .work
                 .is_none(),
             "the projection picked a winner where the data names two"
+        );
+    }
+
+    /// **Importing one album must not rename the artist** — #308.
+    ///
+    /// `ArtistNamed` is a last-writer register and every import restated one,
+    /// so an album crediting the act differently renamed it library-wide.
+    /// Measured on the real library before the guard: of 1,422 artists named,
+    /// 47 had been given more than one name and **29 were showing one that was
+    /// not the name most assertions gave them** — artist `6b7f8083`, one Kylie
+    /// Minogue with 410 assertions to that name, read `Kylie` because three
+    /// releases credit her that way and were imported last.
+    #[test]
+    fn importing_an_album_that_credits_the_act_differently_does_not_rename_it() {
+        let who = uuid::Uuid::from_u128(0x2fdd_b92d);
+        let scanned = |title: &str, credited: &str, hash: u128| Scanned {
+            audio: crate::audio_id::AudioId { scheme: 1, hash },
+            title: title.into(),
+            artist: credited.into(),
+            album: Some(title.into()),
+            album_artist: Some(credited.into()),
+            album_artist_mbid: Some(who),
+            artist_mbid: Some(who),
+            length_ms: 200_000,
+            ..Default::default()
+        };
+        let full = scanned("Rhythm of Love", "Kylie Minogue", 1);
+        let short = scanned("Fever", "Kylie", 2);
+
+        // **The instrument**, computed off the fixtures rather than off any
+        // name the library ends up showing: these must be one artist, and the
+        // two imports must really print that artist differently. Without both,
+        // the assertion below passes on a fixture that never posed the
+        // question — two artists who happen to agree, or one credited twice
+        // the same way.
+        assert_eq!(
+            full.album_artist_mbid, short.album_artist_mbid,
+            "the fixture describes two artists, so nothing could be renamed"
+        );
+        assert_ne!(
+            full.album_artist, short.album_artist,
+            "the fixture credits the artist identically, so there is no rename to resist"
+        );
+
+        let names_in = |log: &Instance| -> Vec<String> {
+            log.records()
+                .iter()
+                .filter_map(|r| match &r.fact {
+                    Fact::ArtistNamed { artist, name }
+                        if artist.as_uuid() == Id::<Artist>::of_artist(Some(who), "").as_uuid() =>
+                    {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // The full name arrives first, then the album that prints it short.
+        let mut log = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        log.ingest(100, std::slice::from_ref(&full));
+        log.ingest(200, std::slice::from_ref(&short));
+        assert_eq!(
+            names_in(&log),
+            vec!["Kylie Minogue".to_string()],
+            "a later album's credit renamed the artist"
+        );
+
+        // **And the other order gives the other name, which is the point.**
+        // The guard is "the first naming stands", not "the longer string
+        // wins" — asserting only the first order would pass just as well on a
+        // rule that preferred whichever name was longer.
+        let mut back = Instance::new(Id::from_uuid(uuid::Uuid::from_u128(1)));
+        back.ingest(100, std::slice::from_ref(&short));
+        back.ingest(200, std::slice::from_ref(&full));
+        assert_eq!(
+            names_in(&back),
+            vec!["Kylie".to_string()],
+            "the first naming did not stand"
         );
     }
 }
