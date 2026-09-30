@@ -19,6 +19,7 @@ from mutagen.id3 import APIC, ID3, TIT2, PictureType
 from gmuse_tools.covers import (
     THUMBNAIL_PX,
     dimensions,
+    folder_art,
     front_cover,
     has_cover,
     image_suffix,
@@ -201,3 +202,181 @@ def test_a_thumbnail_is_written_but_said_to_be_one(tmp_path: Path) -> None:
     big_row = plan(tmp_path, other, [full])
     assert big_row is not None
     assert big_row["why"] == ""
+
+
+# --- The art beside the audio — issue #304 -----------------------------------
+#
+# `covers` read the tags and nothing else, which is where the art was for 965
+# of 1055 folders. But 57 of 213 albums matched against their staging source
+# had an image on disk more than 1.5x larger than what the tag held, and 49
+# folders reported as having no cover at all sometimes had a 950x950 sleeve
+# sitting next to the music.
+#
+# So most of these are about *not* taking the biggest file: the folder is full
+# of decoys and they are systematic.
+
+
+def test_the_windows_media_cache_is_not_a_cover(tmp_path: Path) -> None:
+    """`AlbumArt_{GUID}_Large.jpg` is a 200px cache copy, never the source."""
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "AlbumArt_{C396AD83-FBC5-474C-BC95-70F5A0504E2C}_Large.jpg").write_bytes(jpeg(900, 900, pad=800))
+    (album / "AlbumArtSmall.jpg").write_bytes(jpeg(75, 75))
+    assert folder_art(album) is None, "a cache copy is not art somebody chose"
+
+    # The instrument: an ordinary name in the same folder *is* found, so the
+    # refusal is about the name and not about the folder or the bytes.
+    (album / "folder.jpg").write_bytes(jpeg(600, 600, pad=500))
+    found = folder_art(album)
+    assert found is not None
+    assert found[0].name == "folder.jpg"
+
+
+def test_a_portrait_inlay_is_not_a_sleeve(tmp_path: Path) -> None:
+    """The biggest file is often a back cover, a disc scan or an inlay.
+
+    On this library the largest images beside the audio include `802x2301`
+    and `941x1902` — Sublime inlays, taller than they are wide. A sleeve is
+    square, and that is what separates them without naming them.
+    """
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "inlay.jpg").write_bytes(jpeg(941, 1902, pad=2000))
+    (album / "front.jpg").write_bytes(jpeg(500, 500, pad=400))
+    found = folder_art(album)
+    assert found is not None
+    assert found[0].name == "front.jpg", "square wins over merely large"
+    assert max(found[1]) == 500
+
+
+def test_the_best_folder_image_is_not_always_the_first(tmp_path: Path) -> None:
+    """Jewel's *This Way*: `folder.jpg` is 200x199 and `folder(2).jpg` is 640x640."""
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "folder.jpg").write_bytes(jpeg(200, 199))
+    (album / "folder(1).jpg").write_bytes(jpeg(200, 200))
+    (album / "folder(2).jpg").write_bytes(jpeg(640, 640, pad=600))
+    found = folder_art(album)
+    assert found is not None
+    assert found[0].name == "folder(2).jpg"
+
+
+def test_nothing_embedded_takes_the_folder_without_asking(tmp_path: Path) -> None:
+    """*Pieces of You* had no tag picture and a 950x950 on disk.
+
+    With nothing to weigh it against there is no judgement to make, so it
+    goes through rather than being reported as "no front cover embedded".
+    """
+    album = tmp_path / "Artist" / "Album"
+    at = track(album, "01 A.mp3")  # no pictures at all
+    (album / "folder.jpg").write_bytes(jpeg(950, 950, pad=900))
+
+    row = plan(tmp_path, album, [at])
+    assert row is not None
+    assert row["apply"] == "y"
+    assert row["source"] == "folder.jpg"
+    assert row["px"] == "950x950"
+
+    assert write_one(album, [at], "folder.jpg") == "wrote cover.jpg from the folder"
+    assert (album / "cover.jpg").read_bytes() == jpeg(950, 950, pad=900)
+
+
+def test_a_bigger_folder_image_is_offered_not_taken(tmp_path: Path) -> None:
+    """It is usually the same sleeve scanned larger — and sometimes it is not.
+
+    57 of 213 albums have one, so this must not swap silently: which *image*
+    is the cover is a judgement, unlike which file is bigger.
+    """
+    album = tmp_path / "Artist" / "Album"
+    at = track(album, "01 A.mp3", (PictureType.COVER_FRONT, jpeg(500, 500, pad=100)))
+    (album / "folder.jpg").write_bytes(jpeg(1417, 1417, pad=1400))
+
+    row = plan(tmp_path, album, [at])
+    assert row is not None
+    assert row["apply"] == "", "a person decides which image is the cover"
+    assert row["source"] == "folder.jpg"
+    assert "1417x1417" in str(row["why"])
+    assert not list(album.glob("cover.*")), "and nothing was written"
+
+
+def test_a_folder_image_no_bigger_than_the_tag_is_left_alone(tmp_path: Path) -> None:
+    """The instrument for the test above: the same scan twice is not a finding.
+
+    Without this, every album with a `folder.jpg` would land in the review and
+    the offer would mean nothing.
+    """
+    album = tmp_path / "Artist" / "Album"
+    at = track(album, "01 A.mp3", (PictureType.COVER_FRONT, jpeg(600, 600, pad=500)))
+    (album / "folder.jpg").write_bytes(jpeg(640, 640, pad=540))  # only 1.07x
+
+    row = plan(tmp_path, album, [at])
+    assert row is not None
+    assert row["apply"] == "y", "the embedded one goes in as usual"
+    assert row["source"] == ""
+    assert row["why"] == ""
+
+
+def test_a_back_cover_or_disc_scan_is_not_the_front(tmp_path: Path) -> None:
+    """Shape alone does not separate these, which the first fix got wrong.
+
+    A disc scan is round on a square canvas and a back cover is the same size
+    as the front, so both pass a squareness test. Run over the real library,
+    the first version offered `back.jpeg`, `cd.jpg` and `cd back.jpg` as front
+    covers on three Aphex Twin albums.
+    """
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    for name in ("back.jpeg", "cd.jpg", "cd back.jpg", "inlay.jpg", "booklet.jpg"):
+        (album / name).write_bytes(jpeg(900, 900, pad=800))
+    assert folder_art(album) is None, "none of those is a front cover"
+
+    # The instrument: a front-cover name of the *same shape and smaller* is
+    # taken, so the refusal is about the name rather than the image.
+    (album / "front.jpg").write_bytes(jpeg(400, 400, pad=300))
+    found = folder_art(album)
+    assert found is not None
+    assert found[0].name == "front.jpg"
+
+
+def test_a_name_merely_containing_those_words_is_kept(tmp_path: Path) -> None:
+    """`Comeback.jpg` is not a back cover, and `Discovery.jpg` is not a disc."""
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "Discovery.jpg").write_bytes(jpeg(800, 800, pad=700))
+    found = folder_art(album)
+    assert found is not None, "the words have to stand alone to mean anything"
+    assert found[0].name == "Discovery.jpg"
+
+
+def test_a_name_that_says_front_beats_a_bigger_one_that_does_not(tmp_path: Path) -> None:
+    """Size alone picked a promo shot over the sleeve.
+
+    `Aphex Twin/Come to Daddy` holds twelve scans. The largest square one is
+    `promo.jpg` — a photograph of the artist — while `front2.jpg` and
+    `vinyl front.jpg` are the sleeve.
+    """
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "promo.jpg").write_bytes(jpeg(900, 900, pad=800))
+    (album / "front2.jpg").write_bytes(jpeg(435, 435, pad=300))
+    found = folder_art(album)
+    assert found is not None
+    assert found[0].name == "front2.jpg", "the sleeve wins even though it is smaller"
+
+    # The instrument: with no front-ish name present, the big one is still
+    # taken — so the preference is a ranking and not a second rejection list.
+    (album / "front2.jpg").unlink()
+    fallback = folder_art(album)
+    assert fallback is not None
+    assert fallback[0].name == "promo.jpg"
+
+
+def test_among_front_names_the_largest_wins(tmp_path: Path) -> None:
+    """The ranking is name first, then size — not name instead of size."""
+    album = tmp_path / "Artist" / "Album"
+    album.mkdir(parents=True)
+    (album / "front.jpg").write_bytes(jpeg(300, 300, pad=200))
+    (album / "cover art.jpg").write_bytes(jpeg(900, 900, pad=800))
+    found = folder_art(album)
+    assert found is not None
+    assert found[0].name == "cover art.jpg"

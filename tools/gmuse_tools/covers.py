@@ -40,6 +40,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import csv
+import re
 import struct
 from pathlib import Path
 from typing import Final
@@ -72,6 +73,38 @@ JPEG_MARK: Final = 0xFF
 #: Markers that stand alone, carrying no length to skip over: start and end of
 #: image, and the eight restart markers.
 JPEG_BARE: Final = frozenset({0xD8, 0xD9, *range(0xD0, 0xD8)})
+
+#: Names a media player left behind rather than art anybody chose — #304.
+#: Windows Media writes `AlbumArt_{GUID}_Large.jpg` at 200px and `_Small` at
+#: 75px, so the folder is full of copies that are worse than the tag.
+CACHE_NAME: Final = re.compile(r"albumart[_{]|albumartsmall|_small\b|folder\.jpg\.|thumbs\.db", re.IGNORECASE)
+
+#: Names that say the image is some *other* part of the packaging — #304.
+#: **Shape is not enough on its own**: a disc scan is round on a square
+#: canvas and a back cover is the same size as the front, so both pass a
+#: squareness test. The first run of this fix offered `back.jpeg`, `cd.jpg`
+#: and `cd back.jpg` as front covers on three albums.
+NOT_THE_FRONT: Final = re.compile(
+    r"(^|[^a-z])(back|rear|inlay|inside|booklet|tray|sleeve notes|obi|spine|matrix|disc|discs|cd\d*)([^a-z]|$)",
+    re.IGNORECASE,
+)
+
+#: Names that say "this is the front". **Preferred rather than required**,
+#: because plenty of folders only have `folder.jpg` — but where a folder
+#: holds a dozen scans, size alone picked `promo.jpg` over `front2.jpg` and
+#: `vinyl front.jpg`, which is a photograph of the artist rather than the
+#: sleeve.
+LOOKS_LIKE_FRONT: Final = re.compile(r"(^|[^a-z])(front|cover|folder)([^a-z]|$)", re.IGNORECASE)
+
+#: How square a cover has to be. **The decoys are the wrong shape**, which is
+#: what separates them without naming them: on this library the largest files
+#: beside the audio include `802x2301` and `941x1902` portrait inlays, plus
+#: back covers and disc scans. A sleeve is square.
+SQUARE: Final = 0.10
+
+#: How much larger an on-disk image must be before it is worth mentioning
+#: against the art already in the tag. Below this it is the same scan.
+BIGGER_BY: Final = 1.5
 
 #: Below this on the long side an image is a thumbnail rather than a cover. It
 #: is reported, not refused: the same picture is already what a player reads
@@ -145,6 +178,53 @@ def dimensions(data: bytes) -> tuple[int, int] | None:
     return None
 
 
+def _row(folder: Path, **cols: str) -> dict[str, object]:
+    """One review row, so every column exists on every row."""
+    row: dict[str, object] = {"apply": "", "cover": "", "px": "", "kb": "", "source": "", "why": ""}
+    row.update(cols)
+    row["path"] = str(folder)
+    return row
+
+
+def folder_art(folder: Path) -> tuple[Path, tuple[int, int]] | None:
+    """The best cover-shaped image sitting beside the audio, or None — #304.
+
+    **The folder is full of decoys, and they are systematic.** Windows Media's
+    `AlbumArt_{GUID}` cache is always small; `folder(1).jpg`, `folder(2).jpg`
+    and so on are numbered in no useful order — the 640x640 on Jewel's *This
+    Way* is `folder(2).jpg` while `folder.jpg` is 200x199; and the biggest
+    file is often a back cover, a disc scan or a portrait inlay rather than
+    the sleeve.
+
+    So "largest wins" is wrong, and the shape is what separates them: a
+    sleeve is square and an inlay is not.
+    """
+    best: tuple[tuple[int, int], Path, tuple[int, int]] | None = None
+    try:
+        here = sorted(p for p in folder.iterdir() if p.is_file())
+    except OSError:
+        return None
+    for path in here:
+        if path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            continue
+        if CACHE_NAME.search(path.name) or NOT_THE_FRONT.search(path.stem):
+            continue
+        try:
+            size = dimensions(path.read_bytes())
+        except OSError:
+            continue
+        if size is None or min(size) == 0:
+            continue
+        if abs(size[0] - size[1]) / max(size) > SQUARE:
+            continue
+        # **Rank before size.** A name that says "front" beats a bigger
+        # image that does not, so a promo shot cannot outrank the sleeve.
+        rank = (1 if LOOKS_LIKE_FRONT.search(path.stem) else 0, max(size))
+        if best is None or rank > best[0]:
+            best = (rank, path, size)
+    return (best[1], best[2]) if best else None
+
+
 def has_cover(folder: Path) -> bool:
     """Whether a cover file already sits in this folder."""
     try:
@@ -177,40 +257,54 @@ def plan(root: Path, folder: Path, files: list[Path]) -> dict[str, object] | Non
     """What this folder needs, or None when it already has a cover."""
     if has_cover(folder):
         return None
+    on_disk = folder_art(folder)
     art = front_cover(files)
+
+    if not is_album_level(root, folder):
+        return _row(folder, why="loose audio under an artist — no layout for a cover here (#20)")
+
+    # **Nothing in the tag is not the same as no art** (#304). 49 folders
+    # were reported as having no front cover embedded, and some of them had
+    # a 950x950 sleeve sitting beside the audio the whole time. With nothing
+    # to weigh it against there is no judgement to make, so it goes through.
     if art is None:
-        return {"apply": "", "cover": "", "px": "", "kb": "", "why": "no front cover embedded", "path": str(folder)}
+        if on_disk is None:
+            return _row(folder, why="no front cover embedded, and none in the folder")
+        path, size = on_disk
+        return _row(
+            folder,
+            apply="y",
+            cover=f"cover{path.suffix.lower()}",
+            px=f"{size[0]}x{size[1]}",
+            kb=f"{path.stat().st_size / 1024:.0f}",
+            source=path.name,
+            why="nothing embedded — taking the folder's",
+        )
+
     suffix = image_suffix(art)
     if suffix is None:
-        return {
-            "apply": "",
-            "cover": "",
-            "px": "",
-            "kb": f"{len(art) / 1024:.0f}",
-            "why": "embedded bytes are not an image",
-            "path": str(folder),
-        }
-    if not is_album_level(root, folder):
-        return {
-            "apply": "",
-            "cover": "",
-            "px": "",
-            "kb": f"{len(art) / 1024:.0f}",
-            "why": "loose audio under an artist — no layout for a cover here (#20)",
-            "path": str(folder),
-        }
+        return _row(folder, kb=f"{len(art) / 1024:.0f}", why="embedded bytes are not an image")
+
     size = dimensions(art)
-    why = ""
-    if size and max(size) < THUMBNAIL_PX:
-        why = f"thumbnail — {max(size)}px, worth replacing"
-    return {
-        "apply": "y",
-        "cover": f"cover{suffix}",
-        "px": f"{size[0]}x{size[1]}" if size else "",
-        "kb": f"{len(art) / 1024:.0f}",
-        "why": why,
-        "path": str(folder),
-    }
+    row = _row(
+        folder,
+        apply="y",
+        cover=f"cover{suffix}",
+        px=f"{size[0]}x{size[1]}" if size else "",
+        kb=f"{len(art) / 1024:.0f}",
+        why=f"thumbnail — {max(size)}px, worth replacing" if size and max(size) < THUMBNAIL_PX else "",
+    )
+
+    # **A bigger file beside the audio is an offer, not an answer.** It is
+    # usually the same sleeve scanned larger, and sometimes a different
+    # edition or the back. Measured: 57 of 213 albums have one. So it is
+    # named in the review and the row waits for a person, rather than being
+    # swapped in on size alone.
+    if size and on_disk and max(on_disk[1]) > max(size) * BIGGER_BY:
+        row["apply"] = ""
+        row["source"] = on_disk[0].name
+        row["why"] = f"embedded {size[0]}x{size[1]}, but {on_disk[1][0]}x{on_disk[1][1]} in the folder"
+    return row
 
 
 def _by_path(row: dict[str, object]) -> str:
@@ -229,8 +323,8 @@ def survey(root: Path, out: Path) -> None:
             continue
         rows.append(row)
         if row["apply"]:
-            tally[f"would write {row['cover']}"] += 1
-            if row["why"]:
+            tally[f"would write {row['cover']}" + (" from the folder" if row["source"] else "")] += 1
+            if str(row["why"]).startswith("thumbnail"):
                 tally["  of those, a thumbnail"] += 1
         else:
             tally[str(row["why"])] += 1
@@ -241,21 +335,36 @@ def survey(root: Path, out: Path) -> None:
     print(f"\n{len(rows)} folder(s) -> {out}")
 
 
-def write_one(folder: Path, files: list[Path]) -> str:
-    """Write one folder's cover. Returns what happened."""
-    if has_cover(folder):
-        return "already has a cover file"
-    art = front_cover(files)
-    if art is None:
-        return "no front cover embedded"
+def _put(folder: Path, art: bytes, how: str) -> str:
+    """Write the cover, or say why not. One place that touches the disk."""
     suffix = image_suffix(art)
     if suffix is None:
-        return "embedded bytes are not an image"
+        return f"{how} bytes are not a JPEG or a PNG"
     target = folder / f"cover{suffix}"
     if target.exists():
         return "already has a cover file"
     target.write_bytes(art)
-    return f"wrote cover{suffix}"
+    return f"wrote cover{suffix}" + (" from the folder" if how == "the folder image's" else "")
+
+
+def write_one(folder: Path, files: list[Path], source: str = "") -> str:
+    """Write one folder's cover. Returns what happened.
+
+    `source` names a file in the folder to copy instead of the embedded art —
+    what the review offered for #304. It is never guessed at here: an unnamed
+    source means the tag's picture, which is what this pass is for.
+    """
+    if has_cover(folder):
+        return "already has a cover file"
+    if source:
+        at = folder / source
+        if not at.is_file():
+            return "the folder image named in the review is gone"
+        return _put(folder, at.read_bytes(), "the folder image's")
+    art = front_cover(files)
+    if art is None:
+        return "no front cover embedded"
+    return _put(folder, art, "embedded")
 
 
 def apply(review: Path, *, write: bool) -> None:
@@ -274,7 +383,7 @@ def apply(review: Path, *, write: bool) -> None:
             continue
         files = [p for p in walk(folder) if p.parent == folder]
         try:
-            tally[write_one(folder, files)] += 1
+            tally[write_one(folder, files, row.get("source", ""))] += 1
         except OSError as err:
             tally[f"failed: {type(err).__name__}"] += 1
     for key, n in sorted(tally.items()):
