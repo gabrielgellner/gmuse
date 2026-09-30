@@ -11,6 +11,7 @@ gmuse-tools genre    fetch|propose|hierarchy|apply|snapshot
 gmuse-tools cache    stats|prune        what an authority said
 gmuse-tools audit    library|dj|duplicates  what is wrong
 gmuse-tools paths    survey             what a path knows
+gmuse-tools covers   survey|apply       the art out of the tags
 gmuse-tools tags     normalise
 gmuse-tools ingest   run
 ```
@@ -41,6 +42,7 @@ from gmuse_tools import (
     audit_identity,
     audit_library,
     bronze,
+    covers,
     duplicates,
     identify,
     ingest,
@@ -88,6 +90,7 @@ joined.register(app)
 version.register(app)
 paths.register(app)
 tags.register(app)
+covers.register(app)
 ingest.register(app)
 audit_library.register(audit_app)
 audit_dj.register(audit_app)
