@@ -1771,12 +1771,42 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     recording,
                     basis: Basis::MusicBrainz(listed.recording),
                 });
+                // **The artist the library already holds by this name, or a
+                // new one** — the rule the `Credited` arm above follows, and
+                // this arm did not.
+                //
+                // It minted `of_artist(None, name)` for every artist on every
+                // track, a name-keyed id, whatever the library already held. An
+                // import keys an artist on their MusicBrainz id wherever the tags
+                // carry one, so every such artist got a second, name-keyed twin
+                // the first time their album's tracklist was applied — the same
+                // person held twice, with their credits split between the two.
+                // Measured: one compilation's tracklist split 9 of its
+                // performers; applying the library's 550 tracklists to a copy of
+                // the log took `shelf artists` from 9 splits to 27, every new one
+                // an artist imported that day or an Aphex Twin alias.
+                //
+                // And `ArtistNamed` **only where it minted**, as #308 made the
+                // import do: the fact is a last-writer register, and restating it
+                // for an artist the library holds would rename them to this
+                // tracklist's spelling.
+                //
+                // Named and credited one artist at a time, so the facts land in
+                // the order the `Credited` arm writes them.
+                let mut resolved: Vec<Id<Artist>> = Vec::with_capacity(listed.artists.len());
                 for (at, name) in listed.artists.iter().enumerate() {
-                    let artist = Id::<Artist>::of_artist(None, name);
-                    facts.push(Fact::ArtistNamed {
-                        artist,
-                        name: name.clone(),
-                    });
+                    let artist = match library.artist_named(name) {
+                        Some(held) => held,
+                        None => {
+                            let minted = Id::<Artist>::of_artist(None, name);
+                            facts.push(Fact::ArtistNamed {
+                                artist: minted,
+                                name: name.clone(),
+                            });
+                            minted
+                        }
+                    };
+                    resolved.push(artist);
                     facts.push(Fact::CreditAsserted {
                         subject: CreditOn::Recording(recording),
                         artist,
@@ -1794,7 +1824,11 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     // enough**: it can name one artist and nothing about them,
                     // and it survives only until the tree reads credits
                     // instead. The credits above are the answer that is right.
-                    artist: Id::<Artist>::of_artist(None, &listed.artists[0]),
+                    //
+                    // The **resolved** first artist, so this and the credit
+                    // above name the same person rather than a held id and its
+                    // name-keyed twin.
+                    artist: resolved[0],
                 });
                 facts.push(Fact::TrackPlaced {
                     track: Id::<Track>::of_track(medium, recording),
@@ -4121,6 +4155,111 @@ mod merged {
             credits(&listed),
             credits(&repair),
             "the same two artists, at the same positions, on the same rung"
+        );
+    }
+
+    /// **A tracklist credits the artist the library already holds** — #181's
+    /// rule, which `Credited` kept and `Tracklisted` did not.
+    ///
+    /// Every name on a tracklist minted `of_artist(None, name)`, so a performer
+    /// held under a MusicBrainz-derived id got a second row the moment their
+    /// album's tracklist landed. Applying the 550 waiting on the real library
+    /// took `shelf artists` from 9 same-name splits to 27 — #310.
+    #[test]
+    fn a_tracklist_credits_the_artist_the_library_already_holds() {
+        /// `HELD`, plus one artist held under a MusicBrainz-derived id.
+        struct HoldsOne(Id<Artist>);
+        impl Holdings for HoldsOne {
+            fn holds(&self, s: Subject) -> bool {
+                HELD.holds(s)
+            }
+            fn bound(&self, e: Id<Encoding>) -> Option<Id<Recording>> {
+                HELD.bound(e)
+            }
+            fn identified(&self, r: Id<Recording>) -> Option<Basis> {
+                HELD.identified(r)
+            }
+            fn slot(&self, e: Id<Encoding>) -> Option<Slot> {
+                HELD.slot(e)
+            }
+            fn claim(&self, e: Id<Encoding>) -> Option<(String, String)> {
+                HELD.claim(e)
+            }
+            fn sleeve(&self, t: Id<Track>) -> Option<String> {
+                HELD.sleeve(t)
+            }
+            fn named(&self, a: Id<Artist>) -> Option<String> {
+                (a == self.0).then(|| "Keola Beamer".to_string())
+            }
+            fn artist_named(&self, name: &str) -> Option<Id<Artist>> {
+                (name == "Keola Beamer").then_some(self.0)
+            }
+        }
+
+        let held = Id::<Artist>::of_artist(Some(uuid::Uuid::from_u128(0x6ea11)), "Keola Beamer");
+        let minted = Id::<Artist>::of_artist(None, "Keola Beamer");
+        assert_ne!(
+            held, minted,
+            "if these ever coincide this test says nothing"
+        );
+
+        let listed = Proposal::Tracklisted {
+            release: pressed(),
+            position: 1,
+            format: None,
+            tracks: vec![Slotted {
+                position: 1,
+                recording: named(),
+                title: "Kaliponi Slack Key".into(),
+                artists: vec!["Keola Beamer".into(), "Moana Beamer".into()],
+                title_on_release: None,
+            }],
+            album: None,
+            title: None,
+        };
+        let text = serde_json::to_string(&listed).expect("serialises");
+        let (records, report) = parse(&text, dev(), 100, &HoldsOne(held));
+        assert_eq!(report.applied, 1, "{report}");
+        let facts: Vec<Fact> = records.into_iter().map(|r| r.fact).collect();
+
+        let credited: Vec<Id<Artist>> = facts
+            .iter()
+            .filter_map(|f| match f {
+                Fact::CreditAsserted { artist, .. } => Some(*artist),
+                _ => None,
+            })
+            .collect();
+        let newcomer = Id::<Artist>::of_artist(None, "Moana Beamer");
+        assert_eq!(
+            credited,
+            vec![held, newcomer],
+            "the held row, then a mint for the name nobody holds"
+        );
+
+        let renamed: Vec<Id<Artist>> = facts
+            .iter()
+            .filter_map(|f| match f {
+                Fact::ArtistNamed { artist, .. } => Some(*artist),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            renamed,
+            vec![newcomer],
+            "a name is written only where a row was minted (#308)"
+        );
+
+        let catalogued: Vec<Id<Artist>> = facts
+            .iter()
+            .filter_map(|f| match f {
+                Fact::RecordingCatalogued { artist, .. } => Some(*artist),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            catalogued,
+            vec![held],
+            "the recording's artist is the held row too"
         );
     }
 
