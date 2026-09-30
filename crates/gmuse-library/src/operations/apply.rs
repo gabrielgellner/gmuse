@@ -202,6 +202,20 @@ impl proposal::Holdings for Shelf {
             .collect();
         match found.into_iter().collect::<Vec<_>>().as_slice() {
             [one] => Some(*one),
+            [] => {
+                // **The row this name would mint, if a merge already retired
+                // it** — #310. A merge keeps the winner's name, so the loser's
+                // name is in no register and the scan above misses it; the
+                // caller would then mint that same loser and write
+                // `ArtistNamed` for it, which the fold redirects to the winner.
+                // Applying the Campfire Songs tracklist renamed Animal
+                // Collective that way, and 57 files would have moved.
+                let derived = Id::<crate::model::entity::Artist>::of_artist(None, name);
+                [&self.log, &self.disk]
+                    .into_iter()
+                    .map(|cat| cat.artist_merges.resolve(derived))
+                    .find(|&winner| winner != derived)
+            }
             _ => None,
         }
     }
@@ -537,6 +551,50 @@ mod tests {
             twice.artist_named("Dolly Parton"),
             None,
             "two people really do share a name"
+        );
+    }
+
+    /// **A name whose row a merge retired finds the row it went into** — #310.
+    ///
+    /// Campfire Songs was merged into Animal Collective, which kept its own
+    /// name, so no register says "Campfire Songs" any more. A lookup that
+    /// only scanned names minted Campfire Songs' old id again, and the
+    /// `ArtistNamed` that came with it was redirected to the winner and
+    /// renamed Animal Collective.
+    #[test]
+    fn a_name_merged_away_finds_the_artist_it_was_merged_into() {
+        use crate::model::entity::Artist;
+        use crate::projection::catalogue::Catalogue;
+
+        let winner =
+            Id::<Artist>::of_artist(Some(uuid::Uuid::from_u128(0xac)), "Animal Collective");
+        let retired = Id::<Artist>::of_artist(None, "Campfire Songs");
+
+        let mut cat = Catalogue::default();
+        cat.artist_names
+            .insert(winner, "Animal Collective".to_string());
+        cat.artist_merges
+            .merge(retired, winner)
+            .expect("a first merge is accepted");
+        assert_eq!(
+            cat.artist_merges.resolve(retired),
+            winner,
+            "the fixture must hold the merge, or this test says nothing"
+        );
+        let shelf = Shelf {
+            disk: Catalogue::default(),
+            log: cat,
+        };
+
+        assert_eq!(
+            shelf.artist_named("Campfire Songs"),
+            Some(winner),
+            "the retired name's row resolves to where it went"
+        );
+        assert_eq!(
+            shelf.artist_named("Sung Tongs"),
+            None,
+            "a name nobody merged is still a mint"
         );
     }
 
