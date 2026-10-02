@@ -183,6 +183,35 @@ def test_the_release_and_the_discs_come_from_the_files(tmp_path: Path) -> None:
     assert held_discs(d) == (mbid, {1, 2})
 
 
+def test_an_ogg_disc_is_read_as_the_disc_it_is(tmp_path: Path) -> None:
+    """Disc 2 of an Ogg album was proposed as disc 1 — #316.
+
+    `held_discs` filtered on `ingest.AUDIO`, which is mp3 and flac, so an Ogg
+    folder read as nothing and fell back to `{1}`: a disc the library did not
+    hold, refused at `apply`, and the disc that was held never tracklisted.
+    Bill Monroe's *Essential 1945-1949*, disc 2 only, is the worked case.
+    """
+    from mutagen.oggvorbis import OggVorbis  # noqa: PLC0415
+
+    import tests.flacfixture as fixture  # noqa: PLC0415
+    from gmuse_tools.ingest import held_discs  # noqa: PLC0415
+
+    mbid = "427715df-495f-46be-8d40-7f5c86b79679"
+    d = tmp_path / "Essential 1945-1949"
+    d.mkdir()
+    p = d / "01 Track.ogg"
+    fixture.write_ogg(p)
+    tag = OggVorbis(p)
+    tag["discnumber"] = ["2"]
+    tag["musicbrainz_albumid"] = [mbid]
+    tag.save()
+    # The instrument, read without the code under test: the fixture really is
+    # Ogg Vorbis and really says disc 2, so a `{1}` below can only be the bug.
+    assert OggVorbis(p)["discnumber"] == ["2"]
+
+    assert held_discs(d) == (mbid, {2})
+
+
 def test_a_folder_two_records_got_mixed_in_is_skipped(tmp_path: Path) -> None:
     """Guessing which pressing is right would catalogue the wrong tracklist over both."""
     from gmuse_tools.ingest import held_discs  # noqa: PLC0415

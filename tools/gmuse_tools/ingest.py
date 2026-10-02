@@ -47,8 +47,6 @@ from pathlib import Path
 from typing import Any, Final
 
 import gmuse_core
-
-from gmuse_tools.library import open_library
 import typer
 from mutagen import File
 from mutagen.flac import FLAC
@@ -72,7 +70,9 @@ from mutagen.id3 import (
 )
 
 from gmuse_tools import bronze
+from gmuse_tools.genre.common import AUDIO as READABLE
 from gmuse_tools.genre.common import compare_key, out_path, tracklist_match, walk, write_tsv
+from gmuse_tools.library import open_library
 
 MB: Final = "https://musicbrainz.org/ws/2"
 #: Everything needed in one request. Each `inc` is a round trip saved against a
@@ -1112,7 +1112,11 @@ def held_discs(folder: Path) -> tuple[str, set[int]]:
     ids: set[str] = set()
     discs: set[int] = set()
     for path in folder.iterdir():
-        if path.suffix.lower() not in AUDIO:
+        # **What `walk` reads, not what `ingest` writes** — #316. `AUDIO` is
+        # the two formats `apply` can tag; this only reads, and on an Ogg
+        # folder the narrower set found nothing and fell back to disc 1 — a
+        # disc the library did not hold, while the one it did went untracked.
+        if path.suffix.lower() not in READABLE:
             continue
         tags = File(path, easy=True) or {}
         for mbid in tags.get("musicbrainz_albumid") or []:
