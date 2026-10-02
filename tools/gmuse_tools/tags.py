@@ -68,6 +68,7 @@ from mutagen.id3 import ID3, USLT, ID3NoHeaderError
 from mutagen.mp3 import MP3
 
 from gmuse_tools.genre.common import out_path, walk, write_tsv
+from gmuse_tools.paths import STUMP_LENGTHS
 
 #: APE keys that are mp3gain's own bookkeeping. All superseded by rsgain's ID3
 #: frames, and `MP3GAIN_UNDO` is the record of an audio change made years ago
@@ -94,6 +95,7 @@ TALLY_LINES: Final = {
     "drop_id3v1": "ID3v1 to remove",
     "drop_extra_id3": "stacked ID3v2 to remove",
     "carry_id3": "frames to carry out of a stacked tag",
+    "restore_id3": "ID3v1 stumps to restore from a stacked tag",
     "id3_differs": "stacked tags differ on content — the leading one is kept",
     "id3_conflict": "stacked tags disagree — left for a person",
     "salvage_lyrics": "lyrics to migrate into ID3",
@@ -309,6 +311,30 @@ class Stacked(NamedTuple):
     differs: list[str]
     #: Frames only the stacked tags hold. Carried across, never dropped.
     salvage: dict[str, object]
+    #: Frames where the leading value is an ID3v1 stump of the stacked one —
+    #: #315. The stacked value replaces it; see `is_stump_of`.
+    restore: dict[str, object]
+
+
+def is_stump_of(kept: object, behind: object) -> bool:
+    """Whether the leading value is an ID3v1 cut of the one behind it — #315.
+
+    **Not "the shorter is a prefix of the longer".** `Hurt` against
+    `Hurt (Live)` is a prefix and a different recording, and preferring the
+    longer there changes which version the file claims. What makes a cut is the
+    **length**: 30 is the ID3v1 field and 29 the same cut once a reader strips
+    the pad, which is `paths.STUMP_LENGTHS` and #302's definition. A 29 is a
+    stump only when something continues it, and here the stacked value is that
+    something.
+
+    Text frames only, compared as their single value: a frame carrying a list
+    is not the shape an ID3v1 round trip leaves.
+    """
+    a, b = getattr(kept, "text", None), getattr(behind, "text", None)
+    if not (isinstance(a, list) and isinstance(b, list) and len(a) == len(b) == 1):
+        return False
+    short, full = str(a[0]), str(b[0])
+    return len(short) in STUMP_LENGTHS and len(full) > len(short) and full.startswith(short)
 
 
 def id3_split(path: Path) -> Stacked:
@@ -327,24 +353,34 @@ def id3_split(path: Path) -> Stacked:
       the ids. Carried over before the cut, the way lyrics are carried out of
       an APE tag. The first cut of this fix dropped them, which on this
       material meant deleting the better record.
+
+    And a fourth that is not a difference at all: **restore** — the leading
+    value is an ID3v1 stump of the stacked one (#315). `Flushed From the
+    Bathroom of Y` in front of `…of Your Heart`, three times in one day's
+    imports. Keeping the leading tag there writes the stump into the one tag
+    that survives and deletes the only whole copy with the stacked one.
     """
     chain = id3_chain(path)
     if len(chain) < ID3_STACKED:
-        return Stacked([], [], {})
+        return Stacked([], [], {}, {})
     data = path.read_bytes()
     keeping = _frames_of(data[chain[0][1] : chain[0][1] + chain[0][2]])
     conflicts: list[str] = []
     differs: list[str] = []
     salvage: dict[str, object] = {}
+    restore: dict[str, object] = {}
     for _, start, span in chain[1:]:
         for key, frame in _frames_of(data[start : start + span]).items():
             if key not in keeping:
                 salvage.setdefault(key, frame)
             elif str(keeping[key]) != str(frame):
+                if not is_identity(key) and is_stump_of(keeping[key], frame):
+                    restore.setdefault(key, frame)
+                    continue
                 into = conflicts if is_identity(key) else differs
                 if key not in into:
                     into.append(key)
-    return Stacked(sorted(conflicts), sorted(differs), salvage)
+    return Stacked(sorted(conflicts), sorted(differs), salvage, restore)
 
 
 def id3_conflicts(path: Path) -> list[str]:
@@ -461,7 +497,7 @@ def plan(path: Path) -> dict[str, object] | None:
     # ID3v1, and said nothing about a second ID3v2 tag stacked behind the
     # first — which mutagen never reads and 39% of the staging tree carries.
     stacked = max(len(id3_chain(path)) - 1, 0)
-    split = id3_split(path) if stacked else Stacked([], [], {})
+    split = id3_split(path) if stacked else Stacked([], [], {}, {})
 
     if not (drop_ape or drop_v1 or upgrade or stacked):
         return None
@@ -480,6 +516,7 @@ def plan(path: Path) -> dict[str, object] | None:
         "drop_id3v1": "y" if drop_v1 else "",
         "drop_extra_id3": str(stacked) if stacked else "",
         "carry_id3": key_label(split.salvage),
+        "restore_id3": key_label(split.restore),
         "id3_differs": key_label(split.differs),
         "id3_conflict": key_label(split.conflicts),
         "salvage_lyrics": f"{len(lyrics)} chars" if salvage else "",
@@ -524,15 +561,18 @@ def merge_stacked(path: Path) -> tuple[bool, int]:
     `id3.save` rewrites the leading tag and would move every offset the cut
     depends on.
     """
-    salvage = id3_split(path).salvage
+    split = id3_split(path)
     if not strip_extra_id3_bytes(path):
         return False, 0
-    if salvage:
+    if split.salvage or split.restore:
         carried = id3_of(path) or ID3()
-        for frame in salvage.values():
+        # `add` replaces a frame with the same hash key — mutagen's strict
+        # path — so a restored stump is overwritten rather than kept beside the
+        # whole value (#315).
+        for frame in [*split.salvage.values(), *split.restore.values()]:
             carried.add(frame)
         carried.save(path, v2_version=4, v1=0)
-    return True, len(salvage)
+    return True, len(split.salvage) + len(split.restore)
 
 
 def normalise(path: Path, *, write: bool) -> str:

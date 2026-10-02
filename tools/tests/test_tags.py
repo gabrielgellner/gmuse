@@ -384,3 +384,68 @@ def test_an_identity_disagreement_still_stops_the_pass(tmp_path: Path) -> None:
     assert split.conflicts == ["TXXX:MusicBrainz Album Id"]
     assert split.differs == ["TRCK"], "and the harmless one is still merely noted"
     assert plan(at)["apply"] == ""
+
+
+# --- An ID3v1 stump in front of the full value — issue #315 --------------------
+#
+# The merge keeps the leading tag wherever both hold a frame, and on this
+# material the leading tag is where an ID3v1 round trip left its mark. Three
+# imports in one day would have written the stump into the one remaining tag
+# and deleted the full value with the stacked one.
+
+
+def text(frame_id: str, value: str) -> bytes:
+    """One ID3v2.4 text frame — TIT2, TALB and the like."""
+    payload = b"\x03" + value.encode()
+    return frame_id.encode() + synchsafe(len(payload)) + b"\x00\x00" + payload
+
+
+FULL = "Flushed From the Bathroom of Your Heart"
+STUMP = FULL[:30]
+
+
+def test_a_stump_in_the_leading_tag_gives_way_to_the_full_value(tmp_path: Path) -> None:
+    """At Folsom Prison #11, as it arrived."""
+    at = stacked(tmp_path / "stump", id3_tag(text("TIT2", STUMP)), id3_tag(text("TIT2", FULL)))
+    # The instrument, read from the bytes rather than from the code under test:
+    # the leading tag really is the stump, and the full value is really there.
+    assert str(ID3(at)["TIT2"]) == STUMP
+    assert len(STUMP) == 30, "the ID3v1 field width, which is what makes it a stump"
+    assert FULL.encode() in at.read_bytes()
+
+    merge_stacked(at)
+    assert len(id3_chain(at)) == 1
+    assert ID3(at)["TIT2"].text == [FULL], "one value, the whole one — not both, not the stump"
+
+
+def test_a_stump_is_reported_as_restored_not_as_a_difference(tmp_path: Path) -> None:
+    """What the survey says is what apply will do."""
+    at = stacked(tmp_path / "say", id3_tag(text("TALB", STUMP)), id3_tag(text("TALB", FULL)))
+    split = id3_split(at)
+    assert sorted(split.restore) == ["TALB"]
+    assert split.differs == [], "it no longer claims the leading one is kept"
+    assert plan(at)["restore_id3"] == "TALB"
+
+
+def test_a_longer_title_that_is_not_a_stump_is_still_a_difference(tmp_path: Path) -> None:
+    """`Hurt` against `Hurt (Live)` is a prefix and a different recording.
+
+    Preferring the longer value there changes which version the file claims,
+    which is the version-qualifier trap. Length is what makes a truncation.
+    """
+    at = stacked(tmp_path / "live", id3_tag(text("TIT2", "Hurt")), id3_tag(text("TIT2", "Hurt (Live)")))
+    split = id3_split(at)
+    assert split.restore == {}
+    assert split.differs == ["TIT2"]
+    merge_stacked(at)
+    assert ID3(at)["TIT2"].text == ["Hurt"], "the leading tag is kept, as before"
+
+
+def test_a_29_character_value_continued_by_the_stacked_tag_is_a_stump(tmp_path: Path) -> None:
+    """ID3v1 pads to 30 and readers strip the trailing blank — #302's worked case."""
+    full = "(I Got That) Boom Boom (feat. Ying Yang Twins)"
+    stump = full[:30].rstrip()
+    assert len(stump) == 29, "the fixture has to be the 29 case"
+    at = stacked(tmp_path / "29", id3_tag(text("TIT2", stump)), id3_tag(text("TIT2", full)))
+    merge_stacked(at)
+    assert ID3(at)["TIT2"].text == [full]
