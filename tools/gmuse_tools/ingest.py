@@ -498,6 +498,7 @@ def identify(artist: str, album: str, ours: list[str]) -> Match | None:
             {"query": f'artist:"{artist}" AND release:({album})', "fmt": "json", "limit": str(CANDIDATES)},
         )
     best: Match | None = None
+    exact: Match | None = None
     for candidate in (found or {}).get("releases", [])[:CANDIDATES]:
         full = asked(f"{MB}/release/{candidate['id']}", {"inc": INC, "fmt": "json"})
         if not full:
@@ -506,9 +507,32 @@ def identify(artist: str, album: str, ours: list[str]) -> Match | None:
         verdict, share = tracklist_match(ours, titles)
         if best is None or share > best.share:
             best = Match(full, verdict, share)
-        if verdict == "exact":
-            return best
-    return best
+        if verdict != "exact":
+            continue
+        # **An exact tracklist is not an Official release** — #312. The first
+        # exact match used to be taken whatever it was, and for *The 2nd Law*
+        # that was a Bootleg `instrumental`: the same titles, other recordings,
+        # bound to thirteen vocal tracks under the strongest verdict there is.
+        # The Official pressings were further down the same five candidates.
+        # So keep looking past anything less, and stop at the first Official
+        # one — which is the old cost exactly whenever that is the first.
+        if exact is None or standing(full) < standing(exact.release):
+            exact = Match(full, verdict, share)
+        if standing(full) == 0:
+            break
+    return exact or best
+
+
+#: How far a release's status is from one to tag a file from — #312. Lower wins
+#: among candidates whose tracklist already agrees exactly; it never makes a
+#: worse tracklist win. A missing status ranks just under Official: MusicBrainz
+#: leaves it blank on many real releases, and that says nothing against them.
+STANDING: Final = {"official": 0, "": 1, "promotion": 2, "withdrawn": 3, "cancelled": 3, "pseudo-release": 4}
+
+
+def standing(release: dict[str, Any]) -> int:
+    """`STANDING` for this release; a Bootleg or anything unlisted ranks last."""
+    return STANDING.get(str(release.get("status") or "").lower(), 5)
 
 
 def credit(artist_credit: list[dict[str, Any]]) -> Credit:
@@ -710,6 +734,13 @@ def report(match: Match | None, ours: list[str]) -> bool:
     titles = [t["title"] for m in release.get("media", []) for t in m.get("tracks", [])]
     print(f"  {release['title']} — {release.get('date', '?')} — {release.get('country', '??')}")
     print(f"  {release['id']}")
+    # **Say what kind of release it is** (#312). `exact (100%)` on a Bootleg
+    # `instrumental` is true and misleading on its own; with the status beside
+    # it a person sees what `--write` would assert before it does.
+    if standing(release) != 0:
+        what = release.get("status") or "no status"
+        why = f" — {release['disambiguation']}" if release.get("disambiguation") else ""
+        print(f"  NOT an Official release: {what}{why}")
     print(f"  tracklist: {match.verdict} ({match.share:.0%}), {len(ours)} ours vs {len(titles)} theirs")
     # **Named is accepted, and says so.** A person has looked; the count is
     # still shown, because a release with a different number of tracks is

@@ -636,3 +636,71 @@ def test_a_featured_guest_keeps_its_join_phrase_through_the_fold() -> None:
     assert credit(guest).joined == "Kylie Minogue feat. Nick Cave"
     assert credit(guest).filed == "Kylie Minogue feat. Nick Cave"
     assert credit(guest).names == ["Kylie Minogue", "Nick Cave"]
+
+
+# --- An exact tracklist on a Bootleg is still a Bootleg — issue #312 ----------
+
+
+TITLES = ["Supremacy", "Madness", "Panic Station"]
+
+
+def mb(release_id: str, status: str, disambiguation: str = "") -> dict[str, object]:
+    """One MusicBrainz release carrying `TITLES`, in the shape `identify` reads."""
+    return {
+        "id": release_id,
+        "title": "The 2nd Law",
+        "status": status,
+        "disambiguation": disambiguation,
+        "media": [{"position": 1, "tracks": [{"title": t, "position": i + 1} for i, t in enumerate(TITLES)]}],
+    }
+
+
+def fake_search(monkeypatch: pytest.MonkeyPatch, releases: list[dict[str, object]]) -> list[str]:
+    """Answer `asked` from `releases`, search first, and record which ids were looked up."""
+    looked: list[str] = []
+    by_id = {str(r["id"]): r for r in releases}
+
+    def asked(url: str, _params: dict[str, str]) -> dict[str, object]:
+        if url.endswith("/release"):
+            return {"releases": [{"id": r["id"]} for r in releases]}
+        rid = url.rsplit("/", 1)[1]
+        looked.append(rid)
+        return by_id[rid]
+
+    monkeypatch.setattr(ing, "asked", asked)
+    return looked
+
+
+def test_an_official_exact_match_beats_a_bootleg_one_found_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """*The 2nd Law*: the search ranked a Bootleg `instrumental` first — #312.
+
+    Both tracklists agree exactly, because an instrumental carries the same
+    titles, so the gate cannot tell them apart. Taking the first exact match
+    bound thirteen vocal tracks to their instrumental recordings. The Official
+    pressings were in the same five candidates and never considered.
+    """
+    fake_search(monkeypatch, [mb("boot", "Bootleg", "instrumental"), mb("official", "Official")])
+    # The instrument, computed without `identify`: both really are exact, so
+    # only the status can be what decides.
+    assert ing.tracklist_match(TITLES, TITLES)[0] == "exact"
+
+    match = ing.identify("Muse", "The 2nd Law", TITLES)
+    assert match is not None
+    assert match.release["id"] == "official"
+
+
+def test_an_official_first_match_ends_the_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preferring Official costs nothing when the first exact answer already is."""
+    looked = fake_search(monkeypatch, [mb("official", "Official"), mb("later", "Official"), mb("boot", "Bootleg")])
+    match = ing.identify("Muse", "The 2nd Law", TITLES)
+    assert match is not None
+    assert match.release["id"] == "official"
+    assert looked == ["official"], "nothing after an Official exact match is fetched"
+
+
+def test_a_match_that_is_not_official_says_so(capsys: pytest.CaptureFixture[str]) -> None:
+    """Where only a Bootleg agrees, a person sees that before `--write`."""
+    ing.report(ing.Match(mb("boot", "Bootleg", "instrumental"), "exact", 1.0), TITLES)
+    out = capsys.readouterr().out
+    assert "Bootleg" in out
+    assert "instrumental" in out
