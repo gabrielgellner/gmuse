@@ -416,6 +416,44 @@ def test_a_near_twin_does_not_steal_an_exact_title() -> None:
     assert got["b.mp3"] == "We Have Arrived (Aphex Twin QQT mix)"
 
 
+def test_identical_titles_are_seated_by_the_position_each_file_claims() -> None:
+    """Four tracks MusicBrainz calls one thing, and a tie broken by luck — #317.
+
+    *O Brother, Where Art Thou?* holds `I Am a Man of Constant Sorrow` at 5, 7,
+    13 and 16: MusicBrainz moves the qualifier into a disambiguation and the
+    guest into the credit, so their four titles are identical. Ours keep the
+    qualifier, which makes each of ours exactly as close to all four of theirs.
+    The tie went by list order, and 5 and 16 — the radio and band versions —
+    were written into each other's seats while every file already said which
+    seat was its own.
+    """
+    import difflib  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    from gmuse_tools.genre.common import compare_key  # noqa: PLC0415
+    from gmuse_tools.ingest import seated  # noqa: PLC0415
+
+    sorrow = "I Am a Man of Constant Sorrow"
+    ours = [
+        (Path("05.mp3"), f"{sorrow} (radio station version) (feat. Dan Tyminski)"),
+        (Path("07.mp3"), f"{sorrow} (instrumental)"),
+        (Path("13.mp3"), f"{sorrow} (instrumental)"),
+        (Path("16.mp3"), f"{sorrow} (with band) (feat. Dan Tyminski)"),
+    ]
+    claimed = [5, 7, 13, 16]
+    theirs = [({}, track(sorrow, n)) for n in (5, 7, 13, 16)]
+
+    # The instrument, computed without `seated`: each of ours scores the same
+    # against every one of theirs, so title similarity cannot decide and only
+    # the tie-break is under test.
+    for _, title in ours:
+        ratios = {difflib.SequenceMatcher(None, compare_key(title), compare_key(t["title"])).ratio() for _, t in theirs}
+        assert len(ratios) == 1, "the fixture must tie, or this tests something else"
+
+    got = {p.name: t["position"] for (p, _), (_, t) in seated(ours, theirs, claimed)}
+    assert got == {"05.mp3": 5, "07.mp3": 7, "13.mp3": 13, "16.mp3": 16}
+
+
 def test_titles_that_cannot_decide_fall_back_to_position() -> None:
     """The case `named_release` exists for.
 

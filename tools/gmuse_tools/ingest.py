@@ -142,6 +142,15 @@ AUDIO: Final = {".mp3", ".flac"}
 
 def our_titles(folder: Path) -> list[tuple[Path, str]]:
     """Each audio file and the title its tags claim, in track order."""
+    return [(p, t) for p, t, _ in our_tracks(folder)]
+
+
+def our_tracks(folder: Path) -> list[tuple[Path, str, int]]:
+    """`our_titles`, keeping the track number each file claims — #317.
+
+    `seated` needs it to break a tie between identical MusicBrainz titles, and
+    sorting by it then discarding it was how the tie came to be broken by luck.
+    """
     out: list[tuple[int, Path, str]] = []
     for path in folder.iterdir():
         if path.suffix.lower() not in AUDIO:
@@ -155,7 +164,7 @@ def our_titles(folder: Path) -> list[tuple[Path, str]]:
             title = str(tag["TIT2"].text[0]) if "TIT2" in tag else path.stem
             number = str(tag["TRCK"].text[0]).split("/")[0] if "TRCK" in tag else "0"
         out.append((position(number), path, title))
-    return [(p, t) for _, p, t in sorted(out)]
+    return [(p, t, n) for n, p, t in sorted(out)]
 
 
 def position(number: str) -> int:
@@ -735,7 +744,9 @@ class Wanted:
 
 
 def seated(
-    ours: list[tuple[Path, str]], theirs: list[tuple[dict[str, Any], dict[str, Any]]]
+    ours: list[tuple[Path, str]],
+    theirs: list[tuple[dict[str, Any], dict[str, Any]]],
+    claimed: list[int] | None = None,
 ) -> list[tuple[tuple[Path, str], tuple[dict[str, Any], dict[str, Any]]]]:
     """Which file becomes which track.
 
@@ -765,6 +776,14 @@ def seated(
     where titles cannot decide — a release MusicBrainz lists as `[untitled]`
     throughout, or this corpus's own `(Untitled) Red A1`. That is the case
     `named_release` exists for, and there position is the only signal there is.
+
+    **And a tie goes to the position the file claims** (#317). Where several of
+    *their* titles are identical, one of ours is exactly as close to all of
+    them, and breaking that by list order seated *O Brother*'s radio and band
+    versions of `I Am a Man of Constant Sorrow` in each other's places — while
+    both files said which place was theirs. `claimed` is each file's track
+    number, from `our_tracks`; it ranks below similarity, so it only ever
+    decides between pairings the titles cannot.
     """
     keyed_ours = [compare_key(t) for _, t in ours]
     keyed_theirs = [compare_key(t["title"]) for _, t in theirs]
@@ -774,9 +793,15 @@ def seated(
         for j, b in enumerate(keyed_theirs)
     ]
 
-    def strongest(scored_pair: tuple[float, int, int]) -> tuple[float, int, int]:
+    def off_by(i: int, j: int) -> int:
+        """How far their position sits from the one our file claims; 0 when it is unknown."""
+        if not claimed or not claimed[i]:
+            return 0
+        return abs(int(theirs[j][1].get("position") or 0) - claimed[i])
+
+    def strongest(scored_pair: tuple[float, int, int]) -> tuple[float, int, int, int]:
         ratio, i, j = scored_pair
-        return (-ratio, i, j)
+        return (-ratio, off_by(i, j), i, j)
 
     scored.sort(key=strongest)
 
@@ -801,7 +826,8 @@ def seated(
 
 def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> None:
     """Identify, tag, rename, and optionally move into the library."""
-    pairs = our_titles(folder)
+    tracks = our_tracks(folder)
+    pairs = [(p, t) for p, t, _ in tracks]
     if not pairs:
         print(f"  no audio in {folder}")
         return
@@ -818,7 +844,7 @@ def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> No
     release = match.release
     tally: collections.Counter[str] = collections.Counter()
     flat = [(m, t) for m in release["media"] for t in m["tracks"]]
-    for (path, _), (disc, track) in seated(pairs, flat):
+    for (path, _), (disc, track) in seated(pairs, flat, [n for _, _, n in tracks]):
         write_tags(path, release, disc, track)
         renamed = path.with_name(safe_name(track["position"], track["title"], path.suffix))
         if renamed != path:
