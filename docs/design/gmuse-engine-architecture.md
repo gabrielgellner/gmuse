@@ -776,6 +776,14 @@ and the pool across. The policy, because it is a policy and not a mechanism:
   socket is not bound until it returns, so an engine waiting there would never answer a handshake and a view's
   auto-start would time out against silence.
 
+**A device that leaves pauses what was playing** (#318). That is a different case from the lost device above. A stream
+built from the default device is never lost when the headphones go: the OS reroutes it to the speakers, and cpal reports
+`DeviceChanged` with no word on where it came from or where it went. The decoder answers the question the event does
+not, which is **whether the output we were on is still listed** (`audio::route`). If it is, something arrived or the
+default was switched by hand, and the stream follows it as before. If it is gone, the decoder pauses, publishes
+`playback` as for any pause, and puts `{device_gone, paused}` on `engine`. `set on_device_gone=continue` turns the pause
+off, and the setting survives a rebuild. Nothing resumes when the headphones come back, for the 3am reason above.
+
 **The generation is the engine's own count, not the handle's.** A rebuilt `PlayerHandle` starts a fresh `Shared` whose
 generation is zero, so passing that through would make the number go _backwards_ — and a generation that can repeat is
 one a `When::Frame` cannot be checked against, which is the whole point of #212.

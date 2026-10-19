@@ -6308,6 +6308,36 @@ Append here as decisions are made. Format: date, decision, rationale.
   exactly why the refinement is worth writing down rather than restating the original. And not a new process: still one
   habit, still one extra assertion. The addition is _where the assertion gets its value from_.
 
+- **2026-10-19** **A reroute that leaves a device behind pauses (#318). This revises 2026-08-27's "`DeviceChanged` is
+  informational" for that one direction.** Bluetooth headphones going to sleep made the OS move the stream to the laptop
+  speakers, and gmuse played on to the room. That entry was right that the stream survives a reroute and right that
+  following a device which _arrives_ "just works". It never asked what a reroute _leaves behind_, because cpal's event
+  does not say.
+
+  **The convention, surveyed rather than invented.** Apple pauses on `oldDeviceUnavailable` and frames it as privacy:
+  taking headphones off should not share what you were listening to. Android broadcasts `AUDIO_BECOMING_NOISY` and tells
+  a music player to pause. Spotify pauses and cannot be told not to. mpd pauses rather than stops when every output
+  fails. VLC, foobar2000 and cmus do nothing. The common rule is to pause when the old device goes, not when a new one
+  comes, and never to resume on reconnect. That last part is #241's decision already.
+
+  **The question is about the old device**, so that is what the decoder asks: is the output the stream was on still
+  listed? The rule is a pure function in `audio::route`, tested with lists rather than hardware. Two details came out of
+  writing it down.
+  - **The output that matters is the one we moved to, not the one we opened.** Put the headphones on mid-song and take
+    them off again, and the second reroute is about the headphones. A rule keyed to the opened device would answer
+    "still there", because the speakers are.
+  - **An unreadable list vouches for nothing.** The cost of a wrong answer is not symmetric. A needless pause costs one
+    keypress, and playing on to the room is the bug.
+
+  **A second look after half a second**, because the default-output listener and the device list are separate CoreAudio
+  properties, and nothing promises the list has caught up when the default moves. This is a guard against a race that
+  has not been measured: whether a first look ever sees the departed device is a question for real headphones.
+
+  **`on_device_gone = pause | continue`**, defaulting to `pause`, held by the engine because the engine holds the
+  stream. Writing it turned up a latent bug in `instruction_of`: `toggle`'s fallthrough arm meant "the one other key it
+  admits", which was the scope. The first new engine setting would have made `toggle on_device_gone` cycle the scope. It
+  now names `Scope` and refuses the rest.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
