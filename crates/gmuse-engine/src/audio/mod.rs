@@ -16,6 +16,7 @@ pub mod device;
 pub mod null;
 pub mod resample;
 mod ring;
+pub mod route;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,6 +34,39 @@ pub struct PlayerConfig {
     pub rate: Option<u32>,
     pub resample: resample::Quality,
     pub volume: f32,
+    /// What to do when the output we were playing on leaves — #318.
+    pub on_device_gone: OnDeviceGone,
+}
+
+/// **What to do when the output we were playing on leaves** — #318.
+///
+/// Headphones going to sleep make the OS move the stream to the speakers. Apple
+/// pauses there (`oldDeviceUnavailable`) and Android tells a player to
+/// (`AUDIO_BECOMING_NOISY`), and that is the default; `Continue` is the behaviour
+/// before #318, for anyone who wants the music to follow the OS wherever it goes.
+///
+/// **Only the leaving direction.** A device arriving, or a default switched by hand,
+/// is followed either way: plugging headphones in mid-song is not a reason to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnDeviceGone {
+    #[default]
+    Pause,
+    Continue,
+}
+
+impl OnDeviceGone {
+    pub const ALL: [OnDeviceGone; 2] = [OnDeviceGone::Pause, OnDeviceGone::Continue];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OnDeviceGone::Pause => "pause",
+            OnDeviceGone::Continue => "continue",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.label() == s)
+    }
 }
 
 /// **Which transport verb** — #225, `transport-keymap-spec.md` D-6 to D-8.
@@ -244,6 +278,12 @@ pub enum PlayerEvent {
     /// The OS moved playback to a different output and the stream survived.
     /// Worth telling the user; not worth treating as a failure.
     DeviceChanged,
+    /// **The output we were playing on left**, and the OS moved the stream
+    /// elsewhere — #318.
+    ///
+    /// `paused` says whether this pause was ours: `false` under
+    /// [`OnDeviceGone::Continue`], or when nothing was playing to pause.
+    DeviceGone { left: String, paused: bool },
 }
 
 /// Decibels spanned by the fader, from silence to unity.
@@ -333,6 +373,10 @@ pub struct Shared {
     /// plugged in, default device switched). Informational: playback carries
     /// on, so this must not be reported as an error.
     pub device_rerouted: AtomicBool,
+    /// **Whether a departed output pauses playback** — #318. An
+    /// [`OnDeviceGone`] as a flag, so a setting can change it while a stream
+    /// runs; only the decoder reads it, never the callback.
+    pub pause_when_gone: AtomicBool,
 
     /// **Which stream the frame counter is counting in** — #212.
     ///
@@ -458,6 +502,7 @@ impl Shared {
             flush_position: AtomicU64::new(0),
             device_lost: AtomicBool::new(false),
             device_rerouted: AtomicBool::new(false),
+            pause_when_gone: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             stream_generation: AtomicU32::new(0),
             map_seq: AtomicU64::new(0),
@@ -521,9 +566,13 @@ impl PlayerHandle {
         let (device, config) = device::preferred_config(&cfg)?;
         let device_rate = config.sample_rate;
         let device_channels = config.channels as usize;
+        let route = route::Route::on(device::output_of(&device));
 
         let (mut producer, consumer) = ring::new(device_rate, device_channels);
         let shared = Arc::new(Shared::new());
+        shared
+            .pause_when_gone
+            .store(cfg.on_device_gone == OnDeviceGone::Pause, Ordering::Relaxed);
         let position = cfg.volume.clamp(0.0, MAX_POSITION);
         shared.position.store(position.to_bits(), Ordering::Relaxed);
         shared
@@ -551,6 +600,7 @@ impl PlayerHandle {
                     device_rate,
                     device_channels,
                     cfg.resample,
+                    route,
                 );
             })
             .expect("failed to spawn decoder thread");
@@ -585,6 +635,9 @@ impl PlayerHandle {
 
         let (mut producer, consumer) = ring::new(RATE, CHANNELS);
         let shared = Arc::new(Shared::new());
+        shared
+            .pause_when_gone
+            .store(cfg.on_device_gone == OnDeviceGone::Pause, Ordering::Relaxed);
         let position = cfg.volume.clamp(0.0, MAX_POSITION);
         shared.position.store(position.to_bits(), Ordering::Relaxed);
         shared
@@ -608,6 +661,8 @@ impl PlayerHandle {
                     RATE,
                     CHANNELS,
                     cfg.resample,
+                    // Nothing is listening, so no output can leave.
+                    route::Route::on(None),
                 );
             })
             .expect("failed to spawn decoder thread");
@@ -786,6 +841,22 @@ impl PlayerHandle {
         self.shared
             .volume
             .store(gain_for(position).to_bits(), Ordering::Relaxed);
+    }
+
+    /// What a departed output does to playback from now on — #318.
+    pub fn set_on_device_gone(&self, to: OnDeviceGone) {
+        self.shared
+            .pause_when_gone
+            .store(to == OnDeviceGone::Pause, Ordering::Relaxed);
+    }
+
+    /// What a departed output does to playback now.
+    pub fn on_device_gone(&self) -> OnDeviceGone {
+        if self.shared.pause_when_gone.load(Ordering::Relaxed) {
+            OnDeviceGone::Pause
+        } else {
+            OnDeviceGone::Continue
+        }
     }
 }
 
@@ -966,6 +1037,7 @@ mod tests {
                 rate: None,
                 resample: resample::Quality::Fast,
                 volume: 1.0,
+                on_device_gone: Default::default(),
             },
             null::Pace::RealTime,
         )
@@ -1014,6 +1086,7 @@ mod tests {
                 rate: None,
                 resample: resample::Quality::Fast,
                 volume: 1.0,
+                on_device_gone: Default::default(),
             },
             null::Pace::Fast,
         )

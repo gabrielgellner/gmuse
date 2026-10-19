@@ -244,6 +244,10 @@ impl Control {
                         // **Where it was, before the handle that knew goes.**
                         let was = player.position();
                         let resuming = held.playing.clone();
+                        // **A setting outlives the stream it was set on** — #318. The
+                        // fresh handle opens from `cfg`, which is what the command line
+                        // said, not what a `set` said since.
+                        let on_device_gone = player.on_device_gone();
                         drop(player);
 
                         // **Wait for a device, honouring the intent that opened the
@@ -258,6 +262,7 @@ impl Control {
                             return;
                         };
                         player = fresh;
+                        player.set_on_device_gone(on_device_gone);
                         // **Monotonic, so a generation never repeats.** A fresh handle
                         // starts its own at zero; passing that through would make the
                         // number go backwards and a `When::Frame` uncheckable (#212).
@@ -558,6 +563,19 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 // Informational: the OS rerouted us and playback continues, so
                 // it is not a transport discontinuity.
                 PlayerEvent::DeviceChanged | PlayerEvent::Error(_) => {}
+                // **The output we were on left** — #318. When the decoder paused for
+                // it, that is a discontinuity like any pause, and every client hears
+                // of it on `playback`. The reason goes on `engine`, which §7.8 gives
+                // status; a view that wants to say *why* it paused reads it there.
+                PlayerEvent::DeviceGone { left, paused } => {
+                    moved |= paused;
+                    if let Some(engine) = engine.get().and_then(|weak| weak.upgrade()) {
+                        engine.publish(&Event::new(
+                            Topic::Engine,
+                            serde_json::json!({ "device_gone": left, "paused": paused }),
+                        ));
+                    }
+                }
             }
         }
 
@@ -857,6 +875,13 @@ fn apply(
         // **A scan is the librarian's job.** Routed rather than duplicated: `roots`
         // lives on the engine and the appender is the only thing that may start one
         // (#237).
+        // **Not a transport discontinuity**: it changes what a later reroute does,
+        // and nothing now.
+        Instruction::OnDeviceGone(to) => {
+            player.set_on_device_gone(to);
+            false
+        }
+
         Instruction::Rescan => {
             desk.want(Wanted::Rescan {
                 roots: roots.to_vec(),
@@ -1095,6 +1120,7 @@ mod tests {
             rate: None,
             resample: Default::default(),
             volume: 0.25,
+            on_device_gone: Default::default(),
         };
         let open = |asked: PlayerConfig| {
             // **The config is passed through unchanged**, which is the decision: a
@@ -1139,6 +1165,7 @@ mod tests {
             rate: None,
             resample: Default::default(),
             volume: 1.0,
+            on_device_gone: Default::default(),
         };
         let never = |_: PlayerConfig| Err(crate::audio::AudioError::Device("gone".into()));
         let waited = std::time::Instant::now();
@@ -1179,6 +1206,7 @@ mod tests {
                 rate: None,
                 resample: Default::default(),
                 volume: 1.0,
+                on_device_gone: Default::default(),
             },
             null::Pace::Fast,
         )
@@ -1242,6 +1270,7 @@ mod tests {
                 rate: None,
                 resample: Default::default(),
                 volume: 1.0,
+                on_device_gone: Default::default(),
             },
             null::Pace::Fast,
         )

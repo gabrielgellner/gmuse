@@ -71,6 +71,34 @@ pub(super) fn preferred_config(
     Ok((device, config))
 }
 
+/// **Who this device is**, for the route to judge a reroute by — #318.
+///
+/// `None` when the device will not give an id, which leaves the route with nothing
+/// to have left: the old behaviour, rather than a guess.
+pub(super) fn output_of(device: &cpal::Device) -> Option<super::route::Output> {
+    let id = device.id().ok()?;
+    let name = device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| id.to_string());
+    Some(super::route::Output { id, name })
+}
+
+/// **Where a default-device stream is now** — the default output after a reroute.
+pub(super) fn default_output() -> Option<super::route::Output> {
+    output_of(&cpal::default_host().default_output_device()?)
+}
+
+/// **Every output the host lists now**, or `None` if it would not say.
+///
+/// Outputs rather than every device, because the question is whether we could
+/// still be playing to it. A headset whose output went and whose microphone
+/// stayed is gone for this purpose.
+pub(super) fn present_outputs() -> Option<Vec<cpal::DeviceId>> {
+    let devices = cpal::default_host().output_devices().ok()?;
+    Some(devices.filter_map(|d| d.id().ok()).collect())
+}
+
 /// Time spent ramping between silence and full level on a transport change.
 ///
 /// Long enough to remove the discontinuity, short enough that pausing still

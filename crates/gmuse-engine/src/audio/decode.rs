@@ -89,6 +89,10 @@ struct Track {
     pending: Vec<f32>,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the decoder's whole wiring, each part from a different owner; a struct would only rename the list"
+)]
 pub(super) fn run(
     cmds: Receiver<PlayerCmd>,
     events: Sender<PlayerEvent>,
@@ -97,6 +101,7 @@ pub(super) fn run(
     device_rate: u32,
     device_channels: usize,
     quality: Quality,
+    mut route: super::route::Route,
 ) {
     let codecs = codec_registry();
     let mut track: Option<Track> = None;
@@ -132,14 +137,7 @@ pub(super) fn run(
         publish_crossed(&mut boundaries, &shared, &events);
 
         // Surface device state changes once each, as events.
-        if shared.device_lost.swap(false, Ordering::AcqRel) {
-            let _ = events.try_send(PlayerEvent::DeviceLost(
-                "output stream reported an error".into(),
-            ));
-        }
-        if shared.device_rerouted.swap(false, Ordering::AcqRel) {
-            let _ = events.try_send(PlayerEvent::DeviceChanged);
-        }
+        surface_device(&shared, &events, &mut route);
 
         let state = State::from_u8(shared.state.load(Ordering::Relaxed));
         let idle = track.is_none() || state == State::Stopped;
@@ -148,7 +146,16 @@ pub(super) fn run(
         // get back to decoding.
         let cmd = if idle {
             match cmds.recv() {
-                Ok(c) => Some(c),
+                Ok(c) => {
+                    // **A reroute that happened while idle is judged as idle** —
+                    // #318. The flag waited with us, and judged after this command
+                    // it would pause the song the command just started, for a
+                    // device that left while nothing was playing. And a recheck
+                    // owed from before the idle is about a song no longer playing.
+                    surface_device(&shared, &events, &mut route);
+                    route.settle();
+                    Some(c)
+                }
                 Err(_) => return,
             }
         } else {
@@ -839,6 +846,77 @@ fn track_duration(t: &Track) -> Option<Duration> {
     Some(Duration::from_secs_f64(time.as_secs_f64()))
 }
 
+/// **Turn the callback's device flags into events, and judge a reroute** — #318.
+///
+/// A reroute is judged by whether the output we were on is still listed
+/// ([`super::route`]); one that left pauses playback, if the setting says to and
+/// something is playing. **The pause is one store of `Paused`**, the same one
+/// `PlayerCmd::Pause` makes, so the callback fades out as for any pause and the
+/// playhead stays where it was.
+fn surface_device(shared: &Shared, events: &Sender<PlayerEvent>, route: &mut super::route::Route) {
+    judge_device(
+        shared,
+        events,
+        route,
+        std::time::Instant::now(),
+        &Look::HOST,
+    );
+}
+
+/// **Where to ask about outputs.** The host, except in a test, which cannot unplug
+/// a pair of headphones and can hand over a list that lacks them.
+struct Look {
+    default: fn() -> Option<super::route::Output>,
+    present: fn() -> Option<Vec<cpal::DeviceId>>,
+}
+
+impl Look {
+    const HOST: Look = Look {
+        default: super::device::default_output,
+        present: super::device::present_outputs,
+    };
+}
+
+/// [`surface_device`], told the time and where to look.
+fn judge_device(
+    shared: &Shared,
+    events: &Sender<PlayerEvent>,
+    route: &mut super::route::Route,
+    now: std::time::Instant,
+    look: &Look,
+) {
+    use super::route::Verdict;
+
+    if shared.device_lost.swap(false, Ordering::AcqRel) {
+        let _ = events.try_send(PlayerEvent::DeviceLost(
+            "output stream reported an error".into(),
+        ));
+    }
+
+    let verdict = if shared.device_rerouted.swap(false, Ordering::AcqRel) {
+        Some(route.rerouted(now, (look.default)(), (look.present)().as_deref()))
+    } else if route.due(now) {
+        route.recheck((look.present)().as_deref())
+    } else {
+        None
+    };
+
+    match verdict {
+        None => {}
+        Some(Verdict::Followed) => {
+            let _ = events.try_send(PlayerEvent::DeviceChanged);
+        }
+        Some(Verdict::Left(left)) => {
+            let paused = shared.pause_when_gone.load(Ordering::Relaxed)
+                && State::from_u8(shared.state.load(Ordering::Relaxed)) == State::Playing;
+            if paused {
+                shared.state.store(State::Paused as u8, Ordering::Relaxed);
+            }
+            let _ = events.try_send(PlayerEvent::DeviceGone { left, paused });
+        }
+    }
+}
+
 /// Symphonia's enabled decoders, plus libopus when the `opus` feature is on.
 fn codec_registry() -> CodecRegistry {
     let mut registry = CodecRegistry::new();
@@ -1130,6 +1208,7 @@ mod tests {
                 rate,
                 channels,
                 quality,
+                super::super::route::Route::on(None),
             );
         });
 
@@ -1450,5 +1529,133 @@ mod tests {
         let expected = expected_pcm(30_000, channels as u16, 1);
         assert_eq!(got, expected, "the last track was not played to its end");
         assert!(matches!(events.last(), Some(PlayerEvent::Finished)));
+    }
+
+    /// **#318 at the decoder: a reroute judged, and the pause it makes.**
+    ///
+    /// No sound card can be unplugged in a test, so [`Look`] hands over lists; what
+    /// is under test is everything after the lists — the flag consumed, the rule
+    /// asked, the store made, the event sent.
+    mod device_gone {
+        use super::*;
+        use crate::audio::route::{Output, RECHECK, Route};
+
+        fn id(s: &str) -> cpal::DeviceId {
+            cpal::DeviceId::new(cpal::default_host().id(), s)
+        }
+        fn named(s: &str) -> Output {
+            Output {
+                id: id(s),
+                name: s.to_string(),
+            }
+        }
+        fn speakers() -> Option<Output> {
+            Some(named("speakers"))
+        }
+        fn headphones() -> Option<Output> {
+            Some(named("headphones"))
+        }
+        fn only_speakers() -> Option<Vec<cpal::DeviceId>> {
+            Some(vec![id("speakers")])
+        }
+        fn both() -> Option<Vec<cpal::DeviceId>> {
+            Some(vec![id("speakers"), id("headphones")])
+        }
+
+        /// The headphones left and the stream went to the speakers.
+        const OFF: Look = Look {
+            default: speakers,
+            present: only_speakers,
+        };
+        /// The headphones arrived, and the speakers are still there.
+        const ON: Look = Look {
+            default: headphones,
+            present: both,
+        };
+
+        /// A stream that is playing, on `on`, with a reroute waiting to be judged.
+        fn playing_on(on: Option<Output>) -> (Shared, Route) {
+            let shared = Shared::new();
+            shared.state.store(State::Playing as u8, Ordering::Relaxed);
+            shared.device_rerouted.store(true, Ordering::Release);
+            (shared, Route::on(on))
+        }
+
+        fn state(shared: &Shared) -> State {
+            State::from_u8(shared.state.load(Ordering::Relaxed))
+        }
+
+        #[test]
+        fn headphones_leaving_pauses_what_was_playing() {
+            let (shared, mut route) = playing_on(headphones());
+            let (tx, rx) = crossbeam_channel::bounded(8);
+            assert_eq!(
+                state(&shared),
+                State::Playing,
+                "the instrument: it was playing"
+            );
+
+            judge_device(&shared, &tx, &mut route, std::time::Instant::now(), &OFF);
+
+            assert_eq!(state(&shared), State::Paused);
+            assert!(
+                matches!(
+                    rx.try_recv(),
+                    Ok(PlayerEvent::DeviceGone { ref left, paused: true }) if left == "headphones"
+                ),
+                "the pause is said, with the device that left"
+            );
+        }
+
+        #[test]
+        fn headphones_arriving_plays_on() {
+            let (shared, mut route) = playing_on(speakers());
+            let (tx, rx) = crossbeam_channel::bounded(8);
+
+            judge_device(&shared, &tx, &mut route, std::time::Instant::now(), &ON);
+
+            assert_eq!(state(&shared), State::Playing);
+            assert!(matches!(rx.try_recv(), Ok(PlayerEvent::DeviceChanged)));
+        }
+
+        /// **`continue` is the behaviour before #318**: said, and not acted on.
+        #[test]
+        fn continue_says_the_device_left_and_plays_on() {
+            let (shared, mut route) = playing_on(headphones());
+            shared.pause_when_gone.store(false, Ordering::Relaxed);
+            let (tx, rx) = crossbeam_channel::bounded(8);
+
+            judge_device(&shared, &tx, &mut route, std::time::Instant::now(), &OFF);
+
+            assert_eq!(state(&shared), State::Playing);
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(PlayerEvent::DeviceGone { paused: false, .. })
+            ));
+        }
+
+        /// **A departure the first look missed is paused by the second** — the list
+        /// still held the headphones when the default had already moved.
+        #[test]
+        fn a_stale_list_is_caught_by_the_recheck() {
+            let (shared, mut route) = playing_on(headphones());
+            let (tx, rx) = crossbeam_channel::bounded(8);
+            let t = std::time::Instant::now();
+            const STALE: Look = Look {
+                default: speakers,
+                present: both,
+            };
+
+            judge_device(&shared, &tx, &mut route, t, &STALE);
+            assert_eq!(state(&shared), State::Playing, "the first look was fooled");
+            assert!(matches!(rx.try_recv(), Ok(PlayerEvent::DeviceChanged)));
+
+            judge_device(&shared, &tx, &mut route, t + RECHECK, &OFF);
+            assert_eq!(state(&shared), State::Paused);
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(PlayerEvent::DeviceGone { paused: true, .. })
+            ));
+        }
     }
 }

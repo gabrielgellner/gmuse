@@ -222,6 +222,8 @@ pub enum SettingKey {
     RelativeNumbers,
     ReplayGain,
     WhichKeyDelay,
+    /// What a departed output does to playback — #318.
+    OnDeviceGone,
 }
 
 /// Which loudness tag to follow, per ReplayGain 2.0.
@@ -290,6 +292,9 @@ impl SettingKey {
             | SettingKey::Repeat
             | SettingKey::RepeatCurrent => None,
 
+            // **The stream's**, which the engine holds — #318.
+            SettingKey::OnDeviceGone => None,
+
             // **A view's own**, and meaningless to a process with no screen.
             SettingKey::AlbumHeaders => Some("album headers are a view's layout"),
             SettingKey::RelativeNumbers => Some("relative numbers are a view's gutter"),
@@ -324,6 +329,7 @@ impl SettingKey {
             SettingKey::RelativeNumbers => "relative_numbers",
             SettingKey::ReplayGain => "replaygain",
             SettingKey::WhichKeyDelay => "which_key_delay",
+            SettingKey::OnDeviceGone => "on_device_gone",
         }
     }
 
@@ -340,6 +346,7 @@ impl SettingKey {
             "relative_numbers" => SettingKey::RelativeNumbers,
             "replaygain" => SettingKey::ReplayGain,
             "which_key_delay" => SettingKey::WhichKeyDelay,
+            "on_device_gone" => SettingKey::OnDeviceGone,
             _ => return None,
         })
     }
@@ -356,6 +363,7 @@ impl SettingKey {
         SettingKey::RelativeNumbers,
         SettingKey::ReplayGain,
         SettingKey::WhichKeyDelay,
+        SettingKey::OnDeviceGone,
     ];
 }
 
@@ -389,6 +397,7 @@ pub enum SettingValue {
     /// question. The cost is that this is the one value `:` completion cannot
     /// enumerate — see `complete::setting_values`.
     Millis(u16),
+    OnDeviceGone(crate::audio::OnDeviceGone),
 }
 
 impl std::fmt::Display for SettingValue {
@@ -399,6 +408,7 @@ impl std::fmt::Display for SettingValue {
             SettingValue::Quality(q) => write!(f, "{}", quality_name(*q)),
             SettingValue::ReplayGain(m) => write!(f, "{}", m.label()),
             SettingValue::Millis(ms) => write!(f, "{ms}"),
+            SettingValue::OnDeviceGone(v) => write!(f, "{}", v.label()),
         }
     }
 }

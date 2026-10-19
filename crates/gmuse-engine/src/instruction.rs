@@ -73,6 +73,9 @@ pub enum Instruction {
     Rate(Option<u8>),
     Mode(Mode, Switch),
     Scope(ScopeTo),
+    /// What a departed output does to playback — #318. The engine's, because the
+    /// engine holds the stream that is rerouted.
+    OnDeviceGone(crate::audio::OnDeviceGone),
     /// Reconcile the roots the engine was started with.
     Rescan,
 }

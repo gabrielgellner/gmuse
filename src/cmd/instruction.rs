@@ -94,6 +94,7 @@ pub fn instruction_of(cmd: &Command) -> Result<Instruction, &'static str> {
                     if *on { Switch::On } else { Switch::Off },
                 )),
                 (None, SettingValue::Scope(mode)) => Ok(Instruction::Scope(ScopeTo::Set(*mode))),
+                (None, SettingValue::OnDeviceGone(to)) => Ok(Instruction::OnDeviceGone(*to)),
                 // A key `not_the_engines` admits whose value is neither: nothing to
                 // do, and saying so beats guessing.
                 _ => Err("that setting's value is not one the engine can act on"),
@@ -103,13 +104,52 @@ pub fn instruction_of(cmd: &Command) -> Result<Instruction, &'static str> {
             if let Some(why) = key.not_the_engines() {
                 return Err(why);
             }
-            match mode_of(*key) {
-                Some(which) => Ok(Instruction::Mode(which, Switch::Flip)),
-                // The only other key it admits is `Scope`, which cycles rather than
-                // flips — three values, not two.
-                None => Ok(Instruction::Scope(ScopeTo::Cycle)),
+            match (mode_of(*key), key) {
+                (Some(which), _) => Ok(Instruction::Mode(which, Switch::Flip)),
+                // **Named, not fallen through to** — #318. This arm was the
+                // catch-all for "the one other key it admits", and the first new
+                // engine setting would have toggled the scope.
+                (None, crate::cmd::SettingKey::Scope) => Ok(Instruction::Scope(ScopeTo::Cycle)),
+                (None, _) => Err("that setting is set, not toggled"),
             }
         }
         _ => Err("that command needs a view: it moves a cursor or a selection"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::OnDeviceGone;
+    use gmuse_engine::instruction::ScopeTo;
+
+    fn of(line: &str) -> Result<Instruction, &'static str> {
+        instruction_of(&crate::cmd::parse::command(line).expect("the line parses"))
+    }
+
+    /// **`on_device_gone` reaches the engine as itself** — #318. Both values, so a
+    /// translation that dropped the value would be caught on one of them.
+    #[test]
+    fn on_device_gone_is_carried_to_the_engine() {
+        for to in OnDeviceGone::ALL {
+            let got = of(&format!("set on_device_gone={}", to.label()));
+            assert!(
+                matches!(got, Ok(Instruction::OnDeviceGone(v)) if v == to),
+                "{} became {got:?}",
+                to.label()
+            );
+        }
+    }
+
+    /// **Toggling a setting that is set is refused, not read as the scope** — #318.
+    /// The arm after `mode_of` was a catch-all meaning "the other key it admits",
+    /// which was `Scope` until there were two.
+    #[test]
+    fn toggling_on_device_gone_does_not_cycle_the_scope() {
+        assert!(
+            matches!(of("toggle scope"), Ok(Instruction::Scope(ScopeTo::Cycle))),
+            "the instrument: toggling the scope still cycles it"
+        );
+        assert!(of("toggle on_device_gone").is_err());
     }
 }

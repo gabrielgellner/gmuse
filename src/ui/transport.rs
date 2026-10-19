@@ -252,6 +252,14 @@ pub trait Transport {
 
     /// Frames missing at the most recent underrun — how *badly* it starved.
     fn last_short_frames(&self) -> u32;
+
+    /// **What a departed output does to playback** — #318.
+    ///
+    /// A no-op by default, and **not a setting accepted and ignored**: over a socket
+    /// the setting reaches the engine as `set on_device_gone=…` through `cmd.exec_line`,
+    /// which `apply_setting` sends for every key `not_the_engines` admits. Only a
+    /// player in this process has a stream of its own to tell.
+    fn set_on_device_gone(&self, _to: crate::audio::OnDeviceGone) {}
 }
 
 impl Transport for crate::audio::PlayerHandle {
@@ -295,6 +303,9 @@ impl Transport for crate::audio::PlayerHandle {
     }
     fn underruns(&self) -> u32 {
         crate::audio::PlayerHandle::underruns(self)
+    }
+    fn set_on_device_gone(&self, to: crate::audio::OnDeviceGone) {
+        crate::audio::PlayerHandle::set_on_device_gone(self, to);
     }
     fn last_short_frames(&self) -> u32 {
         crate::audio::PlayerHandle::last_short_frames(self)

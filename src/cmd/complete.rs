@@ -142,7 +142,14 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
         "toggle" if words.len() == 1 => SettingKey::ALL
             .iter()
             // resample_quality is not a boolean, so it is not a toggle.
-            .filter(|k| !matches!(k, SettingKey::ResampleQuality | SettingKey::WhichKeyDelay))
+            .filter(|k| {
+                !matches!(
+                    k,
+                    SettingKey::ResampleQuality
+                        | SettingKey::WhichKeyDelay
+                        | SettingKey::OnDeviceGone
+                )
+            })
             .map(|k| k.name().to_string())
             .collect(),
 
@@ -206,6 +213,10 @@ fn setting_values(key: SettingKey, world: &World) -> Vec<String> {
         SettingKey::Scope => vec!["all".into(), "artist".into(), "album".into()],
         SettingKey::ResampleQuality => vec!["fast".into(), "balanced".into(), "high".into()],
         SettingKey::ReplayGain => vec!["off".into(), "track".into(), "album".into(), "auto".into()],
+        SettingKey::OnDeviceGone => crate::audio::OnDeviceGone::ALL
+            .iter()
+            .map(|v| v.label().to_string())
+            .collect(),
         SettingKey::WhichKeyDelay => world
             .numbers
             .iter()

@@ -2158,6 +2158,19 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
                 ui.audit.line("device", "output rerouted by the OS");
                 ui.notify("audio output changed");
             }
+            // **Said with the device's name**, because "paused" alone reads as a key
+            // you did not press — #318.
+            crate::audio::PlayerEvent::DeviceGone { left, paused } => {
+                ui.audit.line(
+                    "device",
+                    &format!("{left} left{}", if paused { ", paused" } else { "" }),
+                );
+                ui.notify(if paused {
+                    format!("paused: {left} disconnected")
+                } else {
+                    format!("{left} disconnected")
+                });
+            }
             crate::audio::PlayerEvent::Loaded {
                 path,
                 duration,
@@ -3823,6 +3836,10 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 }
                 SettingKey::WhichKeyDelay => {
                     ui.notify("which_key_delay needs :set, it is a number");
+                    return;
+                }
+                SettingKey::OnDeviceGone => {
+                    ui.notify("on_device_gone needs :set, pause or continue");
                     return;
                 }
             };
@@ -5896,6 +5913,13 @@ fn apply_setting(ui: &mut Ui, ctx: &Context<'_>, key: SettingKey, value: Setting
             ui.smart_artist_sort = v;
             // The projection is ours now, so this takes effect immediately.
             rebuild_library(ui, ctx);
+        }
+        // **Told to a player in this process**; an attached one was sent the line
+        // above, and `Remote` leaves this a no-op for that reason.
+        (SettingKey::OnDeviceGone, SettingValue::OnDeviceGone(to)) => {
+            if let Some(p) = ctx.player {
+                p.set_on_device_gone(to);
+            }
         }
         (SettingKey::ResampleQuality, SettingValue::Quality(_)) => {
             let _ = ctx;

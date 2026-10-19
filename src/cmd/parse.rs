@@ -839,6 +839,10 @@ fn setting_value(key: SettingKey, text: &str) -> Result<SettingValue, ParseError
         // what it is — and a bad one names itself rather than falling through
         // to the boolean arm, where "300" would have been rejected as not a
         // boolean and said so.
+        SettingKey::OnDeviceGone => SettingValue::OnDeviceGone(
+            crate::audio::OnDeviceGone::parse(text)
+                .ok_or_else(|| ParseError::Bad(text.into(), "pause or continue"))?,
+        ),
         SettingKey::WhichKeyDelay => SettingValue::Millis(
             text.parse::<u16>()
                 .map_err(|_| ParseError::Bad(text.into(), "milliseconds"))?,
@@ -1249,8 +1253,16 @@ mod tests {
                 value: SettingValue::Quality(Quality::High)
             }
         );
+        assert_eq!(
+            command("set on_device_gone=continue").unwrap(),
+            Command::Set {
+                key: SettingKey::OnDeviceGone,
+                value: SettingValue::OnDeviceGone(crate::audio::OnDeviceGone::Continue)
+            }
+        );
         // A boolean value for an enum key is an error, not a silent default.
         assert!(command("set scope=true").is_err());
+        assert!(command("set on_device_gone=true").is_err());
         assert!(command("set shuffle=maybe").is_err());
         assert!(command("set nosuchthing=1").is_err());
         assert!(command("set shuffle").is_err());

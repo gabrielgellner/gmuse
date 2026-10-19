@@ -679,6 +679,9 @@ impl Cli {
             rate: self.rate,
             resample: self.resample.quality(),
             volume: self.volume,
+            // **A setting, not a flag** — #318. `config.toml` speaks for it, and
+            // the view hands it on to whichever player it ends up with.
+            on_device_gone: Default::default(),
         }
     }
 }
