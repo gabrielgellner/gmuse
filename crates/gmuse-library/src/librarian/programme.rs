@@ -1542,6 +1542,66 @@ mod tests {
             "a page from the head claimed to start at the token asked for"
         );
     }
+
+    /// **A recalled shuffle is a new shuffle; a recalled order is the same order** — #320.
+    ///
+    /// The programme was written down without a place in it, so a shuffled one played from
+    /// the top every launch. Recall now reshuffles what was shuffled, by the seed it is
+    /// handed, and leaves an order nobody shuffled exactly as it was.
+    #[test]
+    fn a_recalled_shuffle_is_new_and_a_recalled_order_is_kept() {
+        use super::durable::{recall, remember};
+        let (l, rows) = library(12);
+        let device = crate::fixture::device();
+        let dir = std::env::temp_dir().join(format!("gmuse-recall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let order =
+            |plan: &Programme| -> Vec<CopyId> { plan.entries().iter().map(|e| e.row).collect() };
+        let written = |shuffled: bool| {
+            let mut plan = Programme::of(rows.clone());
+            plan.made_by(crate::programme::Scope::All, shuffled, None);
+            remember(&plan, &l, Some(&dir), device);
+        };
+
+        // **Shuffled: the seed decides**, so two launches with two seeds differ, and the
+        // same seed twice does not — which is what makes this a seed and not noise.
+        written(true);
+        let a = recall(&l, Some(&dir), device, 1).expect("recalled");
+        let b = recall(&l, Some(&dir), device, 2).expect("recalled");
+        let a_again = recall(&l, Some(&dir), device, 1).expect("recalled");
+        assert!(a.shuffled(), "the mode came back");
+        assert_eq!(
+            order(&a).len(),
+            rows.len(),
+            "the instrument: every entry came back"
+        );
+        let mut members = order(&a);
+        members.sort();
+        let mut expected = rows.clone();
+        expected.sort();
+        assert_eq!(members, expected, "a reshuffle lost or invented an entry");
+        assert_ne!(
+            order(&a),
+            rows,
+            "a recalled shuffle played from the top of the old order"
+        );
+        assert_ne!(order(&a), order(&b), "two seeds gave one order");
+        assert_eq!(order(&a), order(&a_again), "one seed gave two orders");
+
+        // **Not shuffled: kept exactly**, whatever the seed.
+        written(false);
+        let kept = recall(&l, Some(&dir), device, 1).expect("recalled");
+        assert!(!kept.shuffled());
+        assert_eq!(
+            order(&kept),
+            rows,
+            "an unshuffled programme came back reordered"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// **The programme, written down so it outlives the engine** — #257, `playback-programme.md` §9.
@@ -1621,10 +1681,18 @@ pub mod durable {
     /// `None` when there is nothing written, nothing readable, or nothing left of it — a
     /// programme of no entries is what `Programme::new` already gives, and returning it here
     /// would only claim a restore that restored nothing.
+    ///
+    /// **A shuffled programme comes back reshuffled, by `seed`.** What was written down is
+    /// the order and not the place in it, so a recalled shuffle played from the top every
+    /// launch — the same few hundred tracks, in the same order, for as long as nothing
+    /// edited the file. Saving the place as well would resume a run; a person opening the
+    /// player with shuffle on asked for a new one (#320). The entries are kept, so what was
+    /// put in by hand is still there; only its position is not, as with any reshuffle.
     pub fn recall(
         library: &dyn Listing,
         data_dir: Option<&std::path::Path>,
         device: Id<crate::model::entity::Device>,
+        seed: u64,
     ) -> Option<crate::programme::Programme> {
         let dir = data_dir?;
         let text = std::fs::read_to_string(path(dir, device)).ok()?;
@@ -1641,6 +1709,11 @@ pub mod durable {
         if rows.is_empty() {
             return None;
         }
+        let rows = if written.shuffled {
+            crate::next::shuffled(&rows, seed)
+        } else {
+            rows
+        };
 
         let mut plan = crate::programme::Programme::of(rows);
         // `within` is not written down (see the field): a restored programme is its

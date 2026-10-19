@@ -476,6 +476,8 @@ impl Desk {
                     &published.load().library,
                     read_from.as_deref(),
                     device,
+                    // **A new order per launch** — #320. See `recall`.
+                    crate::programme::fresh_seed(),
                 )
                 .unwrap_or_default();
 

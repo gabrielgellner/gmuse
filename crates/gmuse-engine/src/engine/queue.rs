@@ -90,7 +90,8 @@ pub struct Playing {
     /// The one ask in flight. **One at a time**, so replies cannot arrive out of order and
     /// a later gesture cannot overtake the refill it depends on.
     flight: Option<(crossbeam_channel::Receiver<Reply>, Awaiting)>,
-    /// Seeds the next reshuffle, bumped per reshuffle so two are different orders.
+    /// Seeds the next reshuffle, bumped per reshuffle so two are different orders, and
+    /// started fresh per engine so two launches are too.
     seed: u64,
     /// The rows of the view last played from, so a rebuild stays inside it — see
     /// [`Playing::start`]. `None` is the whole library.
@@ -104,7 +105,9 @@ impl Playing {
             standing: Standing::default(),
             queued: std::collections::VecDeque::new(),
             flight: None,
-            seed: 0x5EED,
+            // **Not a constant**, or every launch's first reshuffle repeats the last
+            // launch's — which it did, at `0x5EED`.
+            seed: gmuse_programme::fresh_seed(),
             within: None,
         }
     }
@@ -568,6 +571,15 @@ fn cue_of(cued: Cued) -> Cue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Two engines do not start from one seed** — #320. Every engine started at `0x5EED`,
+    /// so the first reshuffle of a launch was the first reshuffle of the launch before.
+    #[test]
+    fn two_engines_start_from_different_seeds() {
+        let (a, b) = (Playing::new(), Playing::new());
+        assert_ne!(a.seed, 0x5EED, "the old constant is back");
+        assert_ne!(a.seed, b.seed, "two engines drew one seed");
+    }
 
     /// A handle whose other end nothing services, so asks pile up where they can be counted.
     fn unserviced() -> (

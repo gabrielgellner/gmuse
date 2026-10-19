@@ -102,6 +102,7 @@ pub const VERBS: &[&str] = &[
     "yank-to-end",
     "redo",
     "rescan",
+    "reshuffle",
     "rsearch",
     "search",
     "search-next",
@@ -262,6 +263,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
             path: optional_path(rest),
         },
         "rescan" => Command::Rescan,
+        "reshuffle" => Command::Reshuffle,
         "undo" => Command::Undo,
         "redo" => Command::Redo,
 
@@ -937,6 +939,7 @@ pub fn format(cmd: &Command) -> String {
             }
         }
         Command::Rescan => "rescan".into(),
+        Command::Reshuffle => "reshuffle".into(),
         Command::Undo => "undo".into(),
         Command::Redo => "redo".into(),
         Command::Set { key, value } => format!("set {}={}", key.name(), value),
@@ -1351,6 +1354,7 @@ mod tests {
                 path: None,
             },
             Command::Rescan,
+            Command::Reshuffle,
             Command::Set {
                 key: SettingKey::Shuffle,
                 value: SettingValue::Bool(true),

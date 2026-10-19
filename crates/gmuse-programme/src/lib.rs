@@ -606,6 +606,22 @@ impl Programme {
     }
 }
 
+/// **A seed nobody chose** — for a shuffle that should differ from the last one.
+///
+/// A seeded permutation is what makes shuffle testable and resumable, and a *constant*
+/// seed is what made it the same every launch: the engine started at `0x5EED`, so the
+/// first reshuffle of every run was the first reshuffle of the run before.
+///
+/// From the standard library's `RandomState`, whose keys are random per process, so this
+/// needs no dependency. Two calls in one process differ too: each `RandomState` takes the
+/// next key.
+pub fn fresh_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

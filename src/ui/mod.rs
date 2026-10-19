@@ -2420,8 +2420,11 @@ pub fn restore_session(
         "playlist" => ActiveSource::Playlist,
         _ => ActiveSource::Library,
     };
-    // Restored *after* shuffle, because setting shuffle reseeds.
-    ui.playback.rng_state = m.rng_state;
+    // **Not restored: a launch is a new shuffle** — #320. The seed *is* the order, so
+    // restoring it replayed the same sequence every time the player opened, and what a
+    // person opening it with shuffle on asked for is a new one. `m.rng_state` is still
+    // written, so an older build reading this file loses nothing.
+    ui.playback.rng_state = gmuse_programme::fresh_seed();
 
     // Which file holds each recording, this time. An identity outlives a
     // path, but a *handle* does not outlive the cache that issued it, so the
@@ -3659,6 +3662,12 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // `D` is delete-to-end. There is no "inside a line" here, so the list
         // is what has an end.
         Command::RemoveToEnd => remove_rows(ui, ctx, len.saturating_sub(cursor)),
+        // **The same door as `set shuffle=true`**, which already reshuffles — locally by
+        // advancing the seed, and in an engine by `set_mode` drawing the next one (#320).
+        Command::Reshuffle => {
+            apply_setting(ui, ctx, SettingKey::Shuffle, SettingValue::Bool(true));
+            ui.notify("reshuffled");
+        }
         Command::Rescan => {
             // **No longer a stub** (#120). The loop hands control back, `main`
             // walks the roots and refolds, and the loop resumes — the state
@@ -13645,24 +13654,29 @@ mod tests {
         assert!(ui.playback.repeat, "likewise repeat");
     }
 
-    /// Shuffle is a seeded permutation, so the seed *is* the order. Restoring
-    /// the mode without it resumes a different sequence while looking correct.
+    /// **A launch is a new shuffle, not the last one again** — #320.
+    ///
+    /// This test used to assert the opposite: that the seed came back, so the order did.
+    /// It did, every launch, and that was the bug. The mode is restored; the order is new.
     #[test]
-    fn the_shuffle_order_is_restored_not_merely_the_mode() {
+    fn a_launch_restores_shuffle_but_not_its_order() {
         let store = fixture();
         let ctx = ctx_of(&store);
-        let mut ui = ui_of(&store, true);
+        let saved = saved_with(true, "all", 0xdead_beef);
 
-        restore_session(
-            &mut ui,
-            &ctx,
-            &saved_with(true, "all", 0xdead_beef),
-            &Default::default(),
+        let mut first = ui_of(&store, true);
+        restore_session(&mut first, &ctx, &saved, &Default::default());
+        let mut second = ui_of(&store, true);
+        restore_session(&mut second, &ctx, &saved, &Default::default());
+
+        assert!(first.playback.shuffle, "the mode is still restored");
+        assert_ne!(
+            first.playback.rng_state, 0xdead_beef,
+            "the saved seed came back, so the order did"
         );
-        assert!(ui.playback.shuffle);
-        assert_eq!(
-            ui.playback.rng_state, 0xdead_beef,
-            "the seed was lost, so the shuffle order silently changed"
+        assert_ne!(
+            first.playback.rng_state, second.playback.rng_state,
+            "two launches from one session drew the same seed"
         );
     }
 
@@ -13695,7 +13709,17 @@ mod tests {
 
         assert_eq!(first.queue, second.queue);
         assert_eq!(first.current, second.current);
-        assert_eq!(first.modes, second.modes);
+        // **Every mode but the seed**, which a launch draws fresh on purpose (#320) — so
+        // it is the one field that must *not* be a fixed point.
+        let modes = |s: &crate::session::Session| crate::session::Modes {
+            rng_state: 0,
+            ..s.modes.clone()
+        };
+        assert_eq!(modes(&first), modes(&second));
+        assert!(
+            first.modes.shuffle && first.modes.replaygain == "track",
+            "the instrument: the modes compared are the ones set above, not defaults"
+        );
     }
 
     /// **Attaching to a running engine restores nothing about playback** — #219,

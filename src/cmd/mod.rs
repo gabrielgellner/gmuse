@@ -797,6 +797,9 @@ pub enum Command {
     },
     Rescan,
     // state
+    /// **A new shuffle order, now** — #320. Shuffle on, with a seed not used before;
+    /// what is playing keeps playing and what follows it changes.
+    Reshuffle,
     Set {
         key: SettingKey,
         value: SettingValue,

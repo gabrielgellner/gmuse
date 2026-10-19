@@ -64,6 +64,9 @@ pub fn instruction_of(cmd: &Command) -> Result<Instruction, &'static str> {
         Command::Next => Ok(Instruction::Next),
         Command::Prev => Ok(Instruction::Prev),
         Command::Rescan => Ok(Instruction::Rescan),
+        // **Shuffle on is already a reshuffle**: the engine's `set_mode` draws the next
+        // seed every time, on or not. What #320 changed is that the seed is not a constant.
+        Command::Reshuffle => Ok(Instruction::Mode(Mode::Shuffle, Switch::On)),
         // **Resolved here, because the text is this side's** — §12. `"+10"` and
         // `"50%"` are spellings; what crosses is frames.
         Command::Seek(spec) => Ok(Instruction::Seek(match spec {
@@ -139,6 +142,17 @@ mod tests {
                 to.label()
             );
         }
+    }
+
+    /// **`reshuffle` is shuffle on**, which the engine answers with a seed it has not used
+    /// — #320. Not a flip: reshuffling with shuffle on must not turn it off.
+    #[test]
+    fn reshuffle_turns_shuffle_on_rather_than_flipping_it() {
+        use gmuse_engine::instruction::{Mode, Switch};
+        assert!(matches!(
+            of("reshuffle"),
+            Ok(Instruction::Mode(Mode::Shuffle, Switch::On))
+        ));
     }
 
     /// **Toggling a setting that is set is refused, not read as the scope** — #318.
