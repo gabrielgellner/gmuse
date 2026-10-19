@@ -6364,6 +6364,13 @@ Append here as decisions are made. Format: date, decision, rationale.
   `set shuffle=true`, so the verb needed nothing new beneath it. What made it look broken was the constant it was
   drawing from.
 
+  **Same day: there was a fourth seed, and it was the one being heard.** `Ask::Start` (a play pressed on a track, and
+  the session resume every launch sends) rebuilt the programme with `seed: 0`, written in the librarian. So the launch
+  resumed the last track and then played Billy Idol, the White Stripes and Tom Waits, launch after launch, with all
+  three fixes above in place. The three fixed seeds were the ones the code _held_; the one heard was a literal in an
+  ask. `Start` now carries the engine's stepped seed, and device recovery, which has no `self` to step, draws a fresh
+  one. Two tests, each failing when its own half is put back to a constant.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

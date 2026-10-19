@@ -318,6 +318,8 @@ impl Playing {
         let rx = desk.programme_later(Ask::Start {
             recording,
             within: None,
+            // No `self` here, so no stepped seed — and a fresh one is what a rebuild is.
+            seed: gmuse_programme::fresh_seed(),
             window: 1,
         })?;
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
@@ -338,10 +340,12 @@ impl Playing {
     ) {
         self.within = within.clone();
         self.supersede();
+        let seed = self.next_seed();
         self.push(
             Ask::Start {
                 recording,
                 within,
+                seed,
                 window: KEEP,
             },
             Awaiting::LoadFirst,
@@ -579,6 +583,29 @@ mod tests {
         let (a, b) = (Playing::new(), Playing::new());
         assert_ne!(a.seed, 0x5EED, "the old constant is back");
         assert_ne!(a.seed, b.seed, "two engines drew one seed");
+    }
+
+    /// **Two plays carry two seeds** — #320's second half. `Ask::Start` said `seed: 0` in
+    /// the librarian, so every play and every launch's session resume rebuilt the library in
+    /// one order. The seed now comes from here, and must move between plays.
+    #[test]
+    fn two_plays_carry_two_seeds() {
+        let seed_of_last_start = |playing: &Playing| -> Option<u64> {
+            playing.queued.iter().rev().find_map(|(ask, _)| match ask {
+                Ask::Start { seed, .. } => Some(*seed),
+                _ => None,
+            })
+        };
+        let mut playing = Playing::new();
+        let recording = gmuse_ids::id::Id::derived(b"a recording");
+
+        playing.start(recording, None);
+        let first = seed_of_last_start(&playing).expect("the instrument: a start was queued");
+        playing.start(recording, None);
+        let second = seed_of_last_start(&playing).expect("a second start was queued");
+
+        assert_ne!(first, 0, "the old constant is back");
+        assert_ne!(first, second, "two plays carried one seed");
     }
 
     /// A handle whose other end nothing services, so asks pile up where they can be counted.

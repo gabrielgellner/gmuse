@@ -114,6 +114,7 @@ pub(crate) fn answer(
         Ask::Start {
             recording,
             within,
+            seed,
             window,
         } => {
             // **A scan of the rows, and that is the right answer for one.** #123's entry is
@@ -131,7 +132,7 @@ pub(crate) fn answer(
                     scope: plan.scope(),
                     shuffle: plan.shuffled(),
                     within,
-                    seed: 0,
+                    seed,
                     window,
                 },
             )
@@ -947,6 +948,7 @@ mod tests {
             Ask::Start {
                 recording,
                 within,
+                seed: 0,
                 window: 2,
             },
         );
@@ -955,6 +957,40 @@ mod tests {
             view.len(),
             "a start drew from outside the view"
         );
+    }
+
+    /// **A play is a new shuffle, by the seed it carries** — #320's second half.
+    ///
+    /// `Start` said `seed: 0`, so pressing play on a track, and the session resume every launch
+    /// sends, rebuilt the whole library in one order: Billy Idol, then the White Stripes, then
+    /// Tom Waits, launch after launch. The engine owns a seed that moves; the ask carries it.
+    #[test]
+    fn a_play_shuffles_by_the_seed_it_carries() {
+        let (l, rows) = library(12);
+        let recording = l.recording_of(rows[3]).expect("a recording");
+        let order = |seed: u64| -> Vec<CopyId> {
+            let mut plan = Programme::new();
+            plan.made_by(crate::programme::Scope::All, true, None);
+            let _ = ask(
+                &mut plan,
+                &l,
+                Ask::Start {
+                    recording,
+                    within: None,
+                    seed,
+                    window: 2,
+                },
+            );
+            plan.entries().iter().map(|e| e.row).collect()
+        };
+        let (a, b) = (order(1), order(2));
+        assert_eq!(
+            a.len(),
+            rows.len(),
+            "the instrument: the whole library was opened"
+        );
+        assert_ne!(a, b, "two seeds gave one order");
+        assert_eq!(a, order(1), "one seed gave two orders");
     }
 
     /// **`e` lands after what was queued by hand, `E` right after what is sounding**, and

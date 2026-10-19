@@ -1066,6 +1066,10 @@ pub enum Ask {
         recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
         /// The view the play came from, resolved — see `Programme::within`.
         within: Option<std::sync::Arc<std::collections::HashSet<CopyId>>>,
+        /// Seeds the shuffle, if the programme is shuffled — #320. **From the caller**,
+        /// which owns a seed that moves; this ask used to say `0`, so every play and every
+        /// session resume rebuilt the library in one order.
+        seed: u64,
         window: usize,
     },
     /// **A window from the *end* of the programme, changing nothing.**
