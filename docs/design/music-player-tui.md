@@ -6371,6 +6371,33 @@ Append here as decisions are made. Format: date, decision, rationale.
   ask. `Start` now carries the engine's stepped seed, and device recovery, which has no `self` to step, draws a fresh
   one. Two tests, each failing when its own half is put back to a constant.
 
+- **2026-10-19** **A queue does not outlive the engine; its modes do (#321). This reverses #257's "the programme
+  outlives the engine" for the entries.** #257 wrote the whole programme down because a restart lost the queue whole.
+  #320 then made a launch a new shuffle, and the saved entries became mostly the wrong half to keep. A shuffled library
+  is not a list anybody made, and the tracks somebody _did_ queue came back scattered by that reshuffle. The person
+  using it put the rule plainly: only saved playlists should persist.
+
+  **Three changes, because there were three ways a queue survived:**
+  - **The engine's file**, `programme-<device>.json`, writes `mode`, `scope` and `shuffled`, and no entries. An older
+    file still reads, because serde skips the field it no longer names.
+  - **The session file** neither writes nor restores a queue.
+  - **The first `read_the_queue`** no longer keeps a queue the view holds when the engine has none. That branch existed
+    to carry the session's queue into an empty engine, which was the side door.
+
+  **The modes stay because nothing else holds them.** An attached view adopts the engine's, so deleting the file
+  outright would have brought an engine back with shuffle off. That is the trap that made this a design question and not
+  a deletion.
+
+  **`:queue save <name>` is how a queue becomes something that lasts.** It writes only the entries marked as queued by
+  hand (#271), never the programme behind them, because a shuffled library is not a list anybody made. It writes them
+  under a new name only: `:playlist save` overwrites, because saving the open list under its own name is the ordinary
+  case, but here an existing name is far likelier a collision. Attached, it pages the whole programme through
+  `queue.get` rather than trusting the mirror's one page to hold a long queue.
+
+  Two end-to-end tests asserted the old behaviour and now assert the new: the modes outlive the engine and the entries
+  do not, and a first read takes the engine's queue, even an empty one. Each targeted sabotage fails a test, including
+  putting the offer branch back.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

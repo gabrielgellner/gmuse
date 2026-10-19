@@ -270,41 +270,31 @@ Nothing in this document is implemented. Today "the librarian" is a thread stand
 playing — `src/main.rs:2212` for a view, `src/main.rs:3393` for a server — and the audio engine resolves what plays next
 itself, through `gmuse-library`'s `Shelf` and `next::`.
 
-**The librarian writes the programme down, because the librarian is what owns it.** §1 says it owns an ordered,
-editable, versioned list of what will play, and for a while nothing wrote it down: a `gmuse engine` restart lost the
-queue entirely, measured at 108 entries to 0. What survived was `session.toml`'s `queue` — a _view's_ record of a
-librarian's state, which is the wrong actor remembering and no help at all to an engine nobody is attached to.
+**The librarian writes the programme's modes down, and not its entries** (#257, #321). §1 says the librarian owns an
+ordered, editable, versioned list of what will play, and for a while nothing wrote it down: a `gmuse engine` restart
+lost the queue entirely, measured at 108 entries to 0. #257 wrote the whole programme beside the log as
+`programme-<device>.json`, after every mutating ask.
 
-It is written beside the log as `programme-<device>.json`, after every mutating ask, and read back when the librarian
-starts. Measured: four entries, an engine stopped and started, four entries.
+**#321 kept the modes and dropped the entries: a queue is for now, and a saved playlist is what lasts.** Once #320 made
+a launch a new shuffle, the saved entries were mostly the wrong half to keep. A shuffled library is not a list anybody
+made, and the few tracks somebody _did_ queue came back scattered by that reshuffle. So the file holds `mode`, `scope`
+and `shuffled`, and the first play after a launch builds a fresh programme from the library with a seed that moves.
+`:queue save <name>` writes what was queued by hand out as a saved playlist, which is how a queue worth keeping becomes
+one that lasts.
 
-**What it holds is the order, not the place in it — so a shuffled one comes back reshuffled** (#320). Played from the
-top of a remembered shuffle, every launch was the same few hundred tracks in the same order: on the live library, one
-file written 2026-10-15 decided every launch for four days. Recall now permutes a shuffled programme with a fresh seed;
-an unshuffled one comes back exactly as written. The entries survive, hand-placed ones included; their positions do not,
-as with any reshuffle.
+**The modes could not go too, because nothing else holds them.** An attached view _adopts_ the engine's shuffle, repeat
+and scope from `queue.get` rather than sending its own, so an engine that forgot them would come back with shuffle off.
 
 **"Not a fact" says which file it does not go in, not that it may be forgotten.** The programme is not folded, not
 published and not written to the log — what was _played_ is a `RecordingPlayed` fact like any other, and what _will_
 play is not a claim about music at all. The data directory already holds derived per-device state beside the log (the
 fold's snapshot), and the name follows the log's own `-<device>` convention, so a synced directory never carries one
-machine's queue onto another.
+machine's modes onto another.
 
-**Recordings, never `CopyId`s.** A `CopyId` is an arena index, meaningful only while the cache that minted it lives;
-`session.rs` records the same trap from the other side, and the failure is not that the queue fails to come back but
-that it comes back naming _other tracks_. Reading it in pairs recordings to the copies this device holds, in one batched
-ask. **No tokens either**: a token names an entry in _a_ programme, the engine holds a window of them, and across a
-restart that engine is gone. Minting fresh is what keeps a stale token failing to match rather than matching the wrong
-entry.
-
-**A view's session file still carries a queue, and that is the detached case rather than a second opinion.** A detached
-view _is_ the librarian (§4.4), so it persists its own programme the only way it can. Attached, the engine's copy is the
-one that wins, and it is durable.
-
-That inversion had already cost one bug, which this does not undo: §8.8's rule is out before in, so a read never
-discards an unseen edit — but the first `read_the_queue` is the one iteration that cannot honour it, because
-`push_the_queue` has no version to compute against until that reply arrives. So the read won by default and cleared the
-queue the session had just restored. A restored queue is kept when the engine has none, and offered on the next pass.
+**A view's session file no longer carries a queue either** (#321). It did, as the detached case's way of persisting its
+own programme, and an attached view offered it to an engine that came up empty. That kept a queue alive through every
+engine restart by the side door, so it went with the rest. A session written before still has the field, which is
+skipped on read.
 
 **The check is a cargo one, not a convention:** `crates/gmuse-engine/Cargo.toml` has no `gmuse-library` line. The same
 idiom that turned `layers.md`'s direction rule from a source-scraping ratchet into a compile error. An audio engine that

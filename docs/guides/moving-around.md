@@ -264,12 +264,15 @@ just this album. It is the setting that makes `r` mean three different things.
 The queue always wins. Anything you have queued plays before whatever these would have chosen, which is what makes it a
 queue rather than a second playlist — `gq` shows what that is.
 
+The queue is for now: it does not survive the player being restarted. To keep what you queued, `:queue save <name>`
+writes the tracks you queued by hand out as a saved playlist, which does.
+
 ## Leaving
 
     :q
 
-There is no confirmation and nothing is lost: the view you were on, the queue, the open playlist, the current track and
-its position all come back next time.
+There is no confirmation: the view you were on, the open playlist, the current track and its position all come back next
+time. The queue does not — `:queue save <name>` first if you want to keep it.
 
 **Quitting is not a keystroke.** cmus binds `q`, and a single unmodified letter sitting beside `n` and `p` is one slip
 from ending a session — the one action here with nothing behind it to undo. `:q` is the same cost vim charges.
