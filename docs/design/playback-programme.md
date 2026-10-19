@@ -278,6 +278,12 @@ librarian's state, which is the wrong actor remembering and no help at all to an
 It is written beside the log as `programme-<device>.json`, after every mutating ask, and read back when the librarian
 starts. Measured: four entries, an engine stopped and started, four entries.
 
+**What it holds is the order, not the place in it — so a shuffled one comes back reshuffled** (#320). Played from the
+top of a remembered shuffle, every launch was the same few hundred tracks in the same order: on the live library, one
+file written 2026-10-15 decided every launch for four days. Recall now permutes a shuffled programme with a fresh seed;
+an unshuffled one comes back exactly as written. The entries survive, hand-placed ones included; their positions do not,
+as with any reshuffle.
+
 **"Not a fact" says which file it does not go in, not that it may be forgotten.** The programme is not folded, not
 published and not written to the log — what was _played_ is a `RecordingPlayed` fact like any other, and what _will_
 play is not a claim about music at all. The data directory already holds derived per-device state beside the log (the

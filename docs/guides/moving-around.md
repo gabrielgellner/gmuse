@@ -255,6 +255,9 @@ Five toggles, and they show in the status line so you can see what is on without
     C            continue — carry on into the next album rather than stopping
     m            cycle all / artist / album
 
+Shuffle is a new order every time you open the player, and `:reshuffle` deals a new one whenever you want it, without
+stopping what is playing. It has no key by default; `:bind common <key> reshuffle` gives it one.
+
 `m` is what cmus calls `aaa_mode`, and it decides how far "the list" reaches: everything, everything by this artist, or
 just this album. It is the setting that makes `r` mean three different things.
 

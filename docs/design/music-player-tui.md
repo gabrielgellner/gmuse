@@ -6338,6 +6338,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   admits", which was the scope. The first new engine setting would have made `toggle on_device_gone` cycle the scope. It
   now names `Scope` and refuses the rest.
 
+- **2026-10-19** **A launch with shuffle on is a new shuffle (#320). This reverses the session's "the seed is the order,
+  so restore it".** Opening the player with shuffle on played the same sequence every time. There were three causes, and
+  any one of them was enough:
+  - **The programme is saved without a position.** `programme-<device>.json` holds the order (#257), and the engine's
+    first resync takes a window from the head. So a recalled shuffle started at entry 0 every launch. The live file held
+    8,444 entries and had not been rewritten since 2026-10-15.
+  - **The engine's seed was a constant**, `0x5EED`, stepped deterministically. The first reshuffle of every run was the
+    first reshuffle of the run before, so toggling shuffle off and on could not escape it either.
+  - **A detached view restored `rng_state` from `session.toml`** on purpose. The comment there called losing it "quietly
+    loses your place", and a test asserted the seed came back.
+
+  **The choice was between resuming and reshuffling, and the person using it chose reshuffling.** Resuming would have
+  meant saving the place too. That is coherent, and it is not what opening a player with shuffle on is for. So a
+  recalled shuffled programme is permuted with a fresh seed, the engine seeds from per-process randomness, and a
+  detached view draws a new seed at launch. The seed comes from `RandomState`, with no dependency, because one use did
+  not justify `rand` and `next.rs` already declined it for the same reason. The test that pinned the old behaviour now
+  asserts the new one, and its docstring says it used to assert the opposite.
+
+  **What is kept:** the entries, so what was queued by hand survives a launch, though not its position, as with any
+  reshuffle. Also kept: an unshuffled programme, exactly as written, and the determinism of a seed. One seed is still
+  one order, which is what keeps shuffle testable.
+
+  **`reshuffle` is shuffle on, not a flip.** The engine's `set_mode` already drew a new seed for every
+  `set shuffle=true`, so the verb needed nothing new beneath it. What made it look broken was the constant it was
+  drawing from.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
