@@ -6398,6 +6398,20 @@ Append here as decisions are made. Format: date, decision, rationale.
   do not, and a first read takes the engine's queue, even an empty one. Each targeted sabotage fails a test, including
   putting the offer branch back.
 
+- **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
+  `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
+  and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no
+  view subscribed. `Remote` now subscribes to `engine` beside `playback` and turns a `device_gone` body into a typed
+  `transport::Notice` at the boundary. The UI drains notices each tick, and one function says the sentence for both
+  paths, so the status line and the audit log read the same either way.
+
+  **`{"stopping": true}` is deliberately not a notice.** The socket closes a moment later, `engine_gone` goes true, and
+  the status line already says so in the one place it is always said.
+
+  The test runs a real engine in process, attaches a real `Remote`, publishes, and reads the status line. A `playback`
+  event goes first as the instrument. Five targeted sabotages each fail one of the two tests: not subscribing to
+  `engine`, dropping its events, never draining, reading notices without taking them, and treating any body as a notice.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

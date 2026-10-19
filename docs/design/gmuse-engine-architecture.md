@@ -781,8 +781,9 @@ built from the default device is never lost when the headphones go: the OS rerou
 `DeviceChanged` with no word on where it came from or where it went. The decoder answers the question the event does
 not, which is **whether the output we were on is still listed** (`audio::route`). If it is, something arrived or the
 default was switched by hand, and the stream follows it as before. If it is gone, the decoder pauses, publishes
-`playback` as for any pause, and puts `{device_gone, paused}` on `engine`. `set on_device_gone=continue` turns the pause
-off, and the setting survives a rebuild. Nothing resumes when the headphones come back, for the 3am reason above.
+`playback` as for any pause, and puts `{device_gone, paused}` on `engine`, which an attached view subscribes to so it
+can say which device left (#319). `set on_device_gone=continue` turns the pause off, and the setting survives a rebuild.
+Nothing resumes when the headphones come back, for the 3am reason above.
 
 **The generation is the engine's own count, not the handle's.** A rebuilt `PlayerHandle` starts a fresh `Shared` whose
 generation is zero, so passing that through would make the number go _backwards_ — and a generation that can repeat is
