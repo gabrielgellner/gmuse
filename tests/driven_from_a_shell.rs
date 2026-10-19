@@ -1488,20 +1488,15 @@ fn walk(at: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// plays from. So the mirror has to carry an edit *out* and another client's edit
 /// *in*, and refuse an edit computed against a version that has moved.
 ///
-/// **A restored queue is an edit nobody has seen, so an empty engine does not erase it.**
+/// **A view's first read takes the engine's queue, even an empty one** — #321.
 ///
-/// The programme does not survive an engine restart, and the session file is the only place
-/// it was written down. Restoring it put the rows back in `ui.queue` — and the first
-/// `read_the_queue` then cleared them, because the engine had none.
-///
-/// §8.8's rule is out before in, so that a read never discards an unseen edit. The first read
-/// is the one iteration that cannot honour it: `push_the_queue` has no version to compute
-/// against until that reply arrives, so it returns early and the read wins by default.
-///
-/// **Both halves are asserted, because the fix could go too far the other way.** A session
-/// restoring over a queue another view is already using would be worse than losing one.
+/// This was "a restored queue reaches an engine that has none": `restore_session` put the
+/// session's queue back, and the first read kept it rather than clear it, so a queue
+/// outlived every engine restart through the view. #321 decided a queue is for now, so
+/// nothing restores one and the read no longer keeps one. The first half of this test is that
+/// rule reversed; the second half, an engine that has a queue winning, is unchanged.
 #[test]
-fn a_restored_queue_reaches_an_engine_that_has_none() {
+fn a_first_read_takes_the_engines_queue_even_an_empty_one() {
     let (engine, recording) = start_with_a_track("restored-queue");
     let data = engine.dir.join("xdg").join("gmuse");
     let client =
@@ -1535,31 +1530,46 @@ fn a_restored_queue_reaches_an_engine_that_has_none() {
         "the engine already had a queue: {empty}"
     );
 
-    // What `restore_session` leaves behind: rows in the queue, and no version yet.
+    // A queue this view holds before its first read — the shape a session restore used to
+    // leave, and what an edit made in the instant before the first reply would.
     let mut ui = gmuse::ui::Ui::new(Default::default());
     ui.engine = Some(std::sync::Arc::clone(&client));
     ui.queue.push_back(row(&recording));
+    assert_eq!(
+        ui.queue.entries().count(),
+        1,
+        "the instrument: the view held one"
+    );
     assert_eq!(ui.queue_version(), 0, "a fresh view has read no version");
 
     gmuse::ui::read_the_queue(&mut ui, &ctx);
     assert_eq!(
         ui.queue.entries().count(),
-        1,
-        "an engine with no queue erased the one the session restored"
+        0,
+        "the view kept a queue the engine does not have"
     );
     assert!(ui.queue_version() > 0, "the version was never read");
 
-    // And the next iteration offers it, which is what makes it the engine's rather than
-    // this view's — another client has to be able to see it.
+    // And nothing is offered back, so no other client sees it.
     gmuse::ui::push_the_queue(&mut ui, &ctx);
     let other = Client::connect(&engine.socket, "other", "0").expect("connect");
     let seen = other.call("queue.get", None).expect("queue.get");
     assert_eq!(
         seen["entries"].as_array().map(|e| e.len()),
-        Some(1),
-        "the restored queue never reached the engine: {seen}"
+        Some(0),
+        "a queue reached the engine from a view's first read: {seen}"
     );
-    assert_eq!(seen["entries"][0].as_str(), Some(recording.as_str()));
+
+    // Put one there for the second half, through the wire as another client would.
+    other
+        .call(
+            "queue.set",
+            Some(serde_json::json!({
+                "recordings": [recording.clone()],
+                "base_version": seen["version"],
+            })),
+        )
+        .expect("queue.set");
 
     // **And the other way: an engine that has a queue wins.** A second view launching with a
     // stale session must not push its own over one somebody is listening to.
@@ -1863,17 +1873,16 @@ fn quit_all_without_an_engine_is_just_quit() {
     );
 }
 
-/// **The programme outlives the engine that held it** — #257, `playback-programme.md` §9.
+/// **A programme's modes outlive the engine that held it; its queue does not** — #257, #321.
 ///
-/// §1 says the librarian owns the list of what will play, and nothing wrote it down: stopping
-/// the engine lost it whole. What survived was `session.toml`'s copy, which is a *view's* record
-/// of a librarian's state — the wrong actor remembering, and no help at all to an engine nobody
-/// is attached to.
+/// #257 wrote the whole programme down so a second engine could read it, because stopping the
+/// engine lost the queue whole. #321 decided a queue is for now — `:queue save` is how one is
+/// kept — and kept only the modes, which nothing else holds: a view adopts the engine's.
 ///
 /// **Restarted on the same data directory**, because that is the whole claim: a second engine
 /// reading what the first wrote down, with no view involved at any point.
 #[test]
-fn a_programme_outlives_the_engine_that_held_it() {
+fn a_programmes_modes_outlive_the_engine_and_its_queue_does_not() {
     let (engine, recording) = start_with_a_track("programme-durable");
     let data = engine.dir.join("xdg").join("gmuse");
 
@@ -1912,6 +1921,28 @@ fn a_programme_outlives_the_engine_that_held_it() {
             vec![recording.clone()],
             "the set did not take"
         );
+        // Modes that are not the defaults, so "they came back" cannot pass by being them.
+        for line in ["set shuffle=true", "set repeat=true"] {
+            client
+                .call("cmd.exec_line", Some(serde_json::json!({ "line": line })))
+                .unwrap_or_else(|e| panic!("{line}: {e}"));
+        }
+        let mut set = serde_json::Value::Null;
+        for _ in 0..200 {
+            set = client.call("queue.get", None).expect("queue.get");
+            if set["shuffle"] == true && set["repeat"] == true {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            set["shuffle"] == true && set["repeat"] == true,
+            "the instrument: the modes were never set: {set}"
+        );
+        assert!(
+            !entries(&client).is_empty(),
+            "the instrument: there was a queue to lose"
+        );
     }
 
     // **A different engine, on the same data.** Dropping the fixture would delete the
@@ -1947,10 +1978,19 @@ fn a_programme_outlives_the_engine_that_held_it() {
     }
 
     let client = Client::connect(&second.socket, "view", "0").expect("connect to the second");
+    let back = client.call("queue.get", None).expect("queue.get");
     assert_eq!(
-        entries(&client),
-        vec![recording],
-        "the second engine did not read the first's programme"
+        back["shuffle"], true,
+        "shuffle did not outlive the engine: {back}"
+    );
+    assert_eq!(
+        back["repeat"], true,
+        "repeat did not outlive the engine: {back}"
+    );
+    assert!(
+        entries(&client).is_empty(),
+        "the queue outlived the engine: {:?} (was {recording})",
+        entries(&client)
     );
 }
 

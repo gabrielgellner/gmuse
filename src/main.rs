@@ -2793,8 +2793,7 @@ fn run_tui(
             state.audit.line(
                 "session",
                 &format!(
-                    "restored {} queued, {}",
-                    saved.queue.len(),
+                    "restored {}",
                     saved
                         .current
                         .as_ref()

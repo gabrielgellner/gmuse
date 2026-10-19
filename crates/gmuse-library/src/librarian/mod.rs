@@ -467,19 +467,11 @@ impl Desk {
                 // and never written to the log — the programme says what will play,
                 // and what was played is a `RecordingPlayed` fact like any other.
                 //
-                // **Written down beside the log all the same** — #257,
-                // `playback-programme.md` §9. "Not a fact" says which file it does not go
-                // in, not that it may be forgotten: stopping the engine lost the whole
-                // queue, and what survived was a *view's* copy of it, which is the wrong
-                // actor remembering and no help to an engine nobody is attached to.
-                let mut plan = programme::durable::recall(
-                    &published.load().library,
-                    read_from.as_deref(),
-                    device,
-                    // **A new order per launch** — #320. See `recall`.
-                    crate::programme::fresh_seed(),
-                )
-                .unwrap_or_default();
+                // **Its modes are written down beside the log** — #257, #321,
+                // `playback-programme.md` §9. Its entries are not: a queue is for now, and
+                // a launch opens a fresh programme on its first play.
+                let mut plan =
+                    programme::durable::recall(read_from.as_deref(), device).unwrap_or_default();
 
                 // **The walker's own channel, and not a clone of `rx`'s sender** — #260. A
                 // thread holding a sender to the channel it reads from is a channel that never
@@ -602,12 +594,7 @@ impl Desk {
                             let mutating = ask.mutating();
                             let out = programme::answer(&mut plan, &answer.library, device, ask);
                             if mutating {
-                                programme::durable::remember(
-                                    &plan,
-                                    &answer.library,
-                                    read_from.as_deref(),
-                                    device,
-                                );
+                                programme::durable::remember(&plan, read_from.as_deref(), device);
                             }
                             let _ = reply.send(out);
                             None

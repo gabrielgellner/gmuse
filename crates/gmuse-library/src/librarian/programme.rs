@@ -1579,74 +1579,60 @@ mod tests {
         );
     }
 
-    /// **A recalled shuffle is a new shuffle; a recalled order is the same order** — #320.
+    /// **The modes outlive the engine; the entries do not** — #321.
     ///
-    /// The programme was written down without a place in it, so a shuffled one played from
-    /// the top every launch. Recall now reshuffles what was shuffled, by the seed it is
-    /// handed, and leaves an order nobody shuffled exactly as it was.
+    /// #257 wrote the whole programme down and #320 reshuffled it on the way back in. Now only
+    /// the modes are written: shuffle, repeat and scope come back, and the programme comes back
+    /// empty for the first play to build.
     #[test]
-    fn a_recalled_shuffle_is_new_and_a_recalled_order_is_kept() {
+    fn the_modes_outlive_the_engine_and_the_entries_do_not() {
         use super::durable::{recall, remember};
-        let (l, rows) = library(12);
+        let (_, rows) = library(12);
         let device = crate::fixture::device();
         let dir = std::env::temp_dir().join(format!("gmuse-recall-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let order =
-            |plan: &Programme| -> Vec<CopyId> { plan.entries().iter().map(|e| e.row).collect() };
-        let written = |shuffled: bool| {
-            let mut plan = Programme::of(rows.clone());
-            plan.made_by(crate::programme::Scope::All, shuffled, None);
-            remember(&plan, &l, Some(&dir), device);
-        };
+        let mut plan = Programme::of(rows.clone());
+        plan.made_by(crate::programme::Scope::Inner, true, None);
+        plan.set_mode(Mode::RepeatAll);
+        // The instrument: what is written is a programme with entries and modes that are not
+        // the defaults, so "the modes came back" cannot pass by being the default.
+        assert!(!plan.entries().is_empty());
+        assert_ne!(plan.mode(), Programme::new().mode());
+        remember(&plan, Some(&dir), device);
 
-        // **Shuffled: the seed decides**, so two launches with two seeds differ, and the
-        // same seed twice does not — which is what makes this a seed and not noise.
-        written(true);
-        let a = recall(&l, Some(&dir), device, 1).expect("recalled");
-        let b = recall(&l, Some(&dir), device, 2).expect("recalled");
-        let a_again = recall(&l, Some(&dir), device, 1).expect("recalled");
-        assert!(a.shuffled(), "the mode came back");
+        let back = recall(Some(&dir), device).expect("recalled");
+        assert!(back.shuffled(), "shuffle did not come back");
+        assert_eq!(back.mode(), Mode::RepeatAll, "repeat did not come back");
         assert_eq!(
-            order(&a).len(),
-            rows.len(),
-            "the instrument: every entry came back"
+            back.scope(),
+            crate::programme::Scope::Inner,
+            "scope did not come back"
         );
-        let mut members = order(&a);
-        members.sort();
-        let mut expected = rows.clone();
-        expected.sort();
-        assert_eq!(members, expected, "a reshuffle lost or invented an entry");
-        assert_ne!(
-            order(&a),
-            rows,
-            "a recalled shuffle played from the top of the old order"
-        );
-        assert_ne!(order(&a), order(&b), "two seeds gave one order");
-        assert_eq!(order(&a), order(&a_again), "one seed gave two orders");
+        assert!(back.entries().is_empty(), "the entries outlived the engine");
 
-        // **Not shuffled: kept exactly**, whatever the seed.
-        written(false);
-        let kept = recall(&l, Some(&dir), device, 1).expect("recalled");
-        assert!(!kept.shuffled());
-        assert_eq!(
-            order(&kept),
-            rows,
-            "an unshuffled programme came back reordered"
+        // **A file written before #321 still reads**, entries and all, and gives its modes.
+        let older = r#"{"entries":["0b9e1c3a-4d2f-5e6a-8b7c-9d0e1f2a3b4c"],"mode":"RepeatAll","scope":"All","shuffled":true}"#;
+        let file = dir.join(format!("programme-{device}.json"));
+        assert!(
+            file.exists(),
+            "the instrument: the test writes over the file recall reads"
         );
+        std::fs::write(&file, older).unwrap();
+        let migrated = recall(Some(&dir), device).expect("an older file still reads");
+        assert!(migrated.shuffled() && migrated.entries().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
-/// **The programme, written down so it outlives the engine** — #257, `playback-programme.md` §9.
+/// **The programme's modes, written down so they outlive the engine** — #257, #321,
+/// `playback-programme.md` §9.
 ///
-/// §1 says the librarian owns an ordered, editable, versioned list of what will play, and until
-/// this nothing wrote it down: stopping the engine lost it whole, measured at 108 entries to 0.
-/// What survived a restart was `session.toml`'s copy — a *view's* record of a librarian's state,
-/// which is the wrong actor remembering and is no help at all to an engine nobody is attached
-/// to.
+/// #257 wrote the whole programme here, because stopping the engine lost it whole (measured at
+/// 108 entries to 0). #321 keeps only the modes: a queue is for now, and `:queue save` is how
+/// one is kept. `Written` says why the modes could not go too.
 ///
 /// **Beside the log and named for the device, not in it.** The programme is playback state: not
 /// folded, not published, and not a fact — what was *played* is a `RecordingPlayed` fact like
@@ -1655,24 +1641,25 @@ mod tests {
 /// follows the log's own `-<device>` convention so a synced directory never carries one
 /// machine's queue onto another.
 pub mod durable {
-    use super::*;
-    use crate::model::entity::Recording;
     use crate::model::id::Id;
+    use std::path::PathBuf;
 
-    /// What is written down, and what deliberately is not.
+    /// **The modes, and not the entries** — #321.
     ///
-    /// **Recordings, never `CopyId`s.** A `CopyId` is an arena index, meaningful only while the
-    /// cache that minted it lives — `session.rs` records the same trap from the other side: a
-    /// queue keyed by one does not fail to restore, it silently restores *other tracks*. A
-    /// recording id survives a rename, a move, and being carried to another machine.
+    /// This wrote the whole programme, recordings in order, so that stopping the engine did not
+    /// lose the queue (#257). After #320 that was the wrong half to keep: a shuffled programme is
+    /// not a list anybody made, and the few tracks somebody *did* queue came back scattered by
+    /// the reshuffle a launch makes. **A queue is for now, and a saved playlist is what lasts** —
+    /// `:queue save` is how a queue becomes one.
     ///
-    /// **No tokens.** A token names an entry in *a* programme and the engine holds a window of
-    /// them; across a restart that engine is gone and every token with it. Minting fresh on
-    /// load is what makes a stale token fail to match rather than match the wrong entry, which
-    /// is the property [`crate::programme::Programme`] keeps its minting counter for.
+    /// The modes stay, because nothing else holds them: an attached view *adopts* the engine's
+    /// shuffle, repeat and scope from `queue.get` rather than sending its own, so a file with
+    /// nothing in it would bring an engine back with shuffle off.
+    ///
+    /// **An older file still reads.** It has an `entries` field this no longer names, and serde
+    /// skips a field it does not know; the next mutation rewrites the file without it.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     struct Written {
-        entries: Vec<Id<Recording>>,
         mode: crate::programme::Mode,
         scope: crate::programme::Scope,
         shuffled: bool,
@@ -1683,26 +1670,18 @@ pub mod durable {
         data_dir.join(format!("programme-{device}.json"))
     }
 
-    /// Write the programme down, as recordings.
+    /// Write the programme's modes down.
     ///
-    /// **Best effort, and silent.** A programme that cannot be written is a queue lost on the
-    /// next restart, which is a smaller harm than a librarian thread that stops answering —
-    /// and this runs on that thread, after every edit.
+    /// **Best effort, and silent.** Modes that cannot be written are a shuffle that comes back
+    /// off, which is a smaller harm than a librarian thread that stops answering — and this runs
+    /// on that thread, after every edit.
     pub fn remember(
         plan: &crate::programme::Programme,
-        library: &dyn Listing,
         data_dir: Option<&std::path::Path>,
         device: Id<crate::model::entity::Device>,
     ) {
         let Some(dir) = data_dir else { return };
         let written = Written {
-            // A row whose recording the fold cannot name is dropped rather than written as
-            // something else: it would not survive the pairing on the way back in either.
-            entries: plan
-                .entries()
-                .iter()
-                .filter_map(|e| library.recording_of(e.row))
-                .collect(),
             mode: plan.mode(),
             scope: plan.scope(),
             shuffled: plan.shuffled(),
@@ -1712,48 +1691,22 @@ pub mod durable {
         }
     }
 
-    /// Read it back, pairing recordings to the copies this device holds.
+    /// **An empty programme, in the modes it was left in.**
     ///
-    /// `None` when there is nothing written, nothing readable, or nothing left of it — a
-    /// programme of no entries is what `Programme::new` already gives, and returning it here
-    /// would only claim a restore that restored nothing.
-    ///
-    /// **A shuffled programme comes back reshuffled, by `seed`.** What was written down is
-    /// the order and not the place in it, so a recalled shuffle played from the top every
-    /// launch — the same few hundred tracks, in the same order, for as long as nothing
-    /// edited the file. Saving the place as well would resume a run; a person opening the
-    /// player with shuffle on asked for a new one (#320). The entries are kept, so what was
-    /// put in by hand is still there; only its position is not, as with any reshuffle.
+    /// `None` when nothing is written or nothing readable, which is `Programme::new` anyway. The
+    /// first play after a launch builds the programme from the library — a session resume or a
+    /// play gesture opens one around its track, and `next` with nothing opens one over the
+    /// library — each with a seed that moves (#320), which is a new shuffle made directly rather
+    /// than an old one reshuffled.
     pub fn recall(
-        library: &dyn Listing,
         data_dir: Option<&std::path::Path>,
         device: Id<crate::model::entity::Device>,
-        seed: u64,
     ) -> Option<crate::programme::Programme> {
         let dir = data_dir?;
         let text = std::fs::read_to_string(path(dir, device)).ok()?;
         let written: Written = serde_json::from_str(&text).ok()?;
 
-        // **One ask for the pairing, not one per entry.** `copies_of` is batched for exactly
-        // this shape, and a programme can be the whole library.
-        let here = library.copies_of(&written.entries);
-        let rows: Vec<_> = written
-            .entries
-            .iter()
-            .filter_map(|r| here.get(r).copied())
-            .collect();
-        if rows.is_empty() {
-            return None;
-        }
-        let rows = if written.shuffled {
-            crate::next::shuffled(&rows, seed)
-        } else {
-            rows
-        };
-
-        let mut plan = crate::programme::Programme::of(rows);
-        // `within` is not written down (see the field): a restored programme is its
-        // entries, and the next play from a view says what a refill draws from.
+        let mut plan = crate::programme::Programme::new();
         plan.made_by(written.scope, written.shuffled, None);
         plan.set_mode(written.mode);
         Some(plan)

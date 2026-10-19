@@ -1,8 +1,12 @@
 //! Where you were, restored on the next launch.
 //!
 //! §1 says the interface has to be usable when it is not in front of you; a
-//! player that forgets its queue and position every time it starts is the
-//! opposite of that.
+//! player that forgets its place every time it starts is the opposite of that.
+//!
+//! **Not the queue, since #321.** A queue is for now, and a saved playlist is
+//! what lasts — `:queue save` is how one becomes the other. A session written
+//! before that still has a `queue` field, which serde skips like any field it
+//! does not know.
 //!
 //! **This is state, not cache.** It cannot be rebuilt by rescanning, so it does
 //! not live in `library.postcard` — the Decision Log records what happened the
@@ -73,18 +77,6 @@ pub struct Modes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
-    /// **Identities.**
-    ///
-    /// It held paths, for a good reason that has been overtaken: a `CopyId`
-    /// is an arena index, only meaningful while the cache that produced it
-    /// survives, so a queue keyed by one would silently restore *other
-    /// tracks*. A path was the only durable thing to hand.
-    ///
-    /// A recording id is durable in a way a path is not — it survives a
-    /// rename, a move, and being carried to another machine, none of which a
-    /// path survives. And it is what everything else durable here is keyed by.
-    #[serde(default)]
-    pub queue: Vec<Id<Recording>>,
     /// Which playlist view 3 had open, by **name**.
     ///
     /// The name, not the tracks: every playlist is a file or a rule now, so
@@ -189,7 +181,6 @@ mod tests {
     fn sample() -> Session {
         Session {
             version: VERSION,
-            queue: vec![Id::derived(b"a"), Id::derived(b"b")],
             open_playlist: Some("mix".into()),
             view: Some(2),
             current: Some(Playing {

@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use super::keys;
 use super::{
-    AddTarget, Command, Context, Fold, Motion, PaneTarget, Place, PlaylistSpec, Quality, RateSpec,
-    Scope, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
+    AddTarget, Command, Context, Fold, Motion, PaneTarget, Place, PlaylistSpec, Quality, QueueSpec,
+    RateSpec, Scope, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -101,6 +101,7 @@ pub const VERBS: &[&str] = &[
     "yank",
     "yank-to-end",
     "redo",
+    "queue",
     "rescan",
     "reshuffle",
     "rsearch",
@@ -348,6 +349,7 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "search-prev" => Command::SearchPrev,
         "rate" => Command::Rate(rate_spec(rest)?),
         "playlist" => Command::Playlist(playlist_spec(rest)?),
+        "queue" => Command::Queue(queue_spec(rest)?),
         "find" => Command::Find(picker_source(rest)?),
         "split" => Command::Split(crate::ui::Axis::Horizontal),
         "vsplit" => Command::Split(crate::ui::Axis::Vertical),
@@ -771,6 +773,26 @@ fn playlist_spec(rest: &str) -> Result<PlaylistSpec, ParseError> {
     })
 }
 
+/// `:queue save <name>` — #321. `save` is the one action, and it needs a name.
+fn queue_spec(rest: &str) -> Result<QueueSpec, ParseError> {
+    let rest = rest.trim();
+    let (word, name) = match rest.split_once(char::is_whitespace) {
+        Some((w, n)) => (w, n.trim()),
+        None => (rest, ""),
+    };
+    match word {
+        "save" if !name.is_empty() => Ok(QueueSpec::Save(name.to_string())),
+        "save" => Err(ParseError::Missing {
+            cmd: "queue save",
+            what: "a playlist name",
+        }),
+        other => Err(ParseError::Bad(
+            other.into(),
+            "queue action — try `save <name>`",
+        )),
+    }
+}
+
 /// `4`, `none`, or nothing at all.
 ///
 /// A helper rather than a nested match inside `command`, like every other verb
@@ -981,6 +1003,7 @@ pub fn format(cmd: &Command) -> String {
             PlaylistSpec::Save(n) => format!("playlist save {n}"),
             PlaylistSpec::New(n) => format!("playlist new {n}"),
         },
+        Command::Queue(QueueSpec::Save(n)) => format!("queue save {n}"),
         Command::Collect(name) => format!("collect {name}"),
         Command::File(name) => match name {
             Some(name) => format!("file {name}"),
@@ -1355,6 +1378,7 @@ mod tests {
             },
             Command::Rescan,
             Command::Reshuffle,
+            Command::Queue(QueueSpec::Save("party keepers".into())),
             Command::Set {
                 key: SettingKey::Shuffle,
                 value: SettingValue::Bool(true),
@@ -1464,6 +1488,7 @@ mod tests {
                 "find" => "find groups".to_string(),
                 "export" => "export /tmp/x.m3u8".to_string(),
                 "playlist" => "playlist open fresh".to_string(),
+                "queue" => "queue save keepers".to_string(),
                 "filter" => "filter year>2000".to_string(),
                 "rate" => "rate 4".to_string(),
                 "fold" => "fold toggle".to_string(),

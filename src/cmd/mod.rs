@@ -446,6 +446,18 @@ pub enum PlaylistSpec {
     List,
 }
 
+/// What `:queue` was asked to do — #321.
+///
+/// A verb of its own rather than a `:playlist` subcommand, because it acts on the queue:
+/// `:playlist save` copies the *open* playlist, and a second meaning of `save` there would
+/// depend on whether one was open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueSpec {
+    /// **Write what was queued by hand out as a saved playlist.** The queue does not
+    /// outlive the engine (#321); this is how a queue worth keeping becomes one that does.
+    Save(String),
+}
+
 /// Everything the application can be asked to do.
 ///
 /// One enum for keys, the `:` line and the rc file, per §6.
@@ -871,6 +883,7 @@ pub enum Command {
     ViewLast,
 
     Playlist(PlaylistSpec),
+    Queue(QueueSpec),
     /// Turn the loaded smart playlist into an ordinary, editable one.
     ///
     /// A rule-defined list cannot have a track removed from it without growing

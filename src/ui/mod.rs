@@ -1661,39 +1661,17 @@ pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
         );
     }
 
-    // **A restored queue is an edit nobody has seen.**
-    //
-    // §8.8's rule is out before in, so that this never discards one — and the very first
-    // read is the one iteration that cannot honour it. `push_the_queue` has no version to
-    // compute against until this reply arrives, so it returns early, and this would then
-    // clear what `restore_session` had just put back. The session's queue was written
-    // correctly, read correctly, and dropped one line later.
-    //
-    // **The engine having none is what makes offering it safe.** A second view with a queue
-    // of its own is not overwritten, because then `entries` is not empty and this does not
-    // apply. What it covers is the case the engine cannot: the programme does not survive an
-    // engine restart, and the session is the only place it was written down.
-    //
-    // The mirror is emptied rather than set, so the next `push_the_queue` sees a difference
-    // and offers it. Nothing is sent from here — reading is not writing (§8.8).
-    //
-    // **"None" is the page before the sounding entry was dropped**, or an engine playing the
-    // last thing it has would look like an engine with nothing, and a stale session would
-    // replace a programme somebody is listening to.
-    let engine_has_none = answer["entries"].as_array().is_none_or(|a| a.is_empty());
-    let restored = engine_has_none && ui.queue_version == 0 && !ui.queue.is_empty();
-    if restored {
-        ui.queue_mirror = Vec::new();
-    } else {
-        ui.queue.clear();
-        for id in &entries {
-            ui.queue.push_back(*id);
-        }
-        ui.queue_mirror = entries;
-        ui.queue_tokens = kept_tokens;
-        ui.queue_by_hand = kept_by_hand;
-        ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
+    // **Always the engine's.** This used to keep a queue `restore_session` had put back
+    // when the engine had none, and offer it on the next push. Nothing restores a queue
+    // since #321 — a queue is for now — so the mirror is simply what the engine says.
+    ui.queue.clear();
+    for id in &entries {
+        ui.queue.push_back(*id);
     }
+    ui.queue_mirror = entries;
+    ui.queue_tokens = kept_tokens;
+    ui.queue_by_hand = kept_by_hand;
+    ui.queue_sel = ui.queue_sel.min(ui.queue.len().saturating_sub(1));
     ui.queue_version = answer["version"].as_u64().unwrap_or(ui.queue_version);
 
     if let Some(label) = answer["scope"].as_str()
@@ -1726,9 +1704,9 @@ pub fn read_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
 ///
 /// **And a `queue.set` replaces the whole programme with this page** — #271 — which is
 /// why, attached, no gesture edits the mirror any more: `e`, `E`, `p`, `P`, `dd` and
-/// `:clear-queue` name what they touch by token and read the page back. The one edit
-/// that still arrives here from an attached view is the queue restored at launch onto
-/// an engine that has none, which *means* "this is the programme".
+/// `:clear-queue` name what they touch by token and read the page back. Until #321 one
+/// edit still arrived here from an attached view: the queue restored at launch onto an
+/// engine that had none. Nothing restores a queue now.
 pub fn push_the_queue(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(client) = ui.engine.clone() else {
         return;
@@ -2338,11 +2316,6 @@ pub fn capture_session(ui: &Ui, ctx: &Context<'_>) -> crate::session::Session {
     // that does not outlive its cache.
     crate::session::Session {
         version: 0, // stamped by `save`
-        queue: ui
-            .queue
-            .entries()
-            .filter_map(|id| recording_of(ctx, *id))
-            .collect(),
         open_playlist: ui.open.as_ref().map(|o| o.name().to_string()),
         view: Some(ui.view() as u8),
         // The copy too, so resuming reopens the file that was open rather
@@ -2430,21 +2403,10 @@ pub fn restore_session(
     // path, but a *handle* does not outlive the cache that issued it, so the
     // pairing has to be made again on every launch — which is the whole reason
     // the session cannot store handles and no longer stores paths either.
-    // **The queue and what was playing.** The track being resumed need not be in the queue —
-    // it usually is not, having just been taken off it — and asking only about the queue left
-    // `saved.current` unpairable, so a resume silently restored nothing.
-    let mut want = saved.queue.clone();
-    want.extend(saved.current.as_ref().map(|p| p.recording));
+    // **What was playing, and not the queue** — #321. A queue is for now; a saved
+    // playlist is what lasts, and `:queue save` is how one becomes the other.
+    let want: Vec<_> = saved.current.iter().map(|p| p.recording).collect();
     let here = holdings_here(ctx, &want);
-
-    ui.queue.clear();
-    let mut missing = 0;
-    for recording in &saved.queue {
-        match here.get(recording) {
-            Some(id) => ui.queue.push_back(*id),
-            None => missing += 1,
-        }
-    }
 
     // The playlist comes back by *name*: its contents live in a file, and a
     // copy in the session could only be a stale one.
@@ -2476,9 +2438,6 @@ pub fn restore_session(
     // open playlist, the settings — is this view's own state and still restores.
     if ctx.player.is_some_and(|p| p.outlives_this_view()) {
         follow_the_engine(ui, ctx);
-        if missing > 0 {
-            ui.notify(format!("{missing} remembered track(s) are gone"));
-        }
         return;
     }
 
@@ -2509,11 +2468,7 @@ pub fn restore_session(
             player.pause();
         }
     } else if saved.current.is_some() {
-        missing += 1;
-    }
-
-    if missing > 0 {
-        ui.notify(format!("{missing} remembered track(s) are gone"));
+        ui.notify("the track you left on is gone");
     }
 }
 
@@ -3632,7 +3587,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
         // the rows go to the register, so `dd` … `p` moves them, here or in
         // another playlist.
         // **The whole queue, from any view.** `dd` empties it a row at a time and only from
-        // view 4; a queue is saved and restored, so it accumulates across sessions and the
+        // view 4; a queue accumulates over a session (and, until #321, across them) and the
         // thing you want is usually "not these hundred". Undoable like every other queue edit.
         // **What was queued by hand, when the engine holds the programme** — #271. Under
         // one list the programme is the play order, and emptying it is not what "clear
@@ -3682,6 +3637,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             crate::cmd::PlaylistSpec::New(name) => new_playlist(ui, ctx, &name),
             crate::cmd::PlaylistSpec::List => list_playlists(ui),
         },
+        Command::Queue(crate::cmd::QueueSpec::Save(name)) => save_queue(ui, ctx, &name),
         Command::Collect(name) => collect(ui, ctx, &name),
         Command::File(name) => match name {
             Some(name) => file_into(ui, ctx, &name),
@@ -4977,6 +4933,32 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         .filter_map(|id| rows.recording_of(*id))
         .collect();
 
+    let filed = file_playlist(ui, name, members);
+
+    // Saving over an existing playlist replaces what the name means, so its
+    // undo history no longer describes anything — `u` would restore a list
+    // this name never held.
+    ui.undo
+        .forget(&crate::undo::Key::Playlist(name.to_string()));
+    // Saving a rule-defined list writes what it *currently* holds and detaches
+    // it, which is what `:freeze` does — so say so rather than leaving the
+    // title claiming a rule still owns it.
+    let was = ui.open.replace(Open::Saved(name.to_string()));
+    refresh_playlist_rows(ui);
+    ui.notify(match was {
+        Some(Open::Rule(rule)) => format!("saved {filed} tracks as {name}, a copy of {rule}"),
+        _ => format!("saved {filed} tracks as {name}"),
+    });
+}
+
+/// **Write these recordings down as the playlist `name`, in this order.** Returns how many.
+///
+/// Shared by `:playlist save` and `:queue save` (#321), so a playlist is filed one way.
+fn file_playlist(
+    ui: &mut Ui,
+    name: &str,
+    members: Vec<crate::model::id::Id<crate::model::entity::Recording>>,
+) -> usize {
     let id = crate::model::id::Id::<crate::model::entity::Collection>::of_name(name);
     let now = crate::history::now_ms();
     let filed = members.len();
@@ -4993,21 +4975,102 @@ fn save_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
             key = Some(k);
         }
     });
+    filed
+}
 
-    // Saving over an existing playlist replaces what the name means, so its
-    // undo history no longer describes anything — `u` would restore a list
-    // this name never held.
-    ui.undo
-        .forget(&crate::undo::Key::Playlist(name.to_string()));
-    // Saving a rule-defined list writes what it *currently* holds and detaches
-    // it, which is what `:freeze` does — so say so rather than leaving the
-    // title claiming a rule still owns it.
-    let was = ui.open.replace(Open::Saved(name.to_string()));
+/// **`:queue save <name>`: what was queued by hand, as a saved playlist** — #321.
+///
+/// The queue does not outlive the engine; this is how one worth keeping becomes something that
+/// does. **Only what a person queued**, not the programme behind it: a shuffled library is not
+/// a list anybody made. **A new name only.** `:playlist save` overwrites, because saving the
+/// open list under its own name is the ordinary case; here an existing name is far more
+/// likely a collision than an intent, and a playlist overwritten by a queue is not undone.
+fn save_queue(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
+    if ui.data_dir.is_none() {
+        ui.notify("nowhere to save playlists — set `data_dir` in the config");
+        return;
+    }
+    if saved_lists(ui).iter().any(|(n, _)| n == name) || ui.playlists.get(name).is_some() {
+        ui.notify(format!("{name} already exists — choose another name"));
+        return;
+    }
+    let members = match hand_queued(ui, ctx) {
+        Ok(members) => members,
+        Err(why) => {
+            ui.notify(why);
+            return;
+        }
+    };
+    if members.is_empty() {
+        ui.notify("nothing queued by hand — nothing to save");
+        return;
+    }
+    let filed = file_playlist(ui, name, members);
     refresh_playlist_rows(ui);
-    ui.notify(match was {
-        Some(Open::Rule(rule)) => format!("saved {filed} tracks as {name}, a copy of {rule}"),
-        _ => format!("saved {filed} tracks as {name}"),
-    });
+    ui.notify(format!("saved {filed} queued track(s) as {name}"));
+}
+
+/// **What a person queued, from what is playing onward**, as recordings.
+///
+/// Detached, the view's queue *is* what was queued by hand. Attached, the engine's programme
+/// is one list and marks the entries a person put there (#271); the mirror holds one page of
+/// it, so this pages the whole of it rather than trusting a page to hold a long queue.
+fn hand_queued(
+    ui: &Ui,
+    ctx: &Context<'_>,
+) -> Result<Vec<crate::model::id::Id<crate::model::entity::Recording>>, String> {
+    let Some(client) = ui.engine.clone() else {
+        let rows: &dyn Listing = ctx.library;
+        return Ok(ui
+            .queue
+            .entries()
+            .filter_map(|id| rows.recording_of(*id))
+            .collect());
+    };
+    hand_queued_in_pages(|from| {
+        let mut params = serde_json::json!({ "limit": 1_000 });
+        if let Some(token) = from {
+            params["from"] = serde_json::json!(token);
+        }
+        client
+            .call_within(
+                gmuse_proto::request::method::QUEUE_GET,
+                Some(params),
+                std::time::Duration::from_secs(5),
+            )
+            .map_err(|e| format!("could not read the queue: {e}"))
+    })
+}
+
+/// **The marked entries of every page, in order**, asking for the next page by the token the
+/// last one named. `fetch` is `queue.get` from a token, so a test can hand pages over directly.
+fn hand_queued_in_pages(
+    mut fetch: impl FnMut(Option<u64>) -> Result<serde_json::Value, String>,
+) -> Result<Vec<crate::model::id::Id<crate::model::entity::Recording>>, String> {
+    let mut out = Vec::new();
+    let mut from: Option<u64> = None;
+    // **Bounded**, because a page that named itself as next would loop for ever. A thousand
+    // pages of a thousand is a million entries, which no library here approaches.
+    for _ in 0..1_000 {
+        let page = fetch(from)?;
+        let entries = page["entries"].as_array().cloned().unwrap_or_default();
+        let marks = page["by_hand"].as_array().cloned().unwrap_or_default();
+        for (entry, mark) in entries.iter().zip(&marks) {
+            if mark.as_bool() == Some(true)
+                && let Some(id) = entry
+                    .as_str()
+                    .and_then(|s| s.parse::<uuid::Uuid>().ok())
+                    .map(crate::model::id::Id::from_uuid)
+            {
+                out.push(id);
+            }
+        }
+        match page["next"].as_u64() {
+            Some(next) if Some(next) != from => from = Some(next),
+            _ => return Ok(out),
+        }
+    }
+    Ok(out)
 }
 
 /// Every row the library holds, in one pass.
@@ -6008,7 +6071,7 @@ fn add_selection(ui: &mut Ui, ctx: &Context<'_>, target: AddTarget) {
             for id in ids {
                 ui.queue.push_back(id);
             }
-            // **Where it landed, not just that it did.** A queue is saved and restored, so
+            // **Where it landed, not just that it did.** A queue accumulates, so
             // appending to a hundred entries puts a track below the fold in a pane that draws
             // from the top — reported as "I get the queue message and don't see it".
             ui.notify(format!("queued {count} — {} up next", ui.queue.len()));
@@ -10718,6 +10781,81 @@ mod tests {
         assert_eq!(ui.view(), View::Playlist);
     }
 
+    /// **`:queue save` files what was queued, in order, under a new name only** — #321.
+    ///
+    /// Detached, where the view's queue is what a person queued. A name that exists is refused
+    /// rather than overwritten, and an empty queue says so rather than filing nothing.
+    #[test]
+    fn a_queue_is_saved_as_a_playlist_under_a_new_name() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let (mut ui, _) = ui_with_saved(&store, "queue-save");
+        let ids: Vec<_> = Listing::rows(lib_of(&store));
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "queue save nothing-yet");
+        assert!(ui.status.contains("nothing queued"), "{}", ui.status);
+        assert_eq!(filed(&ui, "nothing-yet"), 0);
+
+        ui.queue.push_back(ids[2]);
+        ui.queue.push_back(ids[0]);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "queue save keepers");
+        assert_eq!(filed(&ui, "keepers"), 2, "{}", ui.status);
+
+        ui.queue.push_back(ids[1]);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "queue save keepers");
+        assert!(ui.status.contains("already exists"), "{}", ui.status);
+        assert_eq!(
+            filed(&ui, "keepers"),
+            2,
+            "an existing playlist was written over"
+        );
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open keepers");
+        assert_eq!(
+            ui.playlist.entries(),
+            [ids[2], ids[0]],
+            "the order was not kept"
+        );
+    }
+
+    /// **Attached, only the marked entries, across every page** — #321, #271.
+    ///
+    /// The engine's programme is one list and marks what a person queued; the view's mirror is
+    /// one page of it, so a long queue is read by paging. Two pages here, each with a marked and
+    /// an unmarked entry, and the second reached only by the token the first named.
+    #[test]
+    fn a_saved_queue_is_every_marked_entry_on_every_page() {
+        let id = |n: u128| uuid::Uuid::from_u128(n).to_string();
+        let mut asked = Vec::new();
+        let got = hand_queued_in_pages(|from| {
+            asked.push(from);
+            Ok(match from {
+                None => serde_json::json!({
+                    "entries": [id(1), id(2)], "by_hand": [true, false], "next": 7,
+                }),
+                Some(7) => serde_json::json!({
+                    "entries": [id(3), id(4)], "by_hand": [false, true], "next": null,
+                }),
+                other => panic!("asked for a page nobody named: {other:?}"),
+            })
+        })
+        .expect("read");
+        assert_eq!(
+            asked,
+            vec![None, Some(7)],
+            "the instrument: both pages were read"
+        );
+        let want: Vec<_> = [1u128, 4]
+            .into_iter()
+            .map(|n| crate::model::id::Id::from_uuid(uuid::Uuid::from_u128(n)))
+            .collect();
+        assert_eq!(got, want);
+    }
+
     /// Saving is also how a rule becomes editable, so it must detach — leaving
     /// the title claiming a rule still owns the list would be a lie.
     #[test]
@@ -11513,12 +11651,11 @@ mod tests {
         assert!(ui.playlist.is_empty(), "the add was not undone");
     }
 
-    /// **A queue is saved and restored, so it needs a way out** — the one thing `dd` per row
-    /// is not.
+    /// **A queue accumulates, so it needs a way out** — the one thing `dd` per row is not.
     ///
     /// A hundred entries nobody remembers choosing is the ordinary case: every `e` appends,
-    /// the queue is written at quit and read back at launch, and nothing drains it but playing
-    /// through. Reported as "lots of songs the user didn't select to hear before what they
+    /// the queue was written at quit and read back at launch until #321, and nothing drains it
+    /// but playing through. Reported as "lots of songs the user didn't select to hear before what they
     /// want", which was the queue working exactly as designed and having no undo for a year's
     /// worth of it.
     #[test]
@@ -11608,8 +11745,7 @@ mod tests {
     /// **`E` puts it at the front, and `e` at the back** — the two things a person means by
     /// queueing.
     ///
-    /// Appending is the ordinary case and keeps the unshifted key. But the queue is saved and
-    /// restored, so it accumulates: append to a hundred entries and the track is somewhere you
+    /// Appending is the ordinary case and keeps the unshifted key. But the queue accumulates: append to a hundred entries and the track is somewhere you
     /// reach next week, which is what "I get the queue message and don't see it" was.
     #[test]
     fn queueing_next_goes_to_the_front_and_keeps_its_order() {
@@ -13609,7 +13745,6 @@ mod tests {
     fn saved_with(shuffle: bool, aaa: &str, rng: u64) -> crate::session::Session {
         crate::session::Session {
             version: 1,
-            queue: Vec::new(),
             open_playlist: None,
             view: None,
             current: None,
@@ -13707,7 +13842,8 @@ mod tests {
         restore_session(&mut fresh, &ctx, &first, &Default::default());
         let second = capture_session(&fresh, &ctx);
 
-        assert_eq!(first.queue, second.queue);
+        // **The queue is not part of it** — #321. Two hundred went in; none come back.
+        assert!(fresh.queue.is_empty(), "a queue came back from the session");
         assert_eq!(first.current, second.current);
         // **Every mode but the seed**, which a launch draws fresh on purpose (#320) — so
         // it is the one field that must *not* be a fixed point.
@@ -13730,7 +13866,7 @@ mod tests {
     /// seeking it, and pausing it — three commands that between them destroy
     /// exactly what attaching was supposed to preserve.
     ///
-    /// The queue and the settings still come back: those are this view's own.
+    /// The settings still come back: those are this view's own.
     #[test]
     fn an_attached_view_restores_its_own_state_and_leaves_playback_alone() {
         let store = fixture();
@@ -13754,7 +13890,6 @@ mod tests {
             copy: None,
         });
         saved.position_secs = 42.5;
-        saved.queue = vec![Listing::recording_of(library, other).expect("identified")];
 
         restore_session(&mut ui, &ctx, &saved, &Default::default());
 
@@ -13767,8 +13902,7 @@ mod tests {
             !ui.resuming,
             "nothing was loaded, so there is no seek to wait for"
         );
-        assert_eq!(ui.queue.len(), 1, "the view's own queue still came back");
-        assert!(ui.playback.shuffle, "and its own settings");
+        assert!(ui.playback.shuffle, "its own settings came back");
         assert_eq!(ui.playback.scope, crate::next::Scope::Inner);
     }
 
@@ -13961,10 +14095,7 @@ mod tests {
         // **`current` is the row and `playing` is the file** (#155). A row is
         // an appearance; what a decoder holds open is a copy of one.
         ui.playback.playing = lib_of(&store).shown_copy(id);
-        ui.queue.push_back(id);
-
         let saved = capture_session(&ui, &ctx);
-        assert_eq!(saved.queue, vec![recording_of(&ctx, id).unwrap()]);
         let playing = saved.current.as_ref().expect("nothing was playing");
         assert_eq!(playing.recording, recording_of(&ctx, id).unwrap());
         assert_eq!(
@@ -13975,7 +14106,6 @@ mod tests {
         let mut back = ui_of(&store, true);
         restore_session(&mut back, &ctx, &saved, &Default::default());
         assert_eq!(back.playback.current, Some(id));
-        assert_eq!(back.queue.entries().copied().collect::<Vec<_>>(), vec![id]);
     }
 
     /// A track that has moved or gone is skipped, not an error — a library
@@ -13989,14 +14119,12 @@ mod tests {
         let mut saved = saved_with(false, "all", 0);
         // Identities nothing here holds — the shape of a session carried from
         // another machine, or one whose files have been deleted.
-        saved.queue = vec![Id::derived(b"gone-a"), Id::derived(b"gone-b")];
         saved.current = Some(crate::session::Playing {
             recording: Id::derived(b"gone-c"),
             copy: None,
         });
         restore_session(&mut ui, &ctx, &saved, &Default::default());
 
-        assert!(ui.queue.is_empty(), "phantom entries were restored");
         assert_eq!(ui.playback.current, None);
         assert!(ui.status.contains("gone"), "no notice: {:?}", ui.status);
     }

@@ -119,6 +119,7 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        "queue" if words.len() == 1 => vec!["save".to_string()],
         // `save` completes existing names too: overwriting one is a normal
         // thing to want, and typing it out again is not.
         "playlist" if words.len() == 2 && matches!(words[1], "open" | "save") => {
