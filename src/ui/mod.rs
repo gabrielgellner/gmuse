@@ -1467,6 +1467,7 @@ where
         // 500ms, and visibly inconsistent between presses.
         drain_input(ui, ctx, event::poll, event::read, ui.tick(Instant::now()))?;
         drain_player_events(ui, ctx);
+        drain_notices(ui, ctx);
         keep_up(ui, ctx);
         note_play_progress(ui, ctx);
         audit_underruns(ui, ctx);
@@ -2094,6 +2095,34 @@ fn audit_underruns(ui: &mut Ui, ctx: &Context<'_>) {
     );
 }
 
+/// **The output left: said with its name**, because "paused" alone reads as a key you did not
+/// press — #318. One sentence for a player in this process and one over a socket (#319), so
+/// the status line and the log read the same either way.
+fn say_device_gone(ui: &mut Ui, left: &str, paused: bool) {
+    ui.audit.line(
+        "device",
+        &format!("{left} left{}", if paused { ", paused" } else { "" }),
+    );
+    ui.notify(if paused {
+        format!("paused: {left} disconnected")
+    } else {
+        format!("{left} disconnected")
+    });
+}
+
+/// **What the transport had to say**, for a view whose playback is elsewhere — #319.
+///
+/// A player in this process says these as events, which [`drain_player_events`] reads; this is
+/// the same news arriving over the socket.
+fn drain_notices(ui: &mut Ui, ctx: &Context<'_>) {
+    let Some(player) = ctx.player else { return };
+    for notice in player.notices() {
+        match notice {
+            transport::Notice::DeviceGone { left, paused } => say_device_gone(ui, &left, paused),
+        }
+    }
+}
+
 /// Turn player events into UI state, and advance when a track ends.
 fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(player) = ctx.gapless else { return };
@@ -2139,15 +2168,7 @@ fn drain_player_events(ui: &mut Ui, ctx: &Context<'_>) {
             // **Said with the device's name**, because "paused" alone reads as a key
             // you did not press — #318.
             crate::audio::PlayerEvent::DeviceGone { left, paused } => {
-                ui.audit.line(
-                    "device",
-                    &format!("{left} left{}", if paused { ", paused" } else { "" }),
-                );
-                ui.notify(if paused {
-                    format!("paused: {left} disconnected")
-                } else {
-                    format!("{left} disconnected")
-                });
+                say_device_gone(ui, &left, paused);
             }
             crate::audio::PlayerEvent::Loaded {
                 path,
@@ -13856,6 +13877,102 @@ mod tests {
             first.modes.shuffle && first.modes.replaygain == "track",
             "the instrument: the modes compared are the ones set above, not defaults"
         );
+    }
+
+    /// **An attached view says why it paused** — #319, the other half of #318.
+    ///
+    /// The engine publishes a departed device on `engine`. A real engine, in process, publishes
+    /// it to a real `Remote`, and the status line is read at the end: everything between is the
+    /// path that was missing. A `playback` event goes first and is the instrument — the cache
+    /// moving proves the reader was attached and subscribed — and it must produce no device
+    /// message of its own. A shutdown notice goes in too, and must not become one either.
+    #[test]
+    fn an_attached_view_says_which_device_left() {
+        use gmuse_engine::engine::{Answers, Identity, serve};
+        use gmuse_proto::{Call, Event, RpcError, Topic};
+
+        struct Bare;
+        impl Answers for Bare {
+            fn stream_generation(&self) -> u32 {
+                1
+            }
+            fn now_ns(&self) -> i64 {
+                0
+            }
+            fn call(&self, request: Call) -> Result<serde_json::Value, RpcError> {
+                Err(RpcError::method_not_found(request.method()))
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("gmuse-319-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("engine.sock");
+        let engine = serve(
+            &socket,
+            Identity::new(48_000, vec![]),
+            std::sync::Arc::new(Bare),
+        )
+        .expect("an engine in process");
+        let client = std::sync::Arc::new(
+            gmuse_client::Client::connect(&socket, "view", "0").expect("connect"),
+        );
+        let remote =
+            crate::ui::remote_transport::Remote::attach(client).expect("attach to the engine");
+
+        let store = fixture();
+        let ctx = Context {
+            library: lib_of(&store),
+            player: Some(&remote),
+            gapless: None,
+        };
+        let mut ui = ui_of(&store, true);
+
+        // The instrument: a `playback` event reaches the cache, so the reader is subscribed.
+        engine.publish(&Event::new(
+            Topic::Playback,
+            serde_json::json!({ "state": "playing" }),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while transport::Transport::state(&remote) != crate::audio::State::Playing {
+            assert!(
+                Instant::now() < deadline,
+                "the reader never heard `playback`"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drain_notices(&mut ui, &ctx);
+        assert!(
+            !ui.status.contains("disconnected"),
+            "a playback event said a device left: {:?}",
+            ui.status
+        );
+
+        engine.publish(&Event::new(
+            Topic::Engine,
+            serde_json::json!({ "stopping": true, "reason": "engine.shutdown" }),
+        ));
+        engine.publish(&Event::new(
+            Topic::Engine,
+            serde_json::json!({ "device_gone": "AirPods Pro", "paused": true }),
+        ));
+        while !ui.status.contains("disconnected") {
+            assert!(
+                Instant::now() < deadline,
+                "no device message: {:?}",
+                ui.status
+            );
+            drain_notices(&mut ui, &ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ui.status, "paused: AirPods Pro disconnected");
+        // **Taken, not read**: a notice shown is gone, or every tick would say it again.
+        assert!(
+            transport::Transport::notices(&remote).is_empty(),
+            "a notice outlived being shown"
+        );
+        drop(engine);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **Attaching to a running engine restores nothing about playback** — #219,

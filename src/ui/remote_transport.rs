@@ -37,7 +37,7 @@ use gmuse_proto::Topic;
 use crate::audio::{SeekTo, State};
 use crate::model::id::Id;
 use crate::model::spine::Recording;
-use crate::ui::transport::{Accepted, Loading, Transport};
+use crate::ui::transport::{Accepted, Loading, Notice, Transport};
 
 /// The last thing the engine said about playback, and when it said it.
 #[derive(Debug, Clone)]
@@ -84,6 +84,8 @@ pub struct Remote {
     heard: Arc<Mutex<Heard>>,
     /// Set by the reader on its way out, so its ending is visible from here.
     gone: Arc<std::sync::atomic::AtomicBool>,
+    /// What the `engine` topic said, until a view takes it — #319.
+    notices: Arc<Mutex<Vec<Notice>>>,
     /// Kept so the reader stops when this does.
     _reader: Arc<ReaderStop>,
 }
@@ -94,6 +96,20 @@ impl Drop for ReaderStop {
     fn drop(&mut self) {
         self.0.store(true, std::sync::atomic::Ordering::Release);
     }
+}
+
+/// **An `engine` body, as a notice a view shows** — #319.
+///
+/// Only `device_gone` (#318) is one. The topic also carries `{"stopping": true}` when the engine
+/// is asked to shut down, and that is **deliberately not** a notice: the reader sees the socket
+/// close a moment later, `engine_gone` goes true, and the status line already says so in the
+/// one place it is always said. Two messages for one event would be the second one too many.
+fn notice_of(body: &serde_json::Value) -> Option<Notice> {
+    let left = body["device_gone"].as_str()?;
+    Some(Notice::DeviceGone {
+        left: left.to_string(),
+        paused: body["paused"].as_bool().unwrap_or(false),
+    })
 }
 
 /// Take a `playback` body into the cache.
@@ -136,7 +152,8 @@ fn absorb(held: &mut Heard, body: &serde_json::Value) {
 impl Remote {
     /// Subscribe to `playback`, ask what is playing, and keep the cache fresh.
     pub fn attach(client: Arc<Client>) -> Result<Self, gmuse_client::ClientError> {
-        client.subscribe(&[Topic::Playback])?;
+        // **`engine` too, for what the engine says rather than what it is doing** — #319.
+        client.subscribe(&[Topic::Playback, Topic::Engine])?;
 
         let mut seed = Heard {
             sample_rate: client.hello().sample_rate.max(1),
@@ -164,9 +181,11 @@ impl Remote {
         let heard = Arc::new(Mutex::new(seed));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let notices = Arc::new(Mutex::new(Vec::new()));
 
         {
             let heard = Arc::clone(&heard);
+            let said = Arc::clone(&notices);
             let client = Arc::clone(&client);
             let stopping = Arc::clone(&stop);
             let went = Arc::clone(&gone);
@@ -180,13 +199,18 @@ impl Remote {
                         // of a core the moment the engine went away. There is no event
                         // coming and no timeout left to wait out.
                         match client.next_event(Duration::from_millis(250)) {
-                            Ok(event) => {
-                                if event.topic != Topic::Playback {
-                                    continue;
+                            Ok(event) => match event.topic {
+                                Topic::Playback => {
+                                    let mut held = heard.lock().expect("heard");
+                                    absorb(&mut held, &event.body);
                                 }
-                                let mut held = heard.lock().expect("heard");
-                                absorb(&mut held, &event.body);
-                            }
+                                Topic::Engine => {
+                                    if let Some(notice) = notice_of(&event.body) {
+                                        said.lock().expect("notices").push(notice);
+                                    }
+                                }
+                                _ => {}
+                            },
                             Err(gmuse_client::ClientError::Closed) => break,
                             Err(_) => continue,
                         }
@@ -200,6 +224,7 @@ impl Remote {
             client,
             heard,
             gone,
+            notices,
             _reader: Arc::new(ReaderStop(stop)),
         })
     }
@@ -274,6 +299,10 @@ impl Transport for Remote {
     /// and wrong. A test kills a real engine and waits for this.
     fn engine_gone(&self) -> bool {
         self.gone.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn notices(&self) -> Vec<Notice> {
+        std::mem::take(&mut *self.notices.lock().expect("notices"))
     }
 
     fn state(&self) -> State {
@@ -406,6 +435,32 @@ impl Transport for Remote {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Only `device_gone` is a notice** — #319. A shutdown is said by the socket closing,
+    /// and a body of anything else is not news for the status line.
+    #[test]
+    fn only_a_departed_device_is_a_notice() {
+        assert_eq!(
+            notice_of(&serde_json::json!({ "device_gone": "AirPods", "paused": true })),
+            Some(Notice::DeviceGone {
+                left: "AirPods".into(),
+                paused: true
+            })
+        );
+        assert_eq!(
+            notice_of(&serde_json::json!({ "device_gone": "AirPods" })),
+            Some(Notice::DeviceGone {
+                left: "AirPods".into(),
+                paused: false
+            }),
+            "a missing `paused` claims no pause"
+        );
+        assert_eq!(
+            notice_of(&serde_json::json!({ "stopping": true, "reason": "engine.shutdown" })),
+            None
+        );
+        assert_eq!(notice_of(&serde_json::json!({ "state": "paused" })), None);
+    }
 
     /// **A `playback.get` snapshot seeds the cache the same way an event does** —
     /// #248, #243.

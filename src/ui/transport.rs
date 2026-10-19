@@ -124,6 +124,16 @@ pub fn momentary(running: bool, phase: KeyPhase) -> Momentary {
 /// Every method is one a socket can answer: the reads come from a `playback`
 /// event's payload (§7.8) and the writes from `player.load` and
 /// `cmd.exec_line`.
+/// **Something the transport says that is not state** — #319.
+///
+/// State is read from a cache at whatever rate a view draws; a notice happens once and is
+/// shown once. Typed at the boundary, so nothing past it reads the `engine` topic's JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notice {
+    /// The output playback was on left — #318. `paused` says whether the engine paused for it.
+    DeviceGone { left: String, paused: bool },
+}
+
 pub trait Transport {
     /// What the transport is doing.
     fn state(&self) -> State;
@@ -233,6 +243,15 @@ pub trait Transport {
     /// cause is cheaper than three investigations.
     fn engine_gone(&self) -> bool {
         false
+    }
+
+    /// **What the transport has to say that is not state**, taken once — #319.
+    ///
+    /// Empty by default, and **not a notice dropped**: a player in this process says these
+    /// things as `PlayerEvent`s, which `drain_player_events` reads. Over a socket they arrive
+    /// on the `engine` topic, and this is where a view hears them.
+    fn notices(&self) -> Vec<Notice> {
+        Vec::new()
     }
 
     fn seek(&self, to: SeekTo);
