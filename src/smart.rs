@@ -87,9 +87,13 @@ impl SmartPlaylist {
         env: SortEnv<'_>,
     ) -> Vec<CopyId> {
         let mut ids: Vec<CopyId> = match &self.question {
+            // **One row per recording, the best of the copies that matched** (#325), the
+            // way a view's rule is answered. A rating matches every copy, so `rating>=4`
+            // held Boadicea seven times.
             Question::Where(filter) => {
                 let matches = filter.compile(env.env);
-                all.iter()
+                let matched: Vec<CopyId> = all
+                    .iter()
                     .copied()
                     // **The row is owned and the subject borrows it** — #261. `Listing::subject`
                     // used to hand back a borrow into the fold, which a reader on a socket has
@@ -104,7 +108,9 @@ impl SmartPlaylist {
                             })
                         })
                     })
-                    .collect()
+                    .collect();
+                let held = crate::model::rows::best_of_each(rows, matched);
+                all.iter().copied().filter(|id| held.contains(id)).collect()
             }
             Question::View(stack) => {
                 let resolved = stack.resolve(rows, defs, env.env);
@@ -313,6 +319,69 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    /// **A config rule holds each recording once, by its best copy** — #325.
+    /// A rating matches every copy of a recording, so `rating>=4` held Boadicea
+    /// once per album, compilation and encoding.
+    #[test]
+    fn a_rule_holds_each_recording_once_by_its_best_copy() {
+        let mut s = Scan::new();
+        for (n, (path, album, compilation, bitrate)) in [
+            ("/m/Enya/The Celts/Boadicea.mp3", "The Celts", false, 320),
+            (
+                "/m/Enya/Paint the Sky/Boadicea.flac",
+                "Paint the Sky",
+                true,
+                900,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            s.upsert(Track {
+                path: PathBuf::from(path),
+                artist: Some("Enya".into()),
+                album: Some(album.into()),
+                title: Some("Boadicea".into()),
+                bitrate: Some(bitrate),
+                duration: Duration::from_secs(210),
+                mb_recording: Some(uuid::Uuid::from_u128(7)),
+                release_secondary: if compilation {
+                    [crate::model::spine::ReleaseSecondary::Compilation]
+                        .into_iter()
+                        .collect()
+                } else {
+                    Default::default()
+                },
+                audio_id: Some(crate::audio_id::AudioId {
+                    scheme: 1,
+                    hash: n as u128 + 1,
+                }),
+                ..Default::default()
+            });
+        }
+        let l = crate::fixture::from_holdings(&s);
+        let all = Listing::rows(&l);
+        // The instrument: two rows, and both of one recording.
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            Listing::recording_of(&l, all[0]),
+            Listing::recording_of(&l, all[1])
+        );
+
+        let h = listening();
+        let members = playlist(r#"artist="Enya""#, None).members(
+            &l,
+            &all,
+            &crate::view::NoDefinitions,
+            env(&h),
+        );
+        let albums: Vec<String> = members
+            .iter()
+            .map(|id| Listing::listed(&l, *id).expect("a row").album)
+            .collect();
+        assert_eq!(albums, ["Paint the Sky"], "the FLAC is the better copy");
     }
 
     #[test]

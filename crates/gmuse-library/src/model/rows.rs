@@ -154,6 +154,12 @@ pub struct Listed<'a> {
     /// said since #87 that this exists "so a re-buy list is a filter rather than a
     /// separate pass" — and until now nothing could filter on it.
     pub verdict: Option<crate::model::encoding::Verdict>,
+    /// **What kind of file it is**, of the copy this row shows — #325.
+    ///
+    /// Here so a view can choose one row per recording by the same order that chooses
+    /// the encoding representing it (`encoding::quality_key`): lossless over lossy is
+    /// the format's to say, and a bitrate alone cannot.
+    pub format: Option<crate::model::encoding::Format>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     /// **Whether the library holds a file for this row at all** — #155.
@@ -213,6 +219,7 @@ pub struct Drawn {
     /// said since #87 that this exists "so a re-buy list is a filter rather than a
     /// separate pass" — and until now nothing could filter on it.
     pub verdict: Option<crate::model::encoding::Verdict>,
+    pub format: Option<crate::model::encoding::Format>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     pub held: bool,
@@ -234,6 +241,74 @@ impl Listed<'_> {
             )
             .collect()
     }
+
+    /// **How good a copy this row shows**, for choosing one row per recording — #325.
+    ///
+    /// The encoding first, by [`crate::model::encoding::quality_key`], which is the order
+    /// that picks the encoding representing a recording — so the two cannot disagree. A
+    /// slot holding no file is `None` and loses to any that holds one. Only on a tie, a
+    /// release that is not a compilation wins: the same file placed on the album and on a
+    /// sampler is one encoding, and the album is where it was first heard.
+    pub fn standing(&self) -> impl Ord + use<> {
+        let encoding = match (self.format, self.bitrate) {
+            (Some(format), Some(bitrate)) => Some(crate::model::encoding::quality_key(
+                format,
+                bitrate,
+                self.cutoff_hz,
+                self.verdict
+                    .unwrap_or(crate::model::encoding::Verdict::Unmeasured),
+            )),
+            _ => None,
+        };
+        let original = !self
+            .release_secondary
+            .contains(&crate::model::spine::ReleaseSecondary::Compilation);
+        (encoding, original)
+    }
+}
+
+/// **One row for each recording, the best copy among those given** — #325.
+///
+/// A view answers with recordings and a shelf draws copies, so a recording held on an
+/// album, a compilation and in two encodings used to come back as every one of them:
+/// Boadicea seven times in a `rating>=4` rule. This keeps the row whose
+/// [`Listed::standing`] is highest, and only from among `candidates` — a caller that
+/// asked about one album passes that album's copy, and gets it back rather than a
+/// better one filed somewhere else.
+///
+/// A row with no recording cannot be paired with anything and is kept as it is. Ties
+/// fall to the lower id, so the answer is the same on every run.
+pub fn best_of_each(
+    listing: &dyn Listing,
+    candidates: impl IntoIterator<Item = CopyId>,
+) -> std::collections::HashSet<CopyId> {
+    let mut by_recording: std::collections::HashMap<_, Vec<CopyId>> = Default::default();
+    let mut out = std::collections::HashSet::new();
+    for id in candidates {
+        match listing.recording_of(id) {
+            Some(recording) => by_recording.entry(recording).or_default().push(id),
+            None => {
+                out.insert(id);
+            }
+        }
+    }
+    // Only the contested rows are read, and in one trip — over a socket each is a
+    // round trip otherwise.
+    let contested: Vec<CopyId> = by_recording
+        .values()
+        .filter(|ids| ids.len() > 1)
+        .flatten()
+        .copied()
+        .collect();
+    listing.ahead(&contested);
+    for ids in by_recording.into_values() {
+        let best = ids.into_iter().max_by_key(|id| {
+            let standing = listing.listed(*id).map(|slip| slip.listed().standing());
+            (standing, std::cmp::Reverse(*id))
+        });
+        out.extend(best);
+    }
+    out
 }
 
 impl Listed<'_> {
@@ -266,6 +341,7 @@ impl Listed<'_> {
             cutoff_hz: self.cutoff_hz,
             cliff_db: self.cliff_db,
             verdict: self.verdict,
+            format: self.format,
             sample_rate: self.sample_rate,
             channels: self.channels,
             held: self.held,
@@ -318,6 +394,7 @@ impl Drawn {
             cutoff_hz: self.cutoff_hz,
             cliff_db: self.cliff_db,
             verdict: self.verdict,
+            format: self.format,
             sample_rate: self.sample_rate,
             channels: self.channels,
             held: self.held,
@@ -639,6 +716,7 @@ mod tests {
             cutoff_hz: Some(15_700),
             cliff_db: Some(5_200),
             verdict: None,
+            format: Some(crate::model::encoding::Format::Mp3),
             sample_rate: Some(44_100),
             channels: Some(2),
             held: true,
@@ -705,6 +783,8 @@ pub struct Slip {
     pub cutoff_hz: Option<u32>,
     pub cliff_db: Option<u16>,
     pub verdict: Option<crate::model::encoding::Verdict>,
+    #[serde(default)]
+    pub format: Option<crate::model::encoding::Format>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
     pub held: bool,
@@ -738,6 +818,7 @@ impl Slip {
             cutoff_hz: listed.cutoff_hz,
             cliff_db: listed.cliff_db,
             verdict: listed.verdict,
+            format: listed.format,
             sample_rate: listed.sample_rate,
             channels: listed.channels,
             held: listed.held,
@@ -768,6 +849,7 @@ impl Slip {
             cutoff_hz: self.cutoff_hz,
             cliff_db: self.cliff_db,
             verdict: self.verdict,
+            format: self.format,
             sample_rate: self.sample_rate,
             channels: self.channels,
             held: self.held,

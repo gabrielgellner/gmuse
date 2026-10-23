@@ -331,6 +331,27 @@ pub const POLICY: u16 = 2;
 pub fn canonical_key(
     e: &Encoding,
 ) -> (bool, std::cmp::Reverse<u8>, u32, u32, Verdict, Id<Encoding>) {
+    let (honest, format, bitrate, cutoff, verdict) = quality_key(
+        e.format,
+        e.bitrate,
+        e.cutoff_hz.map(|c| c.value),
+        e.verdict(),
+    );
+    (honest, format, bitrate, cutoff, verdict, e.id)
+}
+
+/// **[`canonical_key`] without the id**: what makes one encoding better than another.
+///
+/// Split out for #325, where a view shows one row per recording and has to choose the
+/// row. A row is not an `Encoding` — over a socket it is a written-out slip — so the
+/// choice is made from the values the row carries. One function for both, so the copy
+/// a view shows and the copy that represents the recording cannot come to disagree.
+pub fn quality_key(
+    format: Format,
+    bitrate: u32,
+    cutoff_hz: Option<u32>,
+    verdict: Verdict,
+) -> (bool, std::cmp::Reverse<u8>, u32, u32, Verdict) {
     (
         // **"We know this is bad" and "we have not looked" are different**,
         // and the ordering used to collapse them: `Verdict` sorted first, so a
@@ -343,14 +364,13 @@ pub fn canonical_key(
         // Suspect still sinks to the bottom outright. A suspect FLAC is a
         // lossy file upsampled to lossless, this library has real examples,
         // and it must not beat a good MP3.
-        e.verdict() != Verdict::Suspect,
-        std::cmp::Reverse(e.format.rank()),
-        e.bitrate,
+        verdict != Verdict::Suspect,
+        std::cmp::Reverse(format.rank()),
+        bitrate,
         // Below the format, so measuring only ever breaks a tie between copies
         // that are otherwise equal.
-        e.cutoff_hz.map(|c| c.value).unwrap_or(0),
-        e.verdict(),
-        e.id,
+        cutoff_hz.unwrap_or(0),
+        verdict,
     )
 }
 

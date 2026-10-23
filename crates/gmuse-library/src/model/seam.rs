@@ -1781,6 +1781,7 @@ impl Librarian {
             // a person can ask per copy. Asking the canonical here would report a FLAC's
             // verdict on the MP3 beside it.
             verdict: shown.map(|e| e.verdict()),
+            format: shown.map(|e| e.format),
             sample_rate: shown.and_then(|e| e.sample_rate),
             channels: shown.and_then(|e| e.channels),
             // **Of the recording, not of the slot** (#155). `shown` is empty

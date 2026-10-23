@@ -38,7 +38,7 @@
     reason = "the composition is built and tested before the UI is rewired to it (#94). `rebuild_library` still hard-codes catalogs-union-then-filter-intersect, and swapping it over needs a recordings-to-rows step the shelf wants — kept separate so the algebra lands proven rather than mid-rewrite"
 )]
 
-use crate::model::entity::Collection;
+use crate::model::entity::{Collection, Recording};
 use crate::model::id::Id;
 use crate::model::rows::{CopyId, Listing};
 use crate::model::view::{Op, Rows};
@@ -190,6 +190,86 @@ pub struct Resolved {
     /// for a hand-made list, so it gives the shape up — and somebody who has
     /// just lost their order should be told which term did it.
     pub demoted_at: Vec<usize>,
+    /// Which copies the terms matched, by recording — #325. See [`Matched`].
+    pub matched: Matched,
+}
+
+/// **Which copies of each recording a view's terms matched** — #325.
+///
+/// A view yields recordings, and a shelf shows one row for each: the best copy. Best
+/// among *all* copies would let `album="X"` show a track filed under some other album,
+/// because the recording is on both. So each term says which copies made it match, and
+/// the row is chosen from those.
+///
+/// A recording absent from the map matched **as a whole** — a rating, a crate, a
+/// collection hold recordings and say nothing about copies — so every copy counts.
+/// How two terms' answers meet is [`Matched::meet`].
+#[derive(Debug, Clone, Default)]
+pub struct Matched(std::collections::HashMap<Id<Recording>, std::collections::HashSet<CopyId>>);
+
+impl Matched {
+    /// The copies a filter matched, by the recording each holds.
+    fn of(librarian: &dyn Listing, held: &[CopyId]) -> Self {
+        let mut out = Matched::default();
+        for id in held {
+            if let Some(recording) = Listing::recording_of(librarian, *id) {
+                out.0.entry(recording).or_default().insert(*id);
+            }
+        }
+        out
+    }
+
+    /// What one side says about a recording: `None` when it does not hold it at all,
+    /// `Some(None)` when it holds it as a whole, else the copies that matched.
+    fn side<'a>(
+        &'a self,
+        holds: &std::collections::HashSet<Id<Recording>>,
+        recording: Id<Recording>,
+    ) -> Option<Option<&'a std::collections::HashSet<CopyId>>> {
+        holds.contains(&recording).then(|| self.0.get(&recording))
+    }
+
+    /// **Two terms' copies, met the way the terms were** — for each recording `out` holds.
+    ///
+    /// `+` takes either side's copies; `&` takes the copies both matched; `-` keeps the
+    /// left's, since the right only took recordings away. Where `&` shares none —
+    /// `album="A" & album="B"` holds a recording on both, and no one copy is on both —
+    /// the set is empty, and [`Resolved::copies`] reads an empty set as every copy.
+    fn meet(op: Op, out: &Rows, mine: (&Rows, &Matched), theirs: (&Rows, &Matched)) -> Matched {
+        use std::collections::HashSet;
+        let in_mine: HashSet<_> = mine.0.iter().collect();
+        let in_theirs: HashSet<_> = theirs.0.iter().collect();
+        let mut met = Matched::default();
+        for recording in out.iter() {
+            let a = mine.1.side(&in_mine, recording);
+            let b = theirs.1.side(&in_theirs, recording);
+            let copies: Option<HashSet<CopyId>> = match (op, a, b) {
+                (Op::AndNot, a, _) => a.flatten().cloned(),
+                (Op::And, Some(Some(x)), Some(Some(y))) => Some(x & y),
+                // `&` with one side whole is the other side's copies; `+` with either
+                // side whole is the whole recording.
+                (Op::And, x, y) => x.flatten().or(y.flatten()).cloned(),
+                (Op::Or, x, y) => {
+                    if x == Some(None) || y == Some(None) {
+                        None
+                    } else {
+                        Some(
+                            x.flatten()
+                                .into_iter()
+                                .chain(y.flatten())
+                                .flatten()
+                                .copied()
+                                .collect(),
+                        )
+                    }
+                }
+            };
+            if let Some(copies) = copies {
+                met.0.insert(recording, copies);
+            }
+        }
+        met
+    }
 }
 
 impl Resolved {
@@ -197,20 +277,30 @@ impl Resolved {
     ///
     /// **A view yields recordings and a shelf's membership is copies**
     /// (`query-language.md` §1, #78), so the two are one hop apart and this is
-    /// the hop. It belongs here rather than at the call site because the
-    /// direction matters: a recording with two copies contributes both rows,
-    /// which is what makes an album with a FLAC and an MP3 show the file you
-    /// actually hold rather than one of them.
+    /// the hop.
+    ///
+    /// **One row per recording** — #325. It used to be every copy, and a
+    /// `rating>=4` rule showed Boadicea seven times: once for each album,
+    /// compilation and encoding holding it. The row is the best of the copies
+    /// the terms matched ([`Matched`]), by `rows::best_of_each` — so a view of
+    /// one album keeps that album's copy, and a view by rating gets the best
+    /// encoding held.
     ///
     /// Order is not carried across. A sequence's order is over recordings, and
     /// a shelf sorts its own rows by artist and album — #97's presentation
     /// question, and not this one.
     pub fn copies(&self, librarian: &dyn Listing) -> std::collections::HashSet<CopyId> {
         let wanted: std::collections::HashSet<_> = self.rows.iter().collect();
-        Listing::rows(librarian)
-            .into_iter()
-            .filter(|id| Listing::recording_of(librarian, *id).is_some_and(|r| wanted.contains(&r)))
-            .collect()
+        let candidates = Listing::rows(librarian).into_iter().filter(|id| {
+            Listing::recording_of(librarian, *id).is_some_and(|r| {
+                wanted.contains(&r)
+                    && match self.matched.0.get(&r) {
+                        Some(matched) if !matched.is_empty() => matched.contains(id),
+                        _ => true,
+                    }
+            })
+        });
+        crate::model::rows::best_of_each(librarian, candidates.collect::<Vec<_>>())
     }
 }
 
@@ -436,10 +526,11 @@ impl Stack {
                 rows: Rows::of_query(recordings(librarian, &all)),
                 problems: Vec::new(),
                 demoted_at: Vec::new(),
+                matched: Matched::default(),
             };
         }
 
-        let mut rows: Option<Rows> = None;
+        let mut rows: Option<(Rows, Matched)> = None;
         let mut demoted_at = Vec::new();
         let mut problems = Vec::new();
         for (at, term) in self.terms.iter().enumerate() {
@@ -455,18 +546,21 @@ impl Stack {
             rows = Some(match rows {
                 None => theirs,
                 Some(mine) => {
-                    let out = mine.combine(term.op, &theirs);
-                    if out.demoted {
+                    let out = combine(term.op, mine, theirs);
+                    if out.1 {
                         demoted_at.push(at);
                     }
-                    out.rows
+                    out.0
                 }
             });
         }
+        let (rows, matched) =
+            rows.unwrap_or_else(|| (Rows::of_query(std::iter::empty()), Matched::default()));
         Resolved {
-            rows: rows.unwrap_or_else(|| Rows::of_query(std::iter::empty())),
+            rows,
             problems,
             demoted_at,
+            matched,
         }
     }
 
@@ -480,9 +574,13 @@ impl Stack {
         env: crate::query::filter::Env<'_>,
         entering: &mut Vec<String>,
         problems: &mut Vec<Problem>,
-    ) -> Rows {
+    ) -> (Rows, Matched) {
+        let nothing = || (Rows::of_query(std::iter::empty()), Matched::default());
         match what {
-            What::Everything => Rows::of_query(recordings(librarian, all)),
+            What::Everything => (
+                Rows::of_query(recordings(librarian, all)),
+                Matched::default(),
+            ),
             What::Where(f) => {
                 let matches = f.compile(env);
                 let held: Vec<CopyId> = all
@@ -500,11 +598,16 @@ impl Stack {
                         })
                     })
                     .collect();
-                Rows::of_query(recordings(librarian, &held))
+                (
+                    Rows::of_query(recordings(librarian, &held)),
+                    Matched::of(librarian, &held),
+                )
             }
-            What::Collection(name) => {
-                Rows::of_collection(librarian, Id::<Collection>::of_name(name))
-            }
+            // A collection holds recordings, so it matched each one whole.
+            What::Collection(name) => (
+                Rows::of_collection(librarian, Id::<Collection>::of_name(name)),
+                Matched::default(),
+            ),
             What::Saved(name) => {
                 // **The loop is caught before it is taken**, and reported with
                 // the path that closes it — a stack overflow says nothing
@@ -513,21 +616,21 @@ impl Stack {
                     let mut loop_ = entering.clone();
                     loop_.push(name.clone());
                     problems.push(Problem::Cycle(loop_));
-                    return Rows::of_query(std::iter::empty());
+                    return nothing();
                 }
                 if entering.len() >= MAX_DEPTH {
                     problems.push(Problem::Cycle(entering.clone()));
-                    return Rows::of_query(std::iter::empty());
+                    return nothing();
                 }
                 let Some(source) = defs.source_of(name) else {
                     problems.push(Problem::Missing(name.clone()));
-                    return Rows::of_query(std::iter::empty());
+                    return nothing();
                 };
                 let Ok(inner) = Stack::parse(&source) else {
                     // A definition that no longer parses is as broken as a
                     // missing one, and for the reader it is the same problem.
                     problems.push(Problem::Missing(name.clone()));
-                    return Rows::of_query(std::iter::empty());
+                    return nothing();
                 };
 
                 entering.push(name.clone());
@@ -558,16 +661,21 @@ impl Stack {
         env: crate::query::filter::Env<'_>,
         entering: &mut Vec<String>,
         problems: &mut Vec<Problem>,
-    ) -> Rows {
-        let mut rows: Option<Rows> = None;
+    ) -> (Rows, Matched) {
+        let mut rows: Option<(Rows, Matched)> = None;
         for term in &stack.terms {
             let theirs = self.select(&term.what, librarian, defs, all, env, entering, problems);
             rows = Some(match rows {
                 None => theirs,
-                Some(mine) => mine.combine(term.op, &theirs).rows,
+                Some(mine) => combine(term.op, mine, theirs).0,
             });
         }
-        rows.unwrap_or_else(|| Rows::of_query(recordings(librarian, all)))
+        rows.unwrap_or_else(|| {
+            (
+                Rows::of_query(recordings(librarian, all)),
+                Matched::default(),
+            )
+        })
     }
 
     /// The stack as somebody typed it, for the line that shows it.
@@ -846,6 +954,13 @@ fn group_body(piece: &str) -> Option<&str> {
         }
     }
     (depth == 0).then_some(inner)
+}
+
+/// Two terms' rows and the copies behind them, combined — and whether a sequence was demoted.
+fn combine(op: Op, mine: (Rows, Matched), theirs: (Rows, Matched)) -> ((Rows, Matched), bool) {
+    let out = mine.0.clone().combine(op, &theirs.0);
+    let matched = Matched::meet(op, &out.rows, (&mine.0, &mine.1), (&theirs.0, &theirs.1));
+    ((out.rows, matched), out.demoted)
 }
 
 /// The recordings behind a set of rows.
@@ -1163,6 +1278,176 @@ mod tests {
             "the list lost its order to a narrowing"
         );
         assert!(out.demoted_at.is_empty());
+    }
+
+    /// One recording held twice, the way #325 found it: Boadicea as an MP3 on
+    /// its album and as a FLAC on a compilation. Orinoco Flow is on both as the
+    /// same MP3 rate, so only the release can tell its two rows apart. And a
+    /// `Dance` collection holding Boadicea, which holds it whole.
+    fn held_twice() -> Librarian {
+        use crate::model::encoding::Format;
+        use crate::model::spine::ReleaseSecondary;
+        let copy =
+            |title: &str, mbid: u128, hash: u128, on_compilation: bool, format: Format| Scanned {
+                audio: crate::audio_id::AudioId { scheme: 1, hash },
+                title: title.into(),
+                artist: "Enya".into(),
+                identity: Some(crate::model::basis::Basis::MusicBrainz(
+                    uuid::Uuid::from_u128(mbid),
+                )),
+                album: Some(
+                    if on_compilation {
+                        "Paint the Sky"
+                    } else {
+                        "The Celts"
+                    }
+                    .into(),
+                ),
+                release_secondary: if on_compilation {
+                    [ReleaseSecondary::Compilation].into_iter().collect()
+                } else {
+                    Default::default()
+                },
+                track: Some(hash as u16),
+                format: Some(format),
+                bitrate: if format == Format::Flac { 900 } else { 320 },
+                ..Default::default()
+            };
+        let mut i = Instance::new(Id::<Device>::derived(b"laptop"));
+        i.ingest(
+            100,
+            &[
+                copy("Boadicea", 7, 1, false, Format::Mp3),
+                copy("Boadicea", 7, 2, true, Format::Flac),
+                copy("Orinoco Flow", 8, 3, false, Format::Mp3),
+                copy("Orinoco Flow", 8, 4, true, Format::Mp3),
+            ],
+        );
+        let boadicea = i
+            .catalogue()
+            .recordings
+            .iter()
+            .find(|(_, r)| r.title == "Boadicea")
+            .map(|(id, _)| *id)
+            .expect("Boadicea is a recording");
+        i.add_to_collection(
+            200,
+            Id::<Collection>::of_name("Dance"),
+            boadicea,
+            OrdKey::between(None, None),
+        );
+        Librarian::from_catalogue(&i.catalogue())
+    }
+
+    /// Which album each row a view shows sits on, by title — sorted, so a
+    /// duplicate shows as a duplicate.
+    fn shown(l: &Librarian, src: &str) -> Vec<(String, String)> {
+        let stack = Stack::parse(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+        let mut out: Vec<_> = stack
+            .resolve(l, &NoDefinitions, env())
+            .copies(l)
+            .into_iter()
+            .map(|id| {
+                let slip = Listing::listed(l, id).expect("a row");
+                (slip.title, slip.album)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// **One row per recording, the best encoding held** — #325. A rule by
+    /// rating showed Boadicea seven times; a recording on an album and a
+    /// compilation is one song, and the FLAC is the better copy of it.
+    #[test]
+    fn a_view_shows_each_recording_once_by_its_best_copy() {
+        let l = held_twice();
+        // The instrument, counted without the view: Boadicea really is two rows.
+        let rows_of_boadicea = Listing::rows(&l)
+            .into_iter()
+            .filter(|id| Listing::listed(&l, *id).is_some_and(|s| s.title == "Boadicea"))
+            .count();
+        assert_eq!(rows_of_boadicea, 2, "the fixture holds Boadicea once");
+
+        assert_eq!(
+            shown(&l, r#"artist="Enya""#),
+            [
+                ("Boadicea".into(), "Paint the Sky".into()),
+                // A tie on the encoding, so the album beats the compilation.
+                ("Orinoco Flow".into(), "The Celts".into()),
+            ]
+        );
+    }
+
+    /// **The best of the copies that matched, not of all of them.** A view of
+    /// one album keeps that album's copy, though a better one is filed
+    /// elsewhere — otherwise `album=` would show tracks from another album.
+    #[test]
+    fn a_view_of_one_album_keeps_that_albums_copy() {
+        let l = held_twice();
+        assert_eq!(
+            shown(&l, r#"album="The Celts""#),
+            [
+                ("Boadicea".into(), "The Celts".into()),
+                ("Orinoco Flow".into(), "The Celts".into()),
+            ]
+        );
+    }
+
+    /// **The operators meet the copies the way they meet the recordings.**
+    /// `&` keeps what both matched; `+` takes either, so the best overall; a
+    /// collection holds a recording whole, so it defers to what it meets.
+    #[test]
+    fn the_operators_carry_which_copies_matched() {
+        let l = held_twice();
+        let celts = || ("Boadicea".to_string(), "The Celts".to_string());
+        let sky = || ("Boadicea".to_string(), "Paint the Sky".to_string());
+
+        assert_eq!(
+            shown(&l, r#"title="Boadicea" &album="The Celts""#),
+            [celts()]
+        );
+        assert_eq!(
+            shown(&l, r#"in="Dance" &album="The Celts""#),
+            [celts()],
+            "a whole recording narrowed by an album"
+        );
+        assert_eq!(
+            shown(&l, r#"in="Dance""#),
+            [sky()],
+            "a collection is the best held"
+        );
+        assert_eq!(
+            shown(&l, r#"album="The Celts" +title="Boadicea""#),
+            [sky(), ("Orinoco Flow".into(), "The Celts".into()),],
+            "widening let the better copy in"
+        );
+        assert_eq!(
+            shown(&l, r#"album="The Celts" +in="Dance""#),
+            [sky(), ("Orinoco Flow".into(), "The Celts".into())],
+            "widening by a whole recording lets every copy of it in"
+        );
+        assert_eq!(
+            shown(&l, r#"title="Boadicea" -album="Paint the Sky""#),
+            Vec::<(String, String)>::new(),
+            "`-` still takes the recording away whole"
+        );
+        assert_eq!(
+            shown(&l, r#"album="The Celts" -title="Orinoco Flow""#),
+            [celts()],
+            "`-` keeps the copies the left matched"
+        );
+    }
+
+    /// **An empty view is the library, and the library is every row.** There is
+    /// no question to choose a copy by, and the tree must show a compilation
+    /// whole.
+    #[test]
+    fn nothing_composed_still_shows_every_copy() {
+        let l = held_twice();
+        let (all, _, _) = Stack::default().members(&l, &NoDefinitions, env());
+        assert_eq!(all.len(), Listing::rows(&l).len());
+        assert_eq!(all.len(), 4);
     }
 
     /// Definitions a test writes by hand, so a cycle is four lines rather
