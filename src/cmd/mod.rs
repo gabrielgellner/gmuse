@@ -383,6 +383,21 @@ pub enum RateSpec {
     Set(u8),
 }
 
+/// Which track a `:rate` is about — #324.
+///
+/// **Two, because both are what somebody means.** Rating what you are hearing
+/// is the common case; rating what you are looking at is curation — going down a
+/// list, which while something else plays was impossible: the playing track
+/// always won, and nothing on screen said it would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateWhat {
+    /// `:rate 4` — the playing track, and the row under the cursor when nothing
+    /// plays. What it always did.
+    Playing,
+    /// `:rate 4 here` — the row under the cursor, whatever is playing.
+    Here,
+}
+
 /// A setting's value, already typed. Which variant is valid depends on the key,
 /// and the parser is what enforces that.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -941,7 +956,8 @@ pub enum Command {
     /// Materialises the composed view, or re-runs what a frozen one was frozen
     /// from and says what changed (#95).
     Freeze(String),
-    Rate(RateSpec),
+    /// `:rate 4`, `:rate none here` — what to do, and to which track (#324).
+    Rate(RateSpec, RateWhat),
     /// Narrow the library to what matches. `None` clears it.
     ///
     /// Transient and anonymous, as against a catalog, which is the same idea

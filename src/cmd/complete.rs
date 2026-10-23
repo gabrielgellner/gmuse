@@ -111,7 +111,10 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
         "view" if words.len() == 1 => (1..=8).map(|n| n.to_string()).collect(),
         "rate" if words.len() == 1 => std::iter::once("none".to_string())
             .chain((1..=5).map(|n| n.to_string()))
+            .chain(std::iter::once("here".to_string()))
             .collect(),
+        // `rate 4 <Tab>` — the one word that may follow, which says whose (#324).
+        "rate" if words.len() == 2 && words[1] != "here" => vec!["here".to_string()],
 
         // Subcommands first, then names — so `:playlist <Tab>` shows what can
         // be done and `:playlist open <Tab>` what there is to do it to.

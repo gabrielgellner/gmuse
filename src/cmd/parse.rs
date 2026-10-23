@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use super::keys;
 use super::{
     AddTarget, Command, Context, Fold, Motion, PaneTarget, Place, PlaylistSpec, Quality, QueueSpec,
-    RateSpec, Scope, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
+    RateSpec, RateWhat, Scope, SearchDir, SeekSpec, SettingKey, SettingValue, ViewId, VolSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -349,7 +349,15 @@ pub fn command(input: &str) -> Result<Command, ParseError> {
         "nohlsearch" => Command::NoHighlight,
         "search-next" => Command::SearchNext,
         "search-prev" => Command::SearchPrev,
-        "rate" => Command::Rate(rate_spec(rest)?),
+        "rate" => {
+            // **A trailing word, not a leading one**, so `rate 4` reads the same
+            // with or without it and the common case stays the short one (#324).
+            let (rest, what) = match rest.strip_suffix("here") {
+                Some(r) if r.is_empty() || r.ends_with(' ') => (r.trim(), RateWhat::Here),
+                _ => (rest, RateWhat::Playing),
+            };
+            Command::Rate(rate_spec(rest)?, what)
+        }
         "playlist" => Command::Playlist(playlist_spec(rest)?),
         "queue" => Command::Queue(queue_spec(rest)?),
         "find" => Command::Find(picker_source(rest)?),
@@ -1032,9 +1040,17 @@ pub fn format(cmd: &Command) -> String {
         Command::ViewBack => "view-back".into(),
         Command::ViewPrev => "view-prev".into(),
         Command::ViewLast => "view-last".into(),
-        Command::Rate(RateSpec::Report) => "rate".into(),
-        Command::Rate(RateSpec::Clear) => "rate none".into(),
-        Command::Rate(RateSpec::Set(n)) => format!("rate {n}"),
+        Command::Rate(spec, what) => {
+            let said = match spec {
+                RateSpec::Report => "rate".to_string(),
+                RateSpec::Clear => "rate none".into(),
+                RateSpec::Set(n) => format!("rate {n}"),
+            };
+            match what {
+                RateWhat::Playing => said,
+                RateWhat::Here => format!("{said} here"),
+            }
+        }
         Command::Playlist(spec) => match spec {
             PlaylistSpec::List => "playlist list".into(),
             PlaylistSpec::Open(n) => format!("playlist open {n}"),
@@ -1258,17 +1274,43 @@ mod tests {
     /// as the filter language has none.
     #[test]
     fn rate_takes_one_to_five_or_none() {
-        assert_eq!(command("rate").unwrap(), Command::Rate(RateSpec::Report));
+        assert_eq!(
+            command("rate").unwrap(),
+            Command::Rate(RateSpec::Report, RateWhat::Playing)
+        );
         assert_eq!(
             command("freeze crate").unwrap(),
             Command::Freeze("crate".into())
         );
         assert_eq!(
             command("rate none").unwrap(),
-            Command::Rate(RateSpec::Clear)
+            Command::Rate(RateSpec::Clear, RateWhat::Playing)
         );
-        assert_eq!(command("rate 1").unwrap(), Command::Rate(RateSpec::Set(1)));
-        assert_eq!(command("rate 5").unwrap(), Command::Rate(RateSpec::Set(5)));
+        assert_eq!(
+            command("rate 1").unwrap(),
+            Command::Rate(RateSpec::Set(1), RateWhat::Playing)
+        );
+        assert_eq!(
+            command("rate 5").unwrap(),
+            Command::Rate(RateSpec::Set(5), RateWhat::Playing)
+        );
+        // `here` follows whatever came before it, and is a word rather than a suffix (#324).
+        assert_eq!(
+            command("rate 4 here").unwrap(),
+            Command::Rate(RateSpec::Set(4), RateWhat::Here)
+        );
+        assert_eq!(
+            command("rate none here").unwrap(),
+            Command::Rate(RateSpec::Clear, RateWhat::Here)
+        );
+        assert_eq!(
+            command("rate here").unwrap(),
+            Command::Rate(RateSpec::Report, RateWhat::Here)
+        );
+        assert!(
+            command("rate 4here").is_err(),
+            "glued on, it is not the word"
+        );
 
         // Zero is refused, and the message says what to write instead.
         let e = command("rate 0").unwrap_err().to_string();
@@ -1390,6 +1432,12 @@ mod tests {
                 sort: None,
             }),
             Command::Playlist(PlaylistSpec::Drop("best".into())),
+        ]);
+        // #324: `here` names the cursor, and must survive the way back.
+        samples.extend([
+            Command::Rate(RateSpec::Set(4), RateWhat::Here),
+            Command::Rate(RateSpec::Clear, RateWhat::Here),
+            Command::Rate(RateSpec::Report, RateWhat::Here),
         ]);
         samples.extend(vec![
             Command::Up,

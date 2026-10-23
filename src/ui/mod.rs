@@ -1256,6 +1256,31 @@ impl Ui {
             View::Guide | View::Info => None,
         }
     }
+
+    /// The track the cursor is **on** — never one standing in for a group.
+    ///
+    /// [`Self::selected_track`] answers a closed album with its first track, which
+    /// is right for "play this" and wrong for anything that writes about one track:
+    /// a rating on an album row would land on track one and say so in a title you
+    /// did not choose (#324).
+    pub fn track_under_cursor(&self) -> Option<CopyId> {
+        match self.view() {
+            View::Tree if !self.levels().is_flat() => self.tree.selected_track(&self.library),
+            _ => self.selected_track_any(),
+        }
+    }
+
+    /// [`Self::selected_track`] without its context, for the views that draw
+    /// tracks only — where the row is the track and there is nothing to fall back
+    /// from.
+    fn selected_track_any(&self) -> Option<CopyId> {
+        match self.view() {
+            View::Tree => self.library.sorted().get(self.sorted).copied(),
+            View::Playlist => self.playlist.entries().get(self.playlist_sel).copied(),
+            View::Queue => self.queue.entries().nth(self.queue_sel).copied(),
+            View::Guide | View::Info => None,
+        }
+    }
 }
 
 /// What the UI needs to render. Borrowed, never owned — the library is the
@@ -1882,11 +1907,24 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
 /// Rate the track being heard, or — with nothing playing — the one under the
 /// cursor. Rating is something you do to a song you are listening to, and
 /// falling back to the selection is what makes it work while browsing too.
-fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec) {
-    use crate::cmd::RateSpec;
+fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec, what: crate::cmd::RateWhat) {
+    use crate::cmd::{RateSpec, RateWhat};
 
-    let Some(id) = ui.playback.current.or_else(|| ui.selected_track(ctx)) else {
-        ui.notify("nothing to rate");
+    // **The cursor's track is the one it is on**, never an album's first track
+    // standing in for the album (#324) — in both spellings, because `:rate 4` with
+    // nothing playing reaches the cursor too and had the same trap.
+    let under_cursor = ui.track_under_cursor();
+    let target = match what {
+        RateWhat::Playing => ui.playback.current.or(under_cursor),
+        RateWhat::Here => under_cursor,
+    };
+    let Some(id) = target else {
+        let on_a_group = matches!(ui.view(), View::Tree) && ui.selected_track(ctx).is_some();
+        ui.notify(if on_a_group {
+            "the cursor is on a group, not a track — open it and rate one track"
+        } else {
+            "nothing to rate"
+        });
         return;
     };
     // **Read through the library, not the store** (#77). A rating is a fact
@@ -3970,7 +4008,7 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             };
             run_search(ui, ctx, &pattern, dir);
         }
-        Command::Rate(spec) => rate(ui, ctx, spec),
+        Command::Rate(spec, what) => rate(ui, ctx, spec, what),
         // **The loop has to stop before the editor starts.** Nothing inside
         // the draw loop may take the terminal, so this asks `main` to do it —
         // the same door `:collect` uses to get a refold (#120).
@@ -10722,7 +10760,11 @@ mod tests {
         // Rate the track under the cursor in view 2.
         flat_view(&mut ui);
         ui.sorted = 0;
-        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(5)));
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Rate(crate::cmd::RateSpec::Set(5), crate::cmd::RateWhat::Playing),
+        );
 
         assert_eq!(ui.playlist.len(), 1, "the rule did not notice the rating");
         assert_eq!(ui.open.as_ref().map(Open::name), Some("good"));
@@ -10808,7 +10850,11 @@ mod tests {
 
         flat_view(&mut ui);
         ui.sorted = 0;
-        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(5)));
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Rate(crate::cmd::RateSpec::Set(5), crate::cmd::RateWhat::Playing),
+        );
         assert_eq!(
             ui.playlist.len(),
             1,
@@ -10884,6 +10930,75 @@ mod tests {
         type_line(&mut ui, &ctx, "playlist drop good");
         assert!(ui.status.contains("config.toml"), "{}", ui.status);
         assert!(ui.playlists.get("good").is_some());
+    }
+
+    /// The rating `ui` holds for the recording behind one row.
+    fn stars_of(ui: &Ui, ctx: &Context<'_>, id: CopyId) -> Option<u8> {
+        let rows: &dyn Listing = ctx.library;
+        let recording = rows.recording_of(id).expect("a row with an identity");
+        ui.listened.ratings.get(&recording).copied()
+    }
+
+    /// **`here` rates the row under the cursor while something else plays** — #324.
+    /// Before it, the playing track always won, and nothing on screen said so.
+    #[test]
+    fn rating_here_rates_the_cursor_and_not_what_is_playing() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+        flat_view(&mut ui);
+        let rows = ui.library.sorted().to_vec();
+        let (playing, looked_at) = (rows[0], rows[1]);
+        ui.playback.current = Some(playing);
+        ui.sorted = 1;
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 4 here");
+        assert_eq!(stars_of(&ui, &ctx, looked_at), Some(4), "{}", ui.status);
+        assert_eq!(
+            stars_of(&ui, &ctx, playing),
+            None,
+            "the playing track was rated"
+        );
+
+        // The instrument: without `here`, the same cursor and the same track playing
+        // rate the other one — so the two rows really were different targets.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "rate 2");
+        assert_eq!(stars_of(&ui, &ctx, playing), Some(2), "{}", ui.status);
+        assert_eq!(stars_of(&ui, &ctx, looked_at), Some(4));
+    }
+
+    /// **A group row is not a track**, so rating one writes nothing and says why —
+    /// rather than rating the album's first track under a title nobody chose (#324).
+    #[test]
+    fn rating_a_group_row_rates_nothing_and_says_so() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+        ui.set_view(View::Tree);
+
+        // The instrument: the cursor is on a group, which is the case where the old
+        // lookup stood a track in for the row.
+        assert!(
+            ui.selected_track(&ctx).is_some(),
+            "no track stands in for this row"
+        );
+        assert!(
+            ui.track_under_cursor().is_none(),
+            "the cursor is on a track already"
+        );
+
+        for line in ["rate 4", "rate 4 here"] {
+            press(&mut ui, &ctx, ":");
+            type_line(&mut ui, &ctx, line);
+            assert!(
+                ui.listened.ratings.is_empty(),
+                "{line} rated {:?}",
+                ui.listened.ratings
+            );
+            assert!(ui.status.contains("group"), "{line}: {}", ui.status);
+        }
     }
 
     #[test]
@@ -17675,7 +17790,11 @@ mod tests {
         // Rate one, freeze, and the source is recorded.
         let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
-        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(5)));
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Rate(crate::cmd::RateSpec::Set(5), crate::cmd::RateWhat::Playing),
+        );
         rebuild_library(&mut ui, &ctx);
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "freeze good");
@@ -17707,7 +17826,11 @@ mod tests {
         // Rate a second, and the drift is reported rather than counted.
         let second = Listing::rows(lib_of(&store))[1];
         ui.playback.current = Some(second);
-        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(4)));
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Rate(crate::cmd::RateSpec::Set(4), crate::cmd::RateWhat::Playing),
+        );
         press(&mut ui, &ctx, ":");
         type_line(&mut ui, &ctx, "freeze good");
         assert!(ui.status.contains("+1 −0"), "{}", ui.status);
@@ -17816,7 +17939,11 @@ mod tests {
         let mut ui = ui_with_history(&store, "refold-rate");
         let id = Listing::rows(lib_of(&store))[0];
         ui.playback.current = Some(id);
-        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(4)));
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Rate(crate::cmd::RateSpec::Set(4), crate::cmd::RateWhat::Playing),
+        );
         assert_eq!(
             ui.stop, None,
             "a rating asked for a refold it does not need"

@@ -79,12 +79,20 @@ pub fn instruction_of(cmd: &Command) -> Result<Instruction, &'static str> {
             VolSpec::Absolute(v) => Fader::To(*v),
             VolSpec::Relative(d) => Fader::By(*d),
         })),
-        // A rating of zero and no rating are different acts, and the model already
-        // distinguishes them.
-        Command::Rate(spec) => Ok(Instruction::Rate(match spec {
-            RateSpec::Set(n) if *n > 0 => Some(*n),
-            _ => None,
-        })),
+        // **`here` is a cursor's word**, and the engine has none to rate under (#324).
+        Command::Rate(_, crate::cmd::RateWhat::Here) => Err(
+            "`rate … here` rates the row under a cursor, and the engine has none — drop `here` to rate what is playing",
+        ),
+        // **A bare `rate` asks, and the engine has nowhere to answer.** It used to share
+        // one catch-all arm with `none`, so `gmuse ctl rate` *cleared* the playing
+        // track's rating — a question carried out as an erasure.
+        Command::Rate(RateSpec::Report, _) => Err(
+            "`rate` with no number reports the rating, and the engine has nowhere to say it — `rate 4` or `rate none`",
+        ),
+        // A rating and no rating are different acts, and the model already
+        // distinguishes them. Each is named, so nothing else can fall into one.
+        Command::Rate(RateSpec::Set(n), _) => Ok(Instruction::Rate(Some(*n))),
+        Command::Rate(RateSpec::Clear, _) => Ok(Instruction::Rate(None)),
         // **`SettingKey::not_the_engines` is the gate for a setting**, so the
         // refusal reads as a sentence about that setting rather than about `set`.
         Command::Set { key, value } => {
@@ -165,5 +173,23 @@ mod tests {
             "the instrument: toggling the scope still cycles it"
         );
         assert!(of("toggle on_device_gone").is_err());
+    }
+
+    /// **A bare `rate` asks, and must not erase** — found with #324. It shared the
+    /// `none` arm, so `gmuse ctl rate` cleared the playing track's rating.
+    #[test]
+    fn asking_for_a_rating_is_refused_rather_than_clearing_it() {
+        // The instrument: the two that do write still reach the engine as themselves.
+        assert!(matches!(of("rate 4"), Ok(Instruction::Rate(Some(4)))));
+        assert!(matches!(of("rate none"), Ok(Instruction::Rate(None))));
+        assert!(of("rate").is_err(), "a question became {:?}", of("rate"));
+    }
+
+    /// **`here` is a cursor's word**, and the engine has no cursor (#324). Accepting
+    /// it would rate the playing track while the line said otherwise.
+    #[test]
+    fn rating_here_is_refused_by_the_engine() {
+        assert!(of("rate 4 here").is_err());
+        assert!(of("rate none here").is_err());
     }
 }
