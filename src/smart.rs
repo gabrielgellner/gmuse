@@ -120,10 +120,28 @@ impl SmartPlaylist {
                 if !resolved.problems.is_empty() {
                     return Vec::new();
                 }
-                let held = resolved.copies(rows);
-                all.iter().copied().filter(|id| held.contains(id)).collect()
+                return self.ordered(&resolved.copies(rows), all, rows, env);
             }
         };
+        self.sort.apply(&mut ids, rows, env);
+        ids
+    }
+
+    /// **The tracks, once something has answered which** — #326.
+    ///
+    /// `held` is what the question selects, from wherever it was resolved: [`Self::members`]
+    /// resolves it here, and an attached view asks the librarian, which has the library folded
+    /// already. Resolving a saved rule in the view read every row over the socket, ~0.5 s an
+    /// answer on the draw thread; the engine answers the same view in milliseconds. The order
+    /// is applied here either way, over only what was held.
+    pub fn ordered(
+        &self,
+        held: &std::collections::HashSet<CopyId>,
+        all: &[CopyId],
+        rows: &dyn Listing,
+        env: SortEnv<'_>,
+    ) -> Vec<CopyId> {
+        let mut ids: Vec<CopyId> = all.iter().copied().filter(|id| held.contains(id)).collect();
         self.sort.apply(&mut ids, rows, env);
         ids
     }

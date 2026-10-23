@@ -803,6 +803,12 @@ pub struct Ui {
     /// Taken by the slow-frame line, so a `Some` means "this frame paid for it"
     /// and a reader can tell a slow draw from a slow page.
     pub page_cost: std::cell::Cell<Option<Duration>>,
+    /// How many times the open rule has been answered — #326.
+    ///
+    /// An answer is ~0.5 s through the socket and runs on the draw thread, so the number
+    /// of them per change is a cost a person sees: a rating once paid three, and Enter
+    /// pressed during them was taken as a new command.
+    pub rule_answers: u64,
     /// Where the cursor was when the focus was last resolved — #285.
     ///
     /// **`track_focus` ran on every key**, not on every *movement*: pressing
@@ -952,6 +958,7 @@ impl Ui {
             stop: None,
             panel_cost: std::cell::Cell::new(None),
             page_cost: std::cell::Cell::new(None),
+            rule_answers: 0,
             focus_at: std::cell::Cell::new(None),
             relocations: std::cell::Cell::new(0),
             picker: None,
@@ -1896,12 +1903,14 @@ fn record_play_if_earned(ui: &mut Ui, ctx: &Context<'_>, position: Duration) {
     // device's reach makes them differ, and the whole reason a play names an
     // encoding is to answer which of several copies it was.
     let encoding = ui.playback.playing;
-    record(ui, now, move |log| log.play_maybe(now, recording, encoding));
+    let recorded = record(ui, now, move |log| log.play_maybe(now, recording, encoding));
     let plays = ui.listened.plays.get(&recording).copied().unwrap_or(0);
     ui.audit
         .line("played", &format!("{} (play {plays})", row.title));
     // A rule mentioning `play_count` or `last_played` now answers differently.
-    refresh_smart(ui, ctx);
+    if recorded == Recorded::Here {
+        refresh_smart(ui, ctx);
+    }
 }
 
 /// Rate the track being heard, or — with nothing playing — the one under the
@@ -1963,7 +1972,7 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec, what: crate:
         _ => 0,
     };
     let now = crate::history::now_ms();
-    record(ui, now, move |log| {
+    let recorded = record(ui, now, move |log| {
         log.rate(now, recording, (stars > 0).then_some(stars));
     });
 
@@ -1973,8 +1982,11 @@ fn rate(ui: &mut Ui, ctx: &Context<'_>, spec: crate::cmd::RateSpec, what: crate:
     };
     ui.audit.line("rated", &format!("{said} {title}"));
     ui.notify(format!("{title}: {said}"));
-    // A rule mentioning `rating` now answers differently.
-    refresh_smart(ui, ctx);
+    // A rule mentioning `rating` now answers differently — once it is in the fold, which
+    // for an attached view is when the engine's event says so (#326).
+    if recorded == Recorded::Here {
+        refresh_smart(ui, ctx);
+    }
 }
 
 /// Write the history if anything changed. Failures are logged, never shown:
@@ -1988,9 +2000,9 @@ pub fn record(
     ui: &mut Ui,
     _now: i64,
     say: impl FnOnce(&mut crate::model::instance::Instance) + Send + 'static,
-) {
+) -> Recorded {
     if ui.data_dir.is_none() {
-        return;
+        return Recorded::Not;
     }
     // **Two doors, asked in order** — #219, #236, I15, §4.4.
     //
@@ -2003,7 +2015,7 @@ pub fn record(
     // being a closure.
     let Some(appender) = ui.desk.appender() else {
         propose(ui, say);
-        return;
+        return Recorded::Elsewhere;
     };
     appender.say(say);
     // Waits, because the screen must show the rating it just took and a
@@ -2016,6 +2028,31 @@ pub fn record(
     // the fold's semantics rather than a slice of it.
     ui.desk.settled();
     refresh_listened(ui);
+    Recorded::Here
+}
+
+/// **Where a [`record`] landed**, which decides who refreshes what it changed — #326.
+///
+/// `Here` is in this view's fold already, so the caller redraws from it. `Elsewhere` went
+/// to the engine, and what the screen shows waits for the `library` event that says it
+/// landed — `follow_the_engine_topics` refolds on that, once. Refreshing straight after a
+/// proposal answered the open rule against a fold that did not have the change yet, and
+/// a rating paid that ~0.5 s answer three times over before the screen could redraw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    Here,
+    Elsewhere,
+    /// Nowhere to put it: no data directory, which a caller has already refused.
+    Not,
+}
+
+/// Refold to show what was just written, if it was written here — #326.
+///
+/// An attached view's write comes back as a `library` event, which refolds anyway.
+fn refold_once_recorded(ui: &mut Ui, recorded: Recorded) {
+    if recorded == Recorded::Here {
+        ui.stop = Some(Stop::Refold);
+    }
 }
 
 /// **Ask the engine to append what this view would have** — #236, I15.
@@ -5314,12 +5351,52 @@ fn refresh_smart(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(spec) = rule(ui, &name) else {
         return;
     };
-    let ids = spec.members(ctx.library, &all_rows(ctx), &*ui.listened, ui.sort_env());
+    ui.rule_answers += 1;
+    let ids = rule_members(
+        ui.engine.as_ref(),
+        &spec,
+        ctx.library,
+        &all_rows(ctx),
+        &*ui.listened,
+        ui.sort_env(),
+    );
     ui.playlist.clear();
     for id in ids {
         ui.playlist.push(id);
     }
     ui.playlist_sel = ui.playlist_sel.min(ui.playlist.len().saturating_sub(1));
+}
+
+/// **A rule's tracks, asked of whoever holds the library** — #326.
+///
+/// A rule saved from the player is a composed view, and an attached view's views are
+/// resolved by the librarian (#261) — so this one is too. Resolved here it read every row
+/// over the socket, ~0.5 s an answer on the draw thread, and a rating paid that before the
+/// screen could redraw. A config rule's `where` stays here: it filters copy by copy, which
+/// is not how a view resolves, so sending it as one would change what it answers.
+///
+/// A rule naming a saved view that has gone holds nothing either way: the librarian selects
+/// no rows for it, and [`crate::smart::SmartPlaylist::trouble`] is what says why.
+pub fn rule_members(
+    engine: Option<&std::sync::Arc<gmuse_client::Client>>,
+    spec: &crate::smart::SmartPlaylist,
+    rows: &dyn Listing,
+    all: &[CopyId],
+    defs: &dyn crate::view::Definitions,
+    env: crate::query::sort::SortEnv<'_>,
+) -> Vec<CopyId> {
+    let (Some(client), crate::smart::Question::View(stack)) = (engine, &spec.question) else {
+        return spec.members(rows, all, defs, env);
+    };
+    let asked = crate::ui::holding_remote::Remote::showing(
+        std::sync::Arc::clone(client),
+        crate::ui::holding_remote::Showing {
+            view: (!stack.is_empty()).then(|| stack.label()),
+            levels: Some(Vec::new()),
+        },
+    );
+    let held: std::collections::HashSet<CopyId> = Listing::rows(&asked).into_iter().collect();
+    spec.ordered(&held, all, rows, env)
 }
 
 /// `:export <path>` — write what view 3 holds as an `.m3u8`.
@@ -5518,7 +5595,7 @@ fn freeze(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     }
     let stamp = crate::history::now_ms();
     let (n_added, n_gone) = (added.len(), gone.len());
-    record(ui, stamp, move |log| {
+    let recorded = record(ui, stamp, move |log| {
         for (ord, recording) in &gone {
             log.remove_from_collection(stamp, id, *recording, ord.clone());
         }
@@ -5539,7 +5616,7 @@ fn freeze(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let said = format!("{name}: +{n_added} −{n_gone}, from {source}");
     ui.audit.line("freeze", &said);
     ui.notify(said);
-    ui.stop = Some(Stop::Refold);
+    refold_once_recorded(ui, recorded);
 }
 
 /// Freeze the rule open in view 3 into a named collection, and open that.
@@ -5578,7 +5655,7 @@ fn freeze_open_rule(ui: &mut Ui, ctx: &Context<'_>, name: &str, rule: &str) {
     let filed = members.len();
     let named = name.to_string();
     let frozen = source.clone();
-    record(ui, now, move |log| {
+    let recorded = record(ui, now, move |log| {
         // **Ordered**, because a rule carries a sort and freezing keeps what
         // was on screen. That order is a fact now and will diverge from the
         // rule's the moment either changes — which is the point of freezing.
@@ -5596,7 +5673,7 @@ fn freeze_open_rule(ui: &mut Ui, ctx: &Context<'_>, name: &str, rule: &str) {
     let said = format!("froze {rule} as {name} — {filed} tracks, from {source}");
     ui.audit.line("freeze", &said);
     ui.notify(said);
-    ui.stop = Some(Stop::Refold);
+    refold_once_recorded(ui, recorded);
 }
 
 /// **What is here, as recordings** — the grain a crate holds.
@@ -5677,7 +5754,7 @@ fn file_into(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let count = songs.len();
     let named = name.to_string();
     let now = crate::history::now_ms();
-    record(ui, now, move |log| {
+    let recorded = record(ui, now, move |log| {
         if is_new {
             log.name_collection(now, id, &named, false);
         }
@@ -5690,7 +5767,7 @@ fn file_into(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         if is_new { " — new crate" } else { "" },
         if count == 1 { "" } else { "s" }
     ));
-    ui.stop = Some(Stop::Refold);
+    refold_once_recorded(ui, recorded);
 }
 
 /// **`a` in the panel, and `:file` with no name: pick a crate.**
@@ -5772,7 +5849,7 @@ fn unfile_at_cursor(ui: &mut Ui, ctx: &Context<'_>) {
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     let now = crate::history::now_ms();
-    record(ui, now, move |log| {
+    let recorded = record(ui, now, move |log| {
         for (song, ord) in &held {
             log.remove_from_collection(now, crate_id, *song, ord.clone());
         }
@@ -5783,7 +5860,7 @@ fn unfile_at_cursor(ui: &mut Ui, ctx: &Context<'_>) {
     ));
     // The row is gone from the page once the fold says so; the cursor stays put and
     // lands on whatever is drawn there next.
-    ui.stop = Some(Stop::Refold);
+    refold_once_recorded(ui, recorded);
 }
 
 /// `:collect <name>` — file what the view holds into a collection.
@@ -5851,7 +5928,7 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     let named = name.to_string();
     let frozen = source.clone();
     let filed = members.len();
-    record(ui, now, move |log| {
+    let recorded = record(ui, now, move |log| {
         log.name_collection(now, id, &named, ordered);
         log.froze(now, id, &frozen);
         // **Keys spread only for a sequence.** A set has no running order, so
@@ -5880,7 +5957,7 @@ fn collect(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
     // fold, not the log this just wrote to. So the fold is redone rather than
     // overlaid: `view::Fresh` was the patch for exactly this and is gone.
     let _ = ctx;
-    ui.stop = Some(Stop::Refold);
+    refold_once_recorded(ui, recorded);
 }
 
 /// Redraw everything that is a projection of the librarian, after `main` has
@@ -5918,9 +5995,10 @@ pub fn refresh_library(ui: &mut Ui, ctx: &Context<'_>) {
     // different row under the same cursor index, so the marker is as stale as
     // the page above it.
     ui.focus_at.set(None);
+    // `rebuild_library` ends by answering the open rule, so it is not answered again here
+    // (#326): a second call was ~0.5 s of the same answer on every refold.
     rebuild_library(ui, ctx);
     refresh_playlist_rows(ui);
-    refresh_smart(ui, ctx);
 }
 
 fn rebuild_library(ui: &mut Ui, ctx: &Context<'_>) {
@@ -6473,7 +6551,7 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
     let names = write.names().to_string();
     let count = songs.len();
     let now = crate::history::now_ms();
-    record(ui, now, move |log| match &write {
+    let recorded = record(ui, now, move |log| match &write {
         Assert::Member(name) => {
             let id = Id::<Collection>::of_name(name);
             for song in &songs {
@@ -6512,7 +6590,7 @@ fn add_to_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
     // **The view is resolved by the librarian, so the row it now holds is not on screen
     // until the fold is.** Without this a `p` into `in="Dance"` wrote the fact and drew
     // the same list, which reads as the put having failed.
-    ui.stop = Some(Stop::Refold);
+    refold_once_recorded(ui, recorded);
 }
 
 /// **`dd` in a composed view retracts the fact that made the row true** — the other half
@@ -6564,7 +6642,7 @@ fn remove_from_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
         }
         _ => Vec::new(),
     };
-    record(ui, now, move |log| match &write {
+    let recorded = record(ui, now, move |log| match &write {
         Assert::Member(name) => {
             let id = Id::<Collection>::of_name(name);
             for (song, ord) in &held {
@@ -6589,7 +6667,7 @@ fn remove_from_view(ui: &mut Ui, ctx: &Context<'_>, ids: &[CopyId]) {
         }
     });
     ui.notify(format!("{undoes} {count}"));
-    ui.stop = Some(Stop::Refold);
+    refold_once_recorded(ui, recorded);
 }
 
 /// The recordings a selection of copies names — the grain a fact is about.
@@ -10768,6 +10846,74 @@ mod tests {
 
         assert_eq!(ui.playlist.len(), 1, "the rule did not notice the rating");
         assert_eq!(ui.open.as_ref().map(Open::name), Some("good"));
+    }
+
+    /// **A refold answers the open rule once** — #326.
+    ///
+    /// `refresh_library` called `rebuild_library`, which ends by answering the rule, and
+    /// then answered it again: ~0.5 s each through the socket, on the draw thread, on every
+    /// rating and every counted play. The second assertion is the playlist itself, so a
+    /// count of one cannot come from a rule that was never open.
+    #[test]
+    fn a_refold_answers_the_open_rule_once() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open electronic");
+        assert!(!ui.playlist.is_empty(), "the rule holds nothing to answer");
+
+        let before = ui.rule_answers;
+        refresh_library(&mut ui, &ctx);
+        assert_eq!(ui.rule_answers - before, 1, "answered more than once");
+    }
+
+    /// **A rating the engine takes is left to the engine's event** — #326.
+    ///
+    /// An attached view's rating is only proposed, so answering the rule straight after it
+    /// read a fold without the rating and then paid again when the `library` event
+    /// refolded. A local rating is in the fold at once, and must still answer: that half is
+    /// the instrument, or "not answered" would pass on a `rate` that never answers at all.
+    #[test]
+    fn a_proposed_rating_does_not_answer_the_rule_before_it_lands() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let rate = Command::Rate(crate::cmd::RateSpec::Set(5), crate::cmd::RateWhat::Playing);
+        let open = |ui: &mut Ui| {
+            press(ui, &ctx, ":");
+            type_line(ui, &ctx, "playlist open good");
+            flat_view(ui);
+            ui.sorted = 0;
+        };
+
+        let mut local = with_playlists(&store);
+        open(&mut local);
+        let before = local.rule_answers;
+        execute(&mut local, &ctx, rate.clone());
+        assert_eq!(local.rule_answers - before, 1, "a local rating must answer");
+        assert_eq!(
+            local.playlist.len(),
+            1,
+            "and the answer has the rating in it"
+        );
+
+        let mut attached = with_playlists(&store);
+        let dir = std::env::temp_dir().join("gmuse-proposed-rating");
+        attached.data_dir = Some(dir.clone());
+        attached.desk = crate::librarian::Desk::read_only(
+            Default::default(),
+            crate::model::id::Id::derived(b"attached"),
+            0,
+            dir,
+        )
+        .into_enquiries();
+        open(&mut attached);
+        let before = attached.rule_answers;
+        execute(&mut attached, &ctx, rate);
+        assert_eq!(
+            attached.rule_answers, before,
+            "answered before the engine said the rating landed"
+        );
     }
 
     /// Every row view 3 holds, by title, in order.
@@ -15851,6 +15997,39 @@ mod tests {
             filed,
             vec![(format!("1 of {of}"), "Half".to_string())],
             "the page did not say how much of the artist is filed"
+        );
+    }
+
+    /// **Filing into a crate refolds once it is in the fold, not before** — #326.
+    ///
+    /// Locally the write lands in this view's fold, so it refolds to show it. Attached, it
+    /// was proposed, and the engine's `library` event is what refolds: refolding straight
+    /// away read a fold without the crate and then paid again when the event came. The
+    /// local half is the instrument — the same gesture must be seen to ask for a refold.
+    #[test]
+    fn a_proposed_filing_leaves_the_refold_to_the_engine() {
+        let store = fixture();
+        let ctx = ctx_of(&store);
+
+        let mut local = ui_with_history(&store, "file-local");
+        onto_artist(&mut local, &ctx, "Anderson .Paak");
+        file_into(&mut local, &ctx, "Fresh");
+        assert_eq!(local.stop, Some(Stop::Refold), "{}", local.status);
+
+        let mut attached = ui_with_history(&store, "file-attached");
+        let dir = attached.data_dir.clone().expect("a data dir");
+        attached.desk = crate::librarian::Desk::read_only(
+            Default::default(),
+            crate::model::id::Id::derived(b"attached"),
+            0,
+            dir,
+        )
+        .into_enquiries();
+        onto_artist(&mut attached, &ctx, "Anderson .Paak");
+        file_into(&mut attached, &ctx, "Fresh");
+        assert_eq!(
+            attached.stop, None,
+            "refolded before the engine said it landed"
         );
     }
 

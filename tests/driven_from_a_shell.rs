@@ -638,7 +638,12 @@ fn record_sends_a_fact_to_the_engine_when_this_view_cannot_append() {
         "the first door has to be shut for this to mean anything"
     );
 
-    gmuse::ui::record(&mut ui, 0, move |log| log.rate(1_000, song, Some(3)));
+    // **And says it went elsewhere** (#326), which is what tells a caller to leave the
+    // refresh to the engine's `library` event rather than answer from a stale fold.
+    assert_eq!(
+        gmuse::ui::record(&mut ui, 0, move |log| log.rate(1_000, song, Some(3))),
+        gmuse::ui::Recorded::Elsewhere
+    );
 
     let mut found = false;
     for _ in 0..400 {
@@ -4263,6 +4268,77 @@ fn an_attached_view_draws_the_same_pane_as_a_detached_one() {
     assert_eq!(
         remote, local,
         "the two panes differ once the view is narrowed"
+    );
+}
+
+/// **A saved rule asked of the engine holds what it holds when resolved here** — #326.
+///
+/// An attached view answered its open rule by resolving it itself, reading every row over the
+/// socket: ~0.5 s an answer on the draw thread, three times a rating. It asks the librarian now,
+/// the way a composed view does (#261), and that is only a fix if the answer is the same one.
+/// The rule narrows, so agreeing is about the question and not about the whole library.
+#[test]
+fn a_saved_rule_asked_of_the_engine_holds_what_it_holds_here() {
+    use gmuse::model::rows::Listing;
+
+    let (engine, _recording) = start_with_a_track("rule-attached");
+    let client =
+        std::sync::Arc::new(Client::connect(&engine.socket, "view", "0").expect("connect"));
+    let rows = gmuse::ui::holding_remote::Remote::open(std::sync::Arc::clone(&client));
+    let all = rows.rows();
+    let heard = rows.heard().expect("what the library has heard");
+
+    let titles: Vec<String> = all
+        .iter()
+        .filter_map(|id| rows.listed(*id))
+        .map(|slip| slip.listed().title.to_string())
+        .collect();
+    let title = titles
+        .iter()
+        .find(|t| {
+            !titles
+                .iter()
+                .any(|other| other != *t && other.contains(&**t))
+        })
+        .expect("a title that is not a prefix of another")
+        .clone();
+    let spec = gmuse::smart::SmartPlaylist {
+        name: "one".into(),
+        question: gmuse::smart::Question::View(
+            gmuse::view::Stack::parse(&format!("title={title:?}")).expect("the rule parses"),
+        ),
+        sort: gmuse::query::sort::Sort::parse("-title").expect("the sort parses"),
+    };
+    let env = || gmuse::query::sort::SortEnv {
+        env: gmuse::query::filter::Env {
+            listened: Some(&heard),
+            named: None,
+            now: gmuse::history::now(),
+        },
+        smart_artist_sort: true,
+        seed: 0,
+    };
+
+    let here = gmuse::ui::rule_members(None, &spec, &rows, &all, &heard, env());
+    assert!(
+        !here.is_empty() && here.len() < all.len(),
+        "the rule held {} of {} — it narrows nothing",
+        here.len(),
+        all.len()
+    );
+    let there = gmuse::ui::rule_members(Some(&client), &spec, &rows, &all, &heard, env());
+    assert_eq!(there, here, "the engine answered the rule differently");
+
+    // **And a rule naming nothing holds nothing**, as it does here, rather than the library.
+    let gone = gmuse::smart::SmartPlaylist {
+        question: gmuse::smart::Question::View(
+            gmuse::view::Stack::parse("saved=\"no such view\"").expect("the rule parses"),
+        ),
+        ..spec.clone()
+    };
+    assert!(
+        gmuse::ui::rule_members(Some(&client), &gone, &rows, &all, &heard, env()).is_empty(),
+        "a rule naming a view that is gone held rows"
     );
 }
 
