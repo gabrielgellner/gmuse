@@ -444,6 +444,19 @@ pub enum PlaylistSpec {
     New(String),
     /// What there is to open. Also what a bare `:playlist` does.
     List,
+    /// Keep the composed view as a rule, under a name — #323.
+    ///
+    /// **The question, where `:freeze` keeps the answer.** It is the in-player
+    /// spelling of a `[playlists.x]` table, recorded in the log, and it stays
+    /// live the way one does. The sort is the rule's order, written as a
+    /// table's `sort` is; none is the library order.
+    Rule {
+        name: String,
+        sort: Option<crate::query::sort::Sort>,
+    },
+    /// Delete a rule `Rule` saved. A config table is not the player's to
+    /// delete, and saying so beats appearing to and having it come back.
+    Drop(String),
 }
 
 /// What `:queue` was asked to do — #321.

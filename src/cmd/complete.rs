@@ -115,14 +115,14 @@ fn candidates_for(head: &str, _word: &str, world: &World) -> Vec<String> {
 
         // Subcommands first, then names — so `:playlist <Tab>` shows what can
         // be done and `:playlist open <Tab>` what there is to do it to.
-        "playlist" if words.len() == 1 => ["list", "new", "open", "save"]
+        "playlist" if words.len() == 1 => ["drop", "list", "new", "open", "rule", "save"]
             .iter()
             .map(|s| s.to_string())
             .collect(),
         "queue" if words.len() == 1 => vec!["save".to_string()],
-        // `save` completes existing names too: overwriting one is a normal
-        // thing to want, and typing it out again is not.
-        "playlist" if words.len() == 2 && matches!(words[1], "open" | "save") => {
+        // `save` and `rule` complete existing names too: overwriting one is a
+        // normal thing to want, and typing it out again is not.
+        "playlist" if words.len() == 2 && matches!(words[1], "open" | "save" | "rule" | "drop") => {
             world.playlists.clone()
         }
 

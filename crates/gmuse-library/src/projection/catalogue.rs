@@ -17,7 +17,7 @@ use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
 use crate::model::entity::{
     Artist, Collection, Concept, Device, Encoding, Facet, Hierarchy, Label, Medium, Recording,
-    Release, ReleaseGroup, Role, Track, View, Work,
+    Release, ReleaseGroup, Role, Rule, Track, View, Work,
 };
 use crate::model::facet::{ConceptRecord, Described, FacetRecord};
 use crate::model::id::Id;
@@ -163,6 +163,10 @@ pub struct Catalogue {
     /// Views somebody has dropped. Kept, because *deleted* and *never existed*
     /// are different answers and only a row can tell them apart.
     pub views_dropped: BTreeSet<Id<View>>,
+    /// Every saved rule, by the id its name mints — #323.
+    pub rules: BTreeMap<Id<Rule>, SavedRule>,
+    /// Rules somebody has dropped, kept for the reason `views_dropped` is.
+    pub rules_dropped: BTreeSet<Id<Rule>>,
     /// What each collection is called, and whether its order means anything.
     pub collections: BTreeMap<Id<Collection>, Collected>,
     /// Every collection entry, **keyed by position before recording**.
@@ -395,6 +399,17 @@ pub struct SavedView {
     pub name: String,
     /// The stack as somebody typed it — `in="Jazz" &year>=2015`.
     pub source: String,
+}
+
+/// A saved rule, as the fold has it — #323.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedRule {
+    pub name: String,
+    /// The stack as somebody composed it — `in="Jazz" &rating>=4`.
+    pub source: String,
+    /// The order as somebody wrote it — `-rating, artist`. Empty is the
+    /// library order.
+    pub sort: String,
 }
 
 /// A collection, as the fold has it.
@@ -630,6 +645,26 @@ pub(crate) fn apply_one(cat: &mut Catalogue, stamp: &Stamp, fact: &Fact) {
         Fact::ViewDropped { view } => {
             cat.views.remove(view);
             cat.views_dropped.insert(*view);
+        }
+        Fact::RuleSaved {
+            rule,
+            name,
+            source,
+            sort,
+        } => {
+            cat.rules.insert(
+                *rule,
+                SavedRule {
+                    name: name.clone(),
+                    source: source.clone(),
+                    sort: sort.clone(),
+                },
+            );
+            cat.rules_dropped.remove(rule);
+        }
+        Fact::RuleDropped { rule } => {
+            cat.rules.remove(rule);
+            cat.rules_dropped.insert(*rule);
         }
         Fact::CollectionNamed {
             collection,
@@ -1416,6 +1451,47 @@ mod closure_tests {
             i.narrows(100, h, crate::model::facet::GENRE, parent, child);
         }
         crate::projection::heard::Heard::of(&i.catalogue())
+    }
+
+    /// **A saved rule folds to its latest definition, and a drop shadows it** — #323.
+    ///
+    /// Saving under a name that exists is a rewrite, not a second rule; dropping
+    /// it leaves a row saying so; saving it again brings it back, because a
+    /// person said so later.
+    #[test]
+    fn a_saved_rule_is_its_latest_definition_until_dropped() {
+        let best = Id::<Rule>::of_name("best");
+        let mut i = Instance::new(Id::<Device>::derived(b"test"));
+        i.save_rule(100, best, "best", "rating>=4", "");
+        i.save_rule(
+            200,
+            best,
+            "best",
+            "rating>=4 &genre=\"jazz\"",
+            "-rating, artist",
+        );
+
+        let cat = i.catalogue();
+        assert_eq!(cat.rules.len(), 1, "a rewrite became a second rule");
+        let rule = &cat.rules[&best];
+        assert_eq!(rule.source, "rating>=4 &genre=\"jazz\"");
+        assert_eq!(rule.sort, "-rating, artist");
+
+        i.drop_rule(300, best);
+        let cat = i.catalogue();
+        assert!(
+            !cat.rules.contains_key(&best),
+            "a dropped rule still answers"
+        );
+        assert!(cat.rules_dropped.contains(&best), "the drop left no row");
+
+        i.save_rule(400, best, "best", "rating=5", "");
+        let cat = i.catalogue();
+        assert_eq!(cat.rules[&best].source, "rating=5");
+        assert!(
+            !cat.rules_dropped.contains(&best),
+            "saved again, still shadowed"
+        );
     }
 
     /// **The derivation walk is bounded and cycle-safe** — #79, and the one

@@ -21,17 +21,50 @@
 //! `Shelf`. §4 is explicit that a playlist "must not be filtered by the
 //! active set" because crossing themes is the point of one; a smart playlist
 //! inherits that rather than being a special case.
+//!
+//! ## Two places a rule is written
+//!
+//! A `[playlists.x]` table in `config.toml`, and `:playlist rule x` in the
+//! player, which records a `RuleSaved` fact (#323). They differ in what the
+//! question is: a table's `where` is a [`Filter`], and a saved rule is the
+//! composed `:view` it was made from — a [`crate::view::Stack`], so
+//! `in="Jazz" &rating>=4` is something a rule can say. Both are [`Question`]s
+//! here, and nothing past `members` can tell them apart.
 
 use crate::model::rows::CopyId;
 use crate::model::rows::Listing;
 use crate::query::filter::Filter;
 use crate::query::sort::{Sort, SortEnv};
+use crate::view::Definitions;
+
+/// Which tracks a rule takes — a predicate, or a composed view.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Question {
+    /// A `[playlists.x] where = "…"` table: one predicate over every copy.
+    Where(Filter),
+    /// A rule saved from the player: the stack `:view` had composed (#323).
+    ///
+    /// **Resolved as the view resolves it**, so a rule saved from what you
+    /// were looking at holds what you were looking at — recordings, and every
+    /// copy of each — rather than being re-read by a second set of semantics.
+    View(crate::view::Stack),
+}
+
+impl Question {
+    /// What was written — the line a person typed, either way.
+    pub fn source(&self) -> String {
+        match self {
+            Question::Where(filter) => filter.source.clone(),
+            Question::View(stack) => stack.label(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SmartPlaylist {
     pub name: String,
     /// Which tracks. Required — a smart playlist with no rule is the library.
-    pub filter: Filter,
+    pub question: Question,
     /// What order. Defaults to [`Sort::library_order`].
     pub sort: Sort,
 }
@@ -43,31 +76,105 @@ impl SmartPlaylist {
     /// with the history behind it — a rule mentioning `play_count` has to
     /// answer differently after you play something, and a materialised list
     /// would need invalidating from every corner of the app instead.
-    pub fn members(&self, rows: &dyn Listing, all: &[CopyId], env: SortEnv<'_>) -> Vec<CopyId> {
-        let matches = self.filter.compile(env.env);
-        let mut ids: Vec<CopyId> = all
-            .iter()
-            .copied()
-            // **The row is owned and the subject borrows it** — #261. `Listing::subject` used
-            // to hand back a borrow into the fold, which a reader on a socket has none of; a
-            // slip is the same row written out, and a `Subject` over it reads identically.
-            .filter(|id| {
-                rows.listed(*id).is_some_and(|slip| {
-                    matches(&crate::model::rows::Subject {
-                        row: slip.listed(),
-                        locator: None,
-                        recording: rows.recording_of(*id),
+    ///
+    /// `defs` is where a saved rule's `saved="…"` terms are looked up; a config
+    /// rule names none and ignores it.
+    pub fn members(
+        &self,
+        rows: &dyn Listing,
+        all: &[CopyId],
+        defs: &dyn Definitions,
+        env: SortEnv<'_>,
+    ) -> Vec<CopyId> {
+        let mut ids: Vec<CopyId> = match &self.question {
+            Question::Where(filter) => {
+                let matches = filter.compile(env.env);
+                all.iter()
+                    .copied()
+                    // **The row is owned and the subject borrows it** — #261. `Listing::subject`
+                    // used to hand back a borrow into the fold, which a reader on a socket has
+                    // none of; a slip is the same row written out, and a `Subject` over it reads
+                    // identically.
+                    .filter(|id| {
+                        rows.listed(*id).is_some_and(|slip| {
+                            matches(&crate::model::rows::Subject {
+                                row: slip.listed(),
+                                locator: None,
+                                recording: rows.recording_of(*id),
+                            })
+                        })
                     })
-                })
-            })
-            .collect();
+                    .collect()
+            }
+            Question::View(stack) => {
+                let resolved = stack.resolve(rows, defs, env.env);
+                // **A rule naming a saved view that has gone holds nothing**, and
+                // [`Self::trouble`] is what says why — the empty list alone would read as
+                // a query that matched nothing (#119).
+                if !resolved.problems.is_empty() {
+                    return Vec::new();
+                }
+                let held = resolved.copies(rows);
+                all.iter().copied().filter(|id| held.contains(id)).collect()
+            }
+        };
         self.sort.apply(&mut ids, rows, env);
         ids
     }
 
-    /// What the config said, for a message and for view 3's title.
+    /// Why this rule cannot be answered, if it cannot.
+    ///
+    /// Only a saved rule can fail this way: it is a view, and a view may name
+    /// a saved view that has since been dropped. A config `where` names none.
+    pub fn trouble(
+        &self,
+        rows: &dyn Listing,
+        defs: &dyn Definitions,
+        env: SortEnv<'_>,
+    ) -> Option<String> {
+        let Question::View(stack) = &self.question else {
+            return None;
+        };
+        let resolved = stack.resolve(rows, defs, env.env);
+        resolved.problems.first().map(|p| p.to_string())
+    }
+
+    /// What the rule said, for a message and for view 3's title.
     pub fn rule_label(&self) -> String {
-        format!("{}  sorted by  {}", self.filter.source, self.sort.source)
+        format!(
+            "{}  sorted by  {}",
+            self.question.source(),
+            self.sort.source
+        )
+    }
+
+    /// A rule the log holds, read back through the parsers that wrote it — #323.
+    ///
+    /// **An error rather than a skip**, because the only way a stored line
+    /// stops parsing is the language changing under it, and a rule that
+    /// silently vanished from view 7 would be the worse answer.
+    pub fn saved(rule: &crate::projection::catalogue::SavedRule) -> Result<Self, String> {
+        let stack = crate::view::Stack::parse(&rule.source).map_err(|e| {
+            format!(
+                "{} was saved as {:?}, which no longer parses: {e}",
+                rule.name, rule.source
+            )
+        })?;
+        let sort = if rule.sort.is_empty() {
+            Sort::library_order()
+        } else {
+            Sort::parse(&rule.sort).map_err(|e| {
+                format!(
+                    "{} was saved sorted by {:?}, which no longer parses: {e}",
+                    rule.name, rule.sort
+                )
+            })?
+        };
+        Ok(SmartPlaylist {
+            name: rule.name.clone(),
+            question: Question::View(stack),
+            sort,
+        })
     }
 }
 
@@ -81,7 +188,7 @@ impl SmartPlaylists {
     pub fn define(&mut self, name: &str, filter: Filter, sort: Option<Sort>) {
         let entry = SmartPlaylist {
             name: name.to_string(),
-            filter,
+            question: Question::Where(filter),
             sort: sort.unwrap_or_else(Sort::library_order),
         };
         match self.defined.iter_mut().find(|p| p.name == name) {
@@ -196,7 +303,7 @@ mod tests {
     }
 
     fn names(p: &SmartPlaylist, l: &crate::model::seam::Librarian, e: SortEnv<'_>) -> Vec<String> {
-        p.members(l, &Listing::rows(l), e)
+        p.members(l, &Listing::rows(l), &crate::view::NoDefinitions, e)
             .iter()
             .map(|id| {
                 Listing::listed(l, *id)
@@ -233,7 +340,7 @@ mod tests {
         let p = playlist("genre=\"electronic\"", Some("artist"));
         // One lives under General and one under Dance; both are here.
         let paths: Vec<String> = p
-            .members(&s, &Listing::rows(&s), env(&h))
+            .members(&s, &Listing::rows(&s), &crate::view::NoDefinitions, env(&h))
             .iter()
             .map(|id| {
                 Listing::playable(&s, *id)
@@ -249,7 +356,10 @@ mod tests {
     fn a_rule_that_matches_nothing_is_empty_rather_than_everything() {
         let (s, h) = (store(), listening());
         let p = playlist("genre=\"polka\"", None);
-        assert!(p.members(&s, &Listing::rows(&s), env(&h)).is_empty());
+        assert!(
+            p.members(&s, &Listing::rows(&s), &crate::view::NoDefinitions, env(&h))
+                .is_empty()
+        );
     }
 
     /// The rule is re-read on every call, so a play or a rating changes the
@@ -259,7 +369,10 @@ mod tests {
         let s = store();
         let mut h = listening();
         let p = playlist("play_count>0", None);
-        assert!(p.members(&s, &Listing::rows(&s), env(&h)).is_empty());
+        assert!(
+            p.members(&s, &Listing::rows(&s), &crate::view::NoDefinitions, env(&h))
+                .is_empty()
+        );
 
         played(&mut h, &s, "/m/General/b.mp3", 900_000);
         assert_eq!(names(&p, &s, env(&h)), ["Burial"]);
@@ -279,7 +392,60 @@ mod tests {
             None,
         );
         assert_eq!(set.names(), ["p"]);
-        assert_eq!(set.get("p").unwrap().filter.source, "year>2000");
+        assert_eq!(set.get("p").unwrap().question.source(), "year>2000");
+    }
+
+    fn saved(source: &str, sort: &str) -> crate::projection::catalogue::SavedRule {
+        crate::projection::catalogue::SavedRule {
+            name: "r".into(),
+            source: source.into(),
+            sort: sort.into(),
+        }
+    }
+
+    /// **A saved rule is a view**, so it reads `in=` and `saved=` terms a
+    /// config `where` cannot — and naming a saved view that has gone is said,
+    /// rather than reading as a query that matched nothing (#119, #323).
+    #[test]
+    fn a_saved_rule_naming_a_view_that_is_gone_says_so() {
+        let (s, h) = (store(), listening());
+        // **A union**, so the half that does resolve has rows to give: without the
+        // guard this would answer with the electronic tracks and say nothing.
+        let rule = SmartPlaylist::saved(&saved(r#"genre="electronic" +saved="gone""#, ""))
+            .expect("it parses");
+        assert!(
+            rule.members(&s, &Listing::rows(&s), &crate::view::NoDefinitions, env(&h))
+                .is_empty()
+        );
+        let why = rule.trouble(&s, &crate::view::NoDefinitions, env(&h));
+        assert!(
+            why.as_deref().is_some_and(|w| w.contains("gone")),
+            "{why:?}"
+        );
+
+        // A rule that resolves has nothing to report, so the line above is
+        // about the missing view and not about every saved rule.
+        let fine = SmartPlaylist::saved(&saved(r#"genre="electronic""#, "-year")).unwrap();
+        assert_eq!(fine.trouble(&s, &crate::view::NoDefinitions, env(&h)), None);
+        assert_eq!(names(&fine, &s, env(&h)), ["Caribou", "Burial"]);
+    }
+
+    /// A stored line that no longer parses is an error naming the rule, not a
+    /// rule that quietly vanished.
+    #[test]
+    fn a_saved_rule_that_no_longer_parses_says_which() {
+        let bad_sort = SmartPlaylist::saved(&saved("year>0", "-nonsense_field"));
+        assert!(
+            bad_sort.as_ref().is_err_and(|e| e.contains("sorted by")),
+            "{bad_sort:?}"
+        );
+        let bad_view = SmartPlaylist::saved(&saved("year>>0", ""));
+        assert!(
+            bad_view
+                .as_ref()
+                .is_err_and(|e| e.contains("no longer parses")),
+            "{bad_view:?}"
+        );
     }
 
     #[test]

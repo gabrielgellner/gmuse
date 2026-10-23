@@ -179,7 +179,9 @@ pub fn projection_path(data_dir: &Path) -> PathBuf {
 /// trusted whenever the log's print matches and fixing the fold does not
 /// change the log. A fix that is correct and invisible is the failure #309 is
 /// about, and the rule above is widened so the next one is not.
-const PROJECTION_VERSION: u32 = 3;
+///
+/// 4 — #323. `Catalogue` holds saved rules beside saved views.
+const PROJECTION_VERSION: u32 = 4;
 
 /// **What the logs looked like when a snapshot was taken** — #194.
 ///

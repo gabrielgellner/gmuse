@@ -31,6 +31,8 @@ pub enum ParseError {
     Key(#[from] keys::KeyParseError),
     #[error("{0}")]
     Filter(#[from] crate::query::filter::FilterError),
+    #[error("{0}")]
+    Sort(#[from] crate::query::sort::SortError),
 }
 
 /// Every verb `command` accepts, aliases included.
@@ -764,10 +766,46 @@ fn playlist_spec(rest: &str) -> Result<PlaylistSpec, ParseError> {
         "open" => PlaylistSpec::Open(needs_name("playlist open")?),
         "new" => PlaylistSpec::New(needs_name("playlist new")?),
         "save" => PlaylistSpec::Save(needs_name("playlist save")?),
+        "drop" => PlaylistSpec::Drop(needs_name("playlist drop")?),
+        // **`sort` is a word, not a position**, because a name may have spaces in it and
+        // `late night -rating` could split either way. The last ` sort ` is the one that
+        // counts, so a name containing the word still works with an order after it.
+        "rule" => {
+            // The line arrives trimmed, so `best sort` with the order forgotten has
+            // no trailing space to split on — and would otherwise save a rule called
+            // "best sort".
+            let (name, sort) = match name.rsplit_once(" sort ") {
+                Some((n, s)) => (n.trim(), Some(s.trim())),
+                None => match name.strip_suffix(" sort") {
+                    Some(n) => (n.trim(), Some("")),
+                    None => (name, None),
+                },
+            };
+            if name.is_empty() {
+                return Err(ParseError::Missing {
+                    cmd: "playlist rule",
+                    what: "a playlist name",
+                });
+            }
+            let sort = match sort {
+                Some("") => {
+                    return Err(ParseError::Missing {
+                        cmd: "playlist rule … sort",
+                        what: "an order, like `-rating, artist`",
+                    });
+                }
+                Some(s) => Some(crate::query::sort::Sort::parse(s)?),
+                None => None,
+            };
+            PlaylistSpec::Rule {
+                name: name.to_string(),
+                sort,
+            }
+        }
         other => {
             return Err(ParseError::Bad(
                 other.into(),
-                "playlist action — try `open`, `new`, `save`, or `list`",
+                "playlist action — try `open`, `new`, `save`, `rule`, `drop`, or `list`",
             ));
         }
     })
@@ -1002,6 +1040,12 @@ pub fn format(cmd: &Command) -> String {
             PlaylistSpec::Open(n) => format!("playlist open {n}"),
             PlaylistSpec::Save(n) => format!("playlist save {n}"),
             PlaylistSpec::New(n) => format!("playlist new {n}"),
+            PlaylistSpec::Rule { name, sort: None } => format!("playlist rule {name}"),
+            PlaylistSpec::Rule {
+                name,
+                sort: Some(sort),
+            } => format!("playlist rule {name} sort {}", sort.source),
+            PlaylistSpec::Drop(n) => format!("playlist drop {n}"),
         },
         Command::Queue(QueueSpec::Save(n)) => format!("queue save {n}"),
         Command::Collect(name) => format!("collect {name}"),
@@ -1335,6 +1379,18 @@ mod tests {
         samples.push(Command::SeekPercent);
         samples.extend(Motion::ALL.iter().copied().map(Command::Go));
         samples.push(Command::Playing);
+        // #323's two forms, the order being the one that can be lost on the way back.
+        samples.extend([
+            Command::Playlist(PlaylistSpec::Rule {
+                name: "late night".into(),
+                sort: Some(crate::query::sort::Sort::parse("-rating, artist").unwrap()),
+            }),
+            Command::Playlist(PlaylistSpec::Rule {
+                name: "best".into(),
+                sort: None,
+            }),
+            Command::Playlist(PlaylistSpec::Drop("best".into())),
+        ]);
         samples.extend(vec![
             Command::Up,
             Command::Down,
@@ -1523,6 +1579,49 @@ mod tests {
         assert_eq!(
             command("playlist").unwrap(),
             Command::Playlist(PlaylistSpec::List)
+        );
+    }
+
+    /// `:playlist rule` keeps the composed view as a rule (#323). A name may
+    /// have spaces, so the order is introduced by the word `sort` rather than
+    /// by position.
+    #[test]
+    fn playlist_rule_takes_a_name_and_an_optional_order() {
+        let sort = |s: &str| Some(crate::query::sort::Sort::parse(s).unwrap());
+        assert_eq!(
+            command("playlist rule late night sort -rating, artist").unwrap(),
+            Command::Playlist(PlaylistSpec::Rule {
+                name: "late night".into(),
+                sort: sort("-rating, artist"),
+            })
+        );
+        assert_eq!(
+            command("playlist rule best").unwrap(),
+            Command::Playlist(PlaylistSpec::Rule {
+                name: "best".into(),
+                sort: None,
+            })
+        );
+        // The last ` sort ` is the one, so a name containing the word survives.
+        assert_eq!(
+            command("playlist rule sort of good sort title").unwrap(),
+            Command::Playlist(PlaylistSpec::Rule {
+                name: "sort of good".into(),
+                sort: sort("title"),
+            })
+        );
+        assert_eq!(
+            command("playlist drop best").unwrap(),
+            Command::Playlist(PlaylistSpec::Drop("best".into()))
+        );
+        assert!(command("playlist rule").is_err(), "a rule needs a name");
+        assert!(
+            command("playlist rule best sort ").is_err(),
+            "an empty order"
+        );
+        assert!(
+            command("playlist rule best sort -no_such_field").is_err(),
+            "an order is parsed here, at the boundary"
         );
     }
 

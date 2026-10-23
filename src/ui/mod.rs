@@ -3657,6 +3657,8 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
             crate::cmd::PlaylistSpec::Save(name) => save_playlist(ui, ctx, &name),
             crate::cmd::PlaylistSpec::New(name) => new_playlist(ui, ctx, &name),
             crate::cmd::PlaylistSpec::List => list_playlists(ui),
+            crate::cmd::PlaylistSpec::Rule { name, sort } => save_rule(ui, &name, sort),
+            crate::cmd::PlaylistSpec::Drop(name) => drop_rule(ui, &name),
         },
         Command::Queue(crate::cmd::QueueSpec::Save(name)) => save_queue(ui, ctx, &name),
         Command::Collect(name) => collect(ui, ctx, &name),
@@ -4273,8 +4275,14 @@ fn rule_owned(what: &str) -> String {
 /// verb rather than colliding in two. A rule wins a name clash, because it is
 /// the one that cannot be renamed from inside the app.
 fn open_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
-    if ui.playlists.get(name).is_some() {
+    if rule(ui, name).is_some() {
         load_smart(ui, ctx, name);
+        return;
+    }
+    // A saved rule the language has moved out from under: say so, rather than
+    // "no playlist" about a name view 7 has just shown you.
+    if let Some(Err(why)) = saved_rule(ui, name) {
+        ui.notify(why);
         return;
     }
     if saved_lists(ui).iter().any(|(n, _)| n == name) {
@@ -4291,18 +4299,18 @@ fn open_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
 
 /// Rebuild view 7's rows.
 ///
-/// Rules first, then saved files, each alphabetical — rules cannot be created
-/// or renamed from inside the app, so they are the fixed part of the list and
-/// keeping them at the top stops the interesting half jumping around as
-/// playlists are saved.
+/// Rules first, then saved files, each alphabetical — rules change far less
+/// often than lists do, so they are the fixed part of the list and keeping
+/// them at the top stops the interesting half jumping around as playlists are
+/// saved.
 fn refresh_playlist_rows(ui: &mut Ui) {
     let mut rows: Vec<PlaylistRow> = Vec::new();
-    let mut rules: Vec<&crate::smart::SmartPlaylist> = ui.playlists.all().collect();
+    let mut rules = rules(ui);
     rules.sort_by(|a, b| a.name.cmp(&b.name));
     for rule in rules {
         rows.push(PlaylistRow {
             name: rule.name.clone(),
-            detail: rule.filter.source.clone(),
+            detail: rule.question.source(),
             rule: true,
         });
     }
@@ -4429,12 +4437,7 @@ fn load_collection(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
 
 /// Every name `:playlist open` would accept.
 fn known_playlists(ui: &Ui) -> Vec<String> {
-    let mut names: Vec<String> = ui
-        .playlists
-        .names()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+    let mut names: Vec<String> = rules(ui).into_iter().map(|r| r.name).collect();
     for (name, _) in saved_lists(ui) {
         if !names.contains(&name) {
             names.push(name);
@@ -4817,7 +4820,7 @@ fn new_playlist(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         ui.notify("nowhere to keep playlists — set `data_dir` in the config");
         return;
     };
-    if saved_lists(ui).iter().any(|(n, _)| n == name) || ui.playlists.get(name).is_some() {
+    if saved_lists(ui).iter().any(|(n, _)| n == name) || rule(ui, name).is_some() {
         ui.notify(format!("{name} already exists — `:playlist open {name}`"));
         return;
     }
@@ -5011,7 +5014,7 @@ fn save_queue(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
         ui.notify("nowhere to save playlists — set `data_dir` in the config");
         return;
     }
-    if saved_lists(ui).iter().any(|(n, _)| n == name) || ui.playlists.get(name).is_some() {
+    if saved_lists(ui).iter().any(|(n, _)| n == name) || rule(ui, name).is_some() {
         ui.notify(format!("{name} already exists — choose another name"));
         return;
     }
@@ -5105,16 +5108,143 @@ fn all_rows(ctx: &Context<'_>) -> Vec<CopyId> {
     rows.rows()
 }
 
+/// Every rule there is to open: the config's, then the log's — #323.
+///
+/// **The config wins a name both define.** It is the one a person can see they
+/// wrote, and `:playlist rule` refuses a config name, so a clash only arrives
+/// from another device — where silently preferring the synced one would make
+/// editing `config.toml` appear to do nothing.
+///
+/// A saved rule that no longer parses is left out here and reported by
+/// [`saved_rule`] when somebody asks for it by name.
+fn rules(ui: &Ui) -> Vec<crate::smart::SmartPlaylist> {
+    let mut out: Vec<_> = ui.playlists.all().cloned().collect();
+    for saved in ui.listened.rules.values() {
+        if out.iter().any(|r| r.name == saved.name) {
+            continue;
+        }
+        if let Ok(rule) = crate::smart::SmartPlaylist::saved(saved) {
+            out.push(rule);
+        }
+    }
+    out
+}
+
+/// One rule by name, wherever it was written.
+fn rule(ui: &Ui, name: &str) -> Option<crate::smart::SmartPlaylist> {
+    ui.playlists
+        .get(name)
+        .cloned()
+        .or_else(|| saved_rule(ui, name).and_then(Result::ok))
+}
+
+/// The rule the log holds under `name`, read back — `None` if it holds none.
+fn saved_rule(ui: &Ui, name: &str) -> Option<Result<crate::smart::SmartPlaylist, String>> {
+    let id = crate::model::id::Id::<crate::model::entity::Rule>::of_name(name);
+    ui.listened
+        .rules
+        .get(&id)
+        .map(crate::smart::SmartPlaylist::saved)
+}
+
+/// `:playlist rule <name> [sort <keys>]` — keep the composed view as a rule (#323).
+///
+/// **The question, where `:freeze` keeps the answer.** What is stored is the
+/// view's source line, the stack `:view` shows, so the rule holds what you were
+/// looking at and stays live: rate a track and it joins, exactly as it would in
+/// a `[playlists]` table.
+///
+/// Saying it again under the same name rewrites it — a rule is one definition,
+/// not a list to add to — and that is the way to change one's order.
+fn save_rule(ui: &mut Ui, name: &str, sort: Option<crate::query::sort::Sort>) {
+    let name = name.trim();
+    if ui.data_dir.is_none() {
+        ui.notify("saving a rule needs somewhere to record it — set `data_dir` in the config");
+        return;
+    }
+    if ui.composed.is_empty() {
+        ui.notify(
+            "nothing composed to keep — `:view rating>=4` first, then `:playlist rule <name>`",
+        );
+        return;
+    }
+    // **Refused rather than shadowed.** The config would win, so the saved rule
+    // would be written and never seen — a save that does nothing is worse than one
+    // that says no.
+    if ui.playlists.get(name).is_some() {
+        ui.notify(format!(
+            "{name} is a rule in config.toml — edit it there, or choose another name"
+        ));
+        return;
+    }
+    if saved_lists(ui).iter().any(|(n, _)| n == name) {
+        ui.notify(format!("{name} is a saved playlist — choose another name"));
+        return;
+    }
+    let source = ui.composed.label();
+    let order = sort.as_ref().map(|s| s.source.clone()).unwrap_or_default();
+    let id = crate::model::id::Id::<crate::model::entity::Rule>::of_name(name);
+    let now = crate::history::now_ms();
+    let (named, stored, ordered) = (name.to_string(), source.clone(), order.clone());
+    record(ui, now, move |log| {
+        log.save_rule(now, id, &named, &stored, &ordered);
+    });
+    refresh_playlist_rows(ui);
+    let said = if order.is_empty() {
+        format!("saved rule {name}: {source}")
+    } else {
+        format!("saved rule {name}: {source}, sorted by {order}")
+    };
+    ui.audit.line("rule", &said);
+    ui.notify(said);
+}
+
+/// `:playlist drop <name>` — delete a rule `:playlist rule` saved.
+///
+/// Only a saved one. A config table is the player's to read and not to rewrite,
+/// and a drop that came back on the next launch would be the worst answer.
+fn drop_rule(ui: &mut Ui, name: &str) {
+    let name = name.trim();
+    if ui.playlists.get(name).is_some() {
+        ui.notify(format!("{name} is a rule in config.toml — remove it there"));
+        return;
+    }
+    if saved_rule(ui, name).is_none() {
+        ui.notify(if saved_lists(ui).iter().any(|(n, _)| n == name) {
+            format!("{name} is a saved playlist, not a rule")
+        } else {
+            format!("no saved rule {name:?}")
+        });
+        return;
+    }
+    let id = crate::model::id::Id::<crate::model::entity::Rule>::of_name(name);
+    let now = crate::history::now_ms();
+    record(ui, now, move |log| log.drop_rule(now, id));
+    // **What view 3 holds stays**, because it is on screen and somebody may be
+    // playing from it — but it is no longer a rule, so nothing will refresh it
+    // and nothing should claim it is one.
+    if matches!(&ui.open, Some(Open::Rule(open)) if open == name) {
+        ui.open = None;
+    }
+    refresh_playlist_rows(ui);
+    let said = format!("dropped rule {name}");
+    ui.audit.line("rule", &said);
+    ui.notify(said);
+}
+
 /// Fill view 3 from a named smart playlist.
 fn load_smart(ui: &mut Ui, ctx: &Context<'_>, name: &str) {
-    let Some(spec) = ui.playlists.get(name) else {
+    let Some(spec) = rule(ui, name) else {
         return;
     };
-    let ids = spec.members(ctx.library, &all_rows(ctx), ui.sort_env());
+    let ids = spec.members(ctx.library, &all_rows(ctx), &*ui.listened, ui.sort_env());
     let count = ids.len();
     // An empty result is the confusing case, so it says what the rule was
-    // rather than leaving you to go and read the config.
-    let said = if count == 0 {
+    // rather than leaving you to go and read the config — and, for a saved
+    // rule naming a view that has gone, why it could not be answered at all.
+    let said = if let Some(why) = spec.trouble(ctx.library, &*ui.listened, ui.sort_env()) {
+        format!("{name}: {why}")
+    } else if count == 0 {
         format!("{name}: nothing matches {}", spec.rule_label())
     } else {
         format!("{name}: {count} tracks")
@@ -5143,10 +5273,10 @@ fn refresh_smart(ui: &mut Ui, ctx: &Context<'_>) {
     let Some(Open::Rule(name)) = ui.open.clone() else {
         return;
     };
-    let Some(spec) = ui.playlists.get(&name) else {
+    let Some(spec) = rule(ui, &name) else {
         return;
     };
-    let ids = spec.members(ctx.library, &all_rows(ctx), ui.sort_env());
+    let ids = spec.members(ctx.library, &all_rows(ctx), &*ui.listened, ui.sort_env());
     ui.playlist.clear();
     for id in ids {
         ui.playlist.push(id);
@@ -5389,7 +5519,7 @@ fn freeze_open_rule(ui: &mut Ui, ctx: &Context<'_>, name: &str, rule: &str) {
         ui.notify("freezing needs somewhere to record it");
         return;
     }
-    let Some(source) = ui.playlists.get(rule).map(|p| p.filter.source.clone()) else {
+    let Some(source) = self::rule(ui, rule).map(|p| p.question.source()) else {
         ui.notify(format!("no rule {rule:?}"));
         return;
     };
@@ -10566,7 +10696,8 @@ mod tests {
             ui.listened.collections[&id].from.as_deref(),
             ui.playlists
                 .get("electronic")
-                .map(|p| p.filter.source.as_str()),
+                .map(|p| p.question.source())
+                .as_deref(),
             "the rule was not recorded"
         );
 
@@ -10595,6 +10726,164 @@ mod tests {
 
         assert_eq!(ui.playlist.len(), 1, "the rule did not notice the rating");
         assert_eq!(ui.open.as_ref().map(Open::name), Some("good"));
+    }
+
+    /// Every row view 3 holds, by title, in order.
+    fn titles_open(ui: &Ui, ctx: &Context<'_>) -> Vec<String> {
+        let rows: &dyn Listing = ctx.library;
+        ui.playlist
+            .entries()
+            .iter()
+            .map(|id| {
+                rows.listed(*id)
+                    .map(|r| r.title.to_string())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// **A rule saved from the player is a fact, and opens as one** — #323.
+    ///
+    /// The question is the composed view and the order is the one given, so
+    /// it opens in that order and as a rule rather than a list.
+    #[test]
+    fn a_rule_saved_from_the_player_is_a_fact_and_opens_in_its_order() {
+        use crate::model::entity::Rule;
+        use crate::model::id::Id;
+
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view genre="electronic""#);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist rule mine sort -title");
+
+        let saved = ui.listened.rules.get(&Id::<Rule>::of_name("mine"));
+        assert_eq!(
+            saved.map(|r| (r.source.as_str(), r.sort.as_str())),
+            Some((r#"genre="electronic""#, "-title")),
+            "{}",
+            ui.status
+        );
+        assert!(
+            ui.playlist_rows.iter().any(|r| r.name == "mine" && r.rule),
+            "view 7 does not list it as a rule"
+        );
+
+        // Take the view apart first, so what opens is the rule and not the
+        // composition that happened to be on screen.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open mine");
+        assert!(ui.open.as_ref().is_some_and(Open::is_rule), "{}", ui.status);
+        assert_eq!(titles_open(&ui, &ctx), ["Zebra", "Antelope"]);
+    }
+
+    /// **It stays live**: rating a track changes what a saved rule holds, the
+    /// way it does for a `[playlists]` table.
+    #[test]
+    fn a_saved_rule_answers_a_rating_without_being_reopened() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view rating>=5");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist rule best");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "view");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open best");
+        assert_eq!(
+            ui.open.as_ref().map(Open::name),
+            Some("best"),
+            "{}",
+            ui.status
+        );
+        assert!(ui.playlist.is_empty(), "nothing is rated yet");
+
+        flat_view(&mut ui);
+        ui.sorted = 0;
+        execute(&mut ui, &ctx, Command::Rate(crate::cmd::RateSpec::Set(5)));
+        assert_eq!(
+            ui.playlist.len(),
+            1,
+            "the saved rule did not notice the rating"
+        );
+    }
+
+    /// **A config name is refused, not shadowed**: the config would win, so a
+    /// rule saved under its name would be written and never seen.
+    #[test]
+    fn saving_a_rule_under_a_config_name_is_refused() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view genre="folk""#);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist rule good");
+        assert!(ui.status.contains("config.toml"), "{}", ui.status);
+        assert!(ui.listened.rules.is_empty(), "it was written anyway");
+
+        // The same composition under a free name is saved, so the refusal
+        // above was about the name and not about a save that cannot happen.
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist rule folk");
+        assert_eq!(ui.listened.rules.len(), 1, "{}", ui.status);
+    }
+
+    /// Nothing composed is the library, and a rule that is the library is
+    /// almost certainly a mistake — said, and the way in named.
+    #[test]
+    fn a_rule_needs_something_composed() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist rule everything");
+        assert!(ui.status.contains(":view"), "{}", ui.status);
+        assert!(ui.listened.rules.is_empty());
+    }
+
+    /// **Dropping a rule removes it from view 7 and from `open`**, and leaves
+    /// what view 3 is showing — somebody may be playing from it.
+    #[test]
+    fn a_dropped_rule_is_gone_and_a_config_one_is_not_droppable() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, r#"view genre="electronic""#);
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist rule mine");
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open mine");
+        let held = ui.playlist.len();
+        assert!(held > 0, "the rule held nothing to begin with");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist drop mine");
+        assert!(ui.listened.rules.is_empty(), "{}", ui.status);
+        assert!(!ui.playlist_rows.iter().any(|r| r.name == "mine"));
+        assert!(ui.open.is_none(), "view 3 still claims to be the rule");
+        assert_eq!(ui.playlist.len(), held, "dropping emptied view 3");
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open mine");
+        assert!(ui.status.contains("no playlist"), "{}", ui.status);
+
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist drop good");
+        assert!(ui.status.contains("config.toml"), "{}", ui.status);
+        assert!(ui.playlists.get("good").is_some());
     }
 
     #[test]
@@ -14049,6 +14338,8 @@ mod tests {
             "remove_from_collection",
             "save_view",
             "froze",
+            "save_rule",
+            "drop_rule",
             "assert_concept",
             "retract_concept",
             // Only reached from tests, which build their own facts directly.

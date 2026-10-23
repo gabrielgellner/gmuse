@@ -71,6 +71,16 @@ impl Id<crate::entity::View> {
     }
 }
 
+impl Id<crate::entity::Rule> {
+    /// The id a saved rule's name always mints — #323.
+    ///
+    /// Convergent for the reason a view's is: two devices saving `best`
+    /// write one rule, and the later definition wins.
+    pub fn of_name(name: &str) -> Self {
+        Id::derived(crate::normalise(name).as_bytes())
+    }
+}
+
 impl Id<crate::entity::Collection> {
     /// The id a collection's name always mints.
     ///

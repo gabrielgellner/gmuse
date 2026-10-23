@@ -1219,6 +1219,31 @@ impl Instance {
         );
     }
 
+    /// Name a smart playlist, or rewrite one that already has this name — #323.
+    pub fn save_rule(
+        &mut self,
+        now: i64,
+        rule: Id<crate::model::entity::Rule>,
+        name: &str,
+        source: &str,
+        sort: &str,
+    ) {
+        self.append(
+            now,
+            Fact::RuleSaved {
+                rule,
+                name: name.trim().to_string(),
+                source: source.trim().to_string(),
+                sort: sort.trim().to_string(),
+            },
+        );
+    }
+
+    /// Delete a smart playlist saved by [`Self::save_rule`].
+    pub fn drop_rule(&mut self, now: i64, rule: Id<crate::model::entity::Rule>) {
+        self.append(now, Fact::RuleDropped { rule });
+    }
+
     pub fn name_collection(
         &mut self,
         now: i64,
@@ -1804,6 +1829,9 @@ mod tests {
             log.remove_from_collection(1_000, crate_id, song, OrdKey::first());
             log.save_view(1_000, view, "loud", "rating>=4");
             log.froze(1_000, crate_id, "rating>=4");
+            let rule = Id::<crate::model::entity::Rule>::of_name("best");
+            log.save_rule(1_000, rule, "best", "rating>=4", "-rating");
+            log.drop_rule(1_000, rule);
             log.assert_concept(
                 1_000,
                 Described::Recording(song),
@@ -1840,13 +1868,13 @@ mod tests {
         let mut empty = Instance::new(device(1));
         everything(&mut empty);
         let from_nothing = facts(&empty);
-        // **Ten from nine calls**, because `assert_concept` emits the term and
+        // **Twelve from eleven calls**, because `assert_concept` emits the term and
         // the assertion. Counted rather than assumed: it is how `ConceptCatalogued`
         // turned out to be a fact a view emits, which the first cut of
         // `Fact::is_an_edit` refused.
         assert_eq!(
             from_nothing.len(),
-            10,
+            12,
             "nothing was conditional even on an empty log"
         );
 
@@ -1863,6 +1891,13 @@ mod tests {
         history.add_to_collection(2_000, crate_id, other, OrdKey::first());
         history.save_view(2_000, view, "loud", "rating>=1");
         history.froze(2_000, crate_id, "rating>=1");
+        history.save_rule(
+            2_000,
+            Id::<crate::model::entity::Rule>::of_name("best"),
+            "best",
+            "rating>=1",
+            "title",
+        );
         history.assert_concept(
             2_000,
             Described::Recording(song),

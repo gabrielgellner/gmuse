@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::model::entity::{Collection, Concept, Hierarchy, Recording, View, Work};
+use crate::model::entity::{Collection, Concept, Hierarchy, Recording, Rule, View, Work};
 use crate::model::facet::Described;
 use crate::model::id::Id;
 
@@ -109,6 +109,7 @@ pub struct Heard {
 
     pub views: BTreeMap<Id<View>, crate::projection::catalogue::SavedView>,
     pub views_dropped: BTreeSet<Id<View>>,
+    pub rules: BTreeMap<Id<Rule>, crate::projection::catalogue::SavedRule>,
     pub collections: BTreeMap<Id<Collection>, crate::projection::catalogue::Collected>,
     pub entries: BTreeSet<(Id<Collection>, crate::model::ord::OrdKey, Id<Recording>)>,
     pub entries_retracted: BTreeSet<(Id<Collection>, crate::model::ord::OrdKey, Id<Recording>)>,
@@ -134,6 +135,7 @@ impl Heard {
             work_derived_retracted: c.work_derived_retracted.clone(),
             views: c.views.clone(),
             views_dropped: c.views_dropped.clone(),
+            rules: c.rules.clone(),
             collections: c.collections.clone(),
             entries: c.entries.clone(),
             entries_retracted: c.entries_retracted.clone(),

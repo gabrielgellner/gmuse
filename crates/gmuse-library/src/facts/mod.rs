@@ -29,7 +29,7 @@ use crate::audio_id::AudioId;
 use crate::model::clock::Stamp;
 use crate::model::entity::{
     Artist, Collection, Concept, Device, Encoding, Facet, Hierarchy, Label, Medium, Recording,
-    Release, ReleaseGroup, Role, Track, View, Work,
+    Release, ReleaseGroup, Role, Rule, Track, View, Work,
 };
 use crate::model::facet::Described;
 use crate::model::id::Id;
@@ -238,6 +238,35 @@ pub enum Fact {
     /// reason every retraction here does: a stale replica re-delivering the
     /// definition would otherwise resurrect it.
     ViewDropped { view: Id<View> },
+
+    /// A smart playlist somebody saved from the player — #323.
+    ///
+    /// **The log's spelling of a `[playlists.x]` table**, and for the reason
+    /// `ViewSaved` gives: a rule is something you decided about your music,
+    /// and `config.toml` does not sync, merge or say who wrote it. The config
+    /// table still works; on a name both define, the config wins, because it
+    /// is the one a person can see they wrote.
+    ///
+    /// **Its own fact rather than a `ViewSaved` with an order**, because a view
+    /// narrows the library and a rule is a place to play from (#15). The same
+    /// expression can be both, saved twice under two kinds.
+    ///
+    /// Both halves are source lines, for the reason a view's is: diffable,
+    /// what a person typed, and read by the parser the `:` line uses.
+    RuleSaved {
+        rule: Id<Rule>,
+        name: String,
+        /// The stack, as `:view` composes it — `in="Jazz" &rating>=4`.
+        source: String,
+        /// The order, as a `[playlists]` table writes it — `-rating, artist`.
+        /// Empty is the library order.
+        sort: String,
+    },
+
+    /// …and deleted. Shadows rather than removes, for the reason
+    /// `ViewDropped` does: a stale replica re-delivering the definition would
+    /// otherwise resurrect it.
+    RuleDropped { rule: Id<Rule> },
 
     /// What a collection was frozen from — #95.
     ///
@@ -1172,6 +1201,7 @@ pub enum Touched {
     Encoding(Id<Encoding>),
     Collection(Id<Collection>),
     View(Id<crate::model::entity::View>),
+    Rule(Id<crate::model::entity::Rule>),
     Facet(Id<Facet>),
     Concept(Id<Concept>),
     Hierarchy(Id<Hierarchy>),
@@ -1298,6 +1328,7 @@ impl Fact {
                 Touched::Recording(*recording),
             ],
             Fact::ViewSaved { view, .. } | Fact::ViewDropped { view } => vec![Touched::View(*view)],
+            Fact::RuleSaved { rule, .. } | Fact::RuleDropped { rule } => vec![Touched::Rule(*rule)],
             Fact::FacetDefined { facet, .. } => vec![Touched::Facet(*facet)],
             Fact::ConceptCatalogued { facet, concept, .. } => {
                 vec![Touched::Facet(*facet), Touched::Concept(*concept)]
@@ -1415,6 +1446,10 @@ impl Fact {
             // that is — refusing it would make a view removable only by the
             // process that could save it.
             Fact::ViewSaved { .. } | Fact::ViewDropped { .. } => true,
+
+            // Saved rules, and dropping one — `:playlist rule` and
+            // `:playlist drop`, which an attached view says as well (#323).
+            Fact::RuleSaved { .. } | Fact::RuleDropped { .. } => true,
 
             // `:assert` writes these — a genre, a mood, an era said by a
             // person, which is the `Source::Manual` that outranks an import.
@@ -1583,7 +1618,9 @@ impl Fact {
             | Fact::CollectionEntryAdded { .. }
             | Fact::CollectionEntryRemoved { .. }
             | Fact::ViewSaved { .. }
-            | Fact::ViewDropped { .. } => Blast::Narrow,
+            | Fact::ViewDropped { .. }
+            | Fact::RuleSaved { .. }
+            | Fact::RuleDropped { .. } => Blast::Narrow,
 
             // One subject's assertion on one axis.
             Fact::ConceptAsserted { .. } | Fact::ConceptRetracted { .. } => Blast::Narrow,
@@ -2037,9 +2074,11 @@ mod reachability {
             .into_iter()
             .filter(|v| allowed.contains(&format!("Fact::{v} ")))
             .collect();
+        // 13 — #323 added saving and dropping a rule, the in-player
+        // `[playlists]` table, beside saving and dropping a view.
         assert_eq!(
             named.len(),
-            11,
+            13,
             "the set a view may propose changed: {named:?}"
         );
     }
@@ -2166,6 +2205,7 @@ mod reachability {
         ("role", Some("RoleDefined")),
         ("collection", Some("CollectionNamed")),
         ("view", Some("ViewSaved")),
+        ("rule", Some("RuleSaved")),
         ("credit", Some("CreditAsserted")),
         ("mix-entry", None),
         // A row rather than an entity: the fold keys an entry by

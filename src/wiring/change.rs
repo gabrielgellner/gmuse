@@ -65,6 +65,7 @@ fn name_of(touched: &Touched) -> String {
         Touched::Encoding(id) => format!("encoding:{id}"),
         Touched::Collection(id) => format!("collection:{id}"),
         Touched::View(id) => format!("view:{id}"),
+        Touched::Rule(id) => format!("rule:{id}"),
         Touched::Facet(id) => format!("facet:{id}"),
         Touched::Concept(id) => format!("concept:{id}"),
         Touched::Hierarchy(id) => format!("hierarchy:{id}"),

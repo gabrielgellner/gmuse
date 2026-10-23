@@ -3843,6 +3843,7 @@ mod tests {
             "Release",
             "ReleaseGroup",
             "Role",
+            "Rule",
             "Recording",
             "Track",
             "View",

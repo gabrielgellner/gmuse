@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(loaded.playlists.names(), ["fresh", "neglected"]);
 
         let fresh = loaded.playlists.get("fresh").expect("defined");
-        assert_eq!(fresh.filter.source, "days_since_added<30");
+        assert_eq!(fresh.question.source(), "days_since_added<30");
         assert_eq!(fresh.sort.source, "-added");
         // An omitted sort falls back rather than erroring.
         assert_eq!(

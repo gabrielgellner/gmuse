@@ -103,6 +103,14 @@ tags! {
     /// transformation between them is one-way and already exists — freezing a
     /// view by value produces a collection, which is what `:collect` writes.
     View,
+    /// A **stored query that is a play source** — a smart playlist saved from
+    /// the player rather than written into `config.toml` (#323).
+    ///
+    /// Not a [`View`] with an order, though it is one in shape: a view
+    /// *narrows* the library and a rule sits beside it as one more place to
+    /// play from (#15). One name meaning both would make `saved="x"` and
+    /// `:playlist open x` disagree about what deleting `x` takes away.
+    Rule,
     /// An artist on a work, recording, release group or release. Fields with #73.
     Credit,
     #[allow(
@@ -137,6 +145,7 @@ kinds! {
     Role => "role",
     Collection => "collection",
     View => "view",
+    Rule => "rule",
     Credit => "credit",
     MixEntry => "mix-entry",
     CollectionEntry => "collection-entry",
