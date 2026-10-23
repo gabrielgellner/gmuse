@@ -6434,6 +6434,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   `PROJECTION_VERSION` goes to 4, because `Catalogue` gained `rules`. The set of facts a view may propose goes from 11
   to 13. Eight targeted sabotages each fail a test.
 
+- **2026-10-23** **`:rate … here` rates the row under the cursor (#324).** `rate` chose its target as "the playing
+  track, else the cursor", so while anything played the cursor could not be rated, and nothing on screen said which
+  track was about to be. Rating down a `rating>=4` rule (#323) is exactly that case.
+
+  **A trailing word, not a new default.** Rating what you hear is the common case and keeps the short spelling. `here`
+  is the curation case, said out loud. Making the target depend on the view was rejected, because one key would mean two
+  things depending on where you stood.
+
+  **The cursor's track is the one it is on.** `selected_track` answers a closed album with its first track, which is
+  right for playing and wrong for writing: `:rate 4` on an album row, with nothing playing, rated track one. Both
+  spellings now use `track_under_cursor`, and on a group row they rate nothing and say so. Rating a whole album is a
+  separate question.
+
+  **Found on the way: a bare `rate` sent to the engine cleared the rating.** `instruction_of` mapped `Set(n)` to a
+  rating and everything else to `None`, so `Report`, a question, became an erasure through `gmuse ctl rate`. Each case
+  is named now, and `Report` and `here` are refused with a reason.
+
+  Eight targeted sabotages each fail a test. One aimed at the engine refusal stayed green, and correctly: guarding the
+  arm off sent `Report` to the general refusal, so the claim still held. The sabotage that matters maps it back to a
+  clear, and that one fails.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no

@@ -321,8 +321,16 @@ A scan says what has landed and belongs to nothing, by the folder it landed in, 
 into a proposal you read before applying. **The folder never files anything itself** — it is evidence somebody left, and
 reading it once is all it is for.
 
-    :rate 4      rate what is playing, or the row under the cursor
-    :rate none   clear it
-    :rate        what is it now
+    :rate 4        rate what is playing — or, when nothing is, the row under the cursor
+    :rate 4 here   rate the row under the cursor, whatever is playing
+    :rate none     clear it
+    :rate          what is it now
+
+`here` goes on any of them: `:rate none here`, `:rate here`. It is how you go down a list rating as you go while
+something else plays — without it, the playing track always wins.
+
+**A rating is about one track.** On an artist or album row, `:rate` rates nothing and says the cursor is on a group:
+open it and rate the track you mean. And `gmuse ctl rate 4` rates what is playing; the engine has no cursor, so it
+refuses `here`.
 
 Ratings are 1 to 5. Nothing carries zero stars, so _unrated_ and _rated badly_ stay different questions.
