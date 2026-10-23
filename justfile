@@ -485,7 +485,11 @@ archive write="":
     set -euo pipefail
 
     LIB="${HOME}/MusicLibrary"
-    NAS="/Volumes/Media/GMuseLibrary"
+    # **Over ssh, not the SMB mount** (#328). rsync runs on both ends, so the
+    # NAS compares its own disk: a dry run of ~12,000 files is 0.5s against
+    # 118s through `/Volumes/Media`, and the copy moved 34 MB/s against 3.5-6.5.
+    ARCHIVE="${GMUSE_ARCHIVE:-asnas:/volume1/Media/GMuseLibrary/}"
+    HOST="${ARCHIVE%%:*}"
 
     # **The archive is the device whose holdings are complete** (§8), so this
     # mirrors rather than adds: several hundred files are *renamed* in an
@@ -495,66 +499,28 @@ archive write="":
     # **The log travels with the music** and both halves together: history.toml
     # is the base and events-*.log is everything since, so copying one without
     # the other silently loses recent plays and ratings.
-    [ -d "$NAS" ] || { echo "not mounted: $NAS"; exit 1; }
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "$HOST" true \
+      || { echo "cannot reach $HOST over ssh"; exit 1; }
 
-    # **The accented paths always read as "to delete", and they are not.**
+    # **`--no-perms`, because the share's modes are SMB's.** Everything written
+    # through the mount is 777 on the NAS, and `-a` alone would chmod ~9,400
+    # files to this machine's 644/755 — a change nobody asked for. Times are
+    # still kept, and over ssh they stick, which the SMB route could not do:
+    # it re-stamped every transferred file afterwards so the next run would
+    # not send them all again.
     #
-    # §5 renders every name NFC and the share stores it decomposed, so
-    # `readdir` hands back a decomposed spelling of a name we sent composed,
-    # and rsync does not recognise a name it just wrote. Measured: 104 paths
-    # flagged every run, 180 accented paths on each side, and every one of
-    # them present on both —
-    # the lookup is normalisation-insensitive, so nothing is actually removed.
-    #
-    # `--iconv` does not fix it here and makes it worse: this rsync has no
-    # `UTF8-MAC` (it fails outright, which reads as a clean run because there
-    # is no output to count), and `UTF-8,UTF-8-MAC` mangles 49 names into
-    # paths it then reports as vanished. Left alone deliberately — a false
-    # alarm in a report costs less than a translation that damages names.
+    # The accented-name false alarm is gone with the mount (#328): the share
+    # decomposed names, and ssh stores what it is sent.
+    RSYNC=(rsync -a --no-perms --delete)
 
     if [ "{{write}}" != "write" ]; then
         echo "dry run — pass 'write' to copy"
-        { rsync -a --delete --dry-run --itemize-changes "$LIB/" "$NAS/" || [ $? -eq 24 ]; } \
+        { "${RSYNC[@]}" --dry-run --itemize-changes "$LIB/" "$ARCHIVE" || [ $? -eq 24 ]; } \
           | awk '/^\*deleting/ {d++} /^[<>]f/ {s++} END {printf "  %d to send, %d to delete\n", s+0, d+0}'
         exit 0
     fi
 
-    # **24 is a warning, not a failure**, and `set -e` treated it as one — so
-    # the pass below never ran and the sync stayed as expensive as the first.
-    # It means a file vanished between the file list and the transfer, which
-    # here is the log being appended to while the copy runs.
-    rsync -a --delete --stats "$LIB/" "$NAS/" || [ $? -eq 24 ]
-
-    # **Then set the times ourselves, because rsync cannot on this share.**
-    #
-    # Measured: `touch` sets an mtime on the mount fine, and `rsync -a` — which
-    # includes -t — leaves every file it *transferred* stamped with the moment
-    # it was copied. A file rsync skips keeps the time it already had, so the
-    # damage is exactly the set that was just written, and the next run sees
-    # all of them as changed and sends them again.
-    #
-    # Left alone that makes every sync cost the whole library: the first run
-    # here moved 34.9 GB and the second would have moved the same 34.9 GB with
-    # nothing at all having changed. This pass is metadata only and takes about
-    # a minute over SMB.
-    python3 - "$LIB" "$NAS" <<'EOF'
-    import os, sys
-    lib, nas = sys.argv[1], sys.argv[2]
-    fixed = 0
-    for root, _, files in os.walk(lib):
-        for f in files:
-            src = os.path.join(root, f)
-            dst = os.path.join(nas, os.path.relpath(src, lib))
-            try:
-                s, d = os.stat(src), os.stat(dst)
-            except OSError:
-                continue
-            # A second of slack: SMB stores whole seconds and the source has
-            # sub-second precision, so an exact comparison never matches.
-            if abs(s.st_mtime - d.st_mtime) > 1:
-                try:
-                    os.utime(dst, (s.st_atime, s.st_mtime)); fixed += 1
-                except OSError:
-                    pass
-    print(f"{fixed} timestamp(s) corrected, so the next sync sends only what changed")
-    EOF
+    # **24 is a warning, not a failure**, and `set -e` treated it as one. It
+    # means a file vanished between the file list and the transfer, which here
+    # is the log being appended to while the copy runs.
+    "${RSYNC[@]}" --stats "$LIB/" "$ARCHIVE" || [ $? -eq 24 ]

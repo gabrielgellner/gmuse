@@ -187,16 +187,23 @@ A `Sync/` for a phone is a rendering of a _query_, made where it is used, and it
 phones hold subsets (#38).
 
 ```sh
-rsync -a --delete ~/MusicLibrary/ /Volumes/Media/GMuseLibrary/
+just archive          # dry run: what would be sent and deleted
+just archive write    # rsync -a --no-perms --delete ~/MusicLibrary/ asnas:/volume1/Media/GMuseLibrary/
 ```
 
-**Run it striped, not serially.** Measured over SMB on this library: one rsync moves 1.6–1.8 files/s whatever the
-implementation, because each file costs a round trip the transfer cannot overlap — at ~7 MB a file that is 14 MB/s
-against a link that does 41. Six workers over disjoint artist folders reach 8.2 files/s, **4.5×**. It is the parallelism
-that does it and not the tool: GNU rsync 3.5.0 beat the system openrsync by 12%, which is noise.
+**Over ssh, not through the share** (#328). With rsync on both ends the NAS compares its own disk, so the comparison is
+the cheap half: measured on ~12,000 files, a dry run took **0.5 s over ssh against 118 s through the SMB mount**, and
+the copy moved 34 MB/s against 3.5–6.5. Two SMB costs went with the mount. It decomposed accented names, so every run
+reported ~250 deletes that were not, and it could not keep a file's mtime, so each sync ended re-stamping what it had
+just sent. `--no-perms` keeps the 777 the share gave every file rather than rewriting ~9,400 of them to this machine's
+modes.
 
-`--delete` is the exception and belongs to a final serial pass. A striped run only ever visits the folders it was
-handed, so it cannot see that a whole artist has gone.
+`--delete` is why every dry run is read before a write: a file that left `~/MusicLibrary` without a `remove` would leave
+the archive too.
+
+**Striping is no longer the advice.** Over SMB one rsync moved 1.6–1.8 files/s, because each file cost a round trip the
+transfer could not overlap, and six workers over disjoint artist folders reached 8.2 files/s. That was the mount's
+latency, and one rsync over ssh already runs at 34 MB/s.
 
 **The log is copied, not hosted.** §1 of the design doc makes local-first non-negotiable, and a data directory on a
 share means an unmounted NAS is an empty library rather than a degraded one. The log's own layout is already the sync
