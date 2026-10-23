@@ -40,6 +40,38 @@ pub enum Source { Query, Playlist(PlaylistId) }   // set | sequence
 `Source` **is** the set/sequence choice, already named. What this document adds is that the two compose, that `Source`
 is the only axis that matters, and that `:freeze` is the coercion between them.
 
+### A view shows one row per recording, from the copies that matched
+
+A view yields recordings and a shelf draws copies, so each recording needs one copy to show. It used to show **every**
+copy. A `rating>=4` rule then listed Boadicea seven times, once for each album, compilation and encoding that held it,
+and shuffle drew it seven times as often (#325).
+
+The row shown is **the best of the copies the terms matched**. Best is the order that picks the encoding representing a
+recording (`encoding::quality_key`): a suspect file sinks, then lossless beats lossy, then bitrate, then the measured
+cutoff. A slot holding no file loses to any slot that holds one. A release that is not a compilation breaks a tie.
+
+**Only copies that matched are candidates**, because a recording is on several releases. `album="The Celts"` must show
+the copy on _The Celts_, even when a better one is filed on a compilation. So each term carries which copies made it
+match:
+
+| term or operator           | copies                                                 |
+| -------------------------- | ------------------------------------------------------ |
+| a predicate                | the copies it matched                                  |
+| a crate, collection, `all` | every copy: it holds the recording, not a copy         |
+| `a + b`                    | either side's; every copy if either side held it whole |
+| `a & b`                    | the copies both matched; every copy if they share none |
+| `a - b`                    | the left's, since the right only takes recordings away |
+
+A rating is a predicate over a value the recording holds, so it matches every copy. That is why `rating>=4` gets the
+best encoding held.
+
+**An empty view is the library, and shows every row.** It asks no question, so there is nothing to choose a copy by, and
+browsing the tree must show a compilation whole. This means the tree under a view can leave gaps in a compilation, where
+the better copy of a track lives on its original album.
+
+Which copies are _reachable_ is not modelled yet (#38). When it is, "best" should mean the best copy that can be opened
+here.
+
 ## 2. Composition is an operator, not a type
 
 Catalogs union because they are catalogs; `:filter` intersects because it is a filter. The operator is baked into the

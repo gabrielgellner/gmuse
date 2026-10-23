@@ -64,6 +64,12 @@ play one and a `play_count=0` list drops it. Nothing to refresh.
 That is also why there is no exception list — "everything the rule says, minus these four" is how these become
 unexplainable. What you can do instead is **make the rule true**, which is the next section.
 
+**Each song appears once**, however many copies of it you hold. A track on its album and on two compilations, as a FLAC
+and an MP3, is one row: the best copy the rule matched. Lossless beats lossy, then the higher bitrate, and the album
+beats a compilation when the files are equal. A rule that names an album keeps that album's copy, even if a better one
+is filed somewhere else. `:view` works the same way, except that a view with nothing composed is the whole library, with
+every copy.
+
 ## Adding to a rule writes the fact, not an exception
 
     :add-view       add the selection to the open view

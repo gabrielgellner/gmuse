@@ -6455,6 +6455,30 @@ Append here as decisions are made. Format: date, decision, rationale.
   arm off sent `Report` to the general refusal, so the claim still held. The sabotage that matters maps it back to a
   clear, and that one fails.
 
+- **2026-10-23** **A view and a rule show one row per recording, the best copy that matched (#325).** The `best` rule
+  (`rating>=4`, #323) listed Boadicea seven times. A rating belongs to the recording, so it matches every copy, and a
+  view resolved recordings back to every copy of each. Seven rows is noise to read, and shuffle drew the song seven
+  times as often.
+
+  **Best is `canonical_key`'s order, split out as `encoding::quality_key`,** so the copy a view shows and the encoding
+  that represents the recording cannot disagree. A row is not an `Encoding`, and over a socket it is a slip, so it
+  carries its `format` now and ranks itself with `Listed::standing`. A non-compilation release breaks a tie. That
+  matters when one file is placed on an album and on a sampler, which is one encoding on two rows.
+
+  **Only copies that matched are candidates.** Best over all copies would make `album="The Celts"` show Boadicea filed
+  under a compilation, because the recording is on both. `view::Matched` carries the copies each term matched through
+  the algebra: `+` takes the union, `&` the intersection, `-` the left side. A crate or collection, which holds
+  recordings, counts as every copy. `query-language.md` §1 has the table.
+
+  **An empty view still shows every row.** It asks nothing, and the tree must show a compilation whole. The cost of
+  collapsing is that the tree under a view can leave gaps in a compilation where the better copy lives on the album.
+  That was weighed against the `album=` case, and chosen.
+
+  `Listing::copies_of`, which pairs a recording with a copy for the queue, still answers with any copy. Its doc called
+  the choice undecidable there, and it is a separate caller. Availability (#38) is not modelled, so "best" is the best
+  held, not the best reachable. Nine targeted sabotages each fail a test. One, `+` forgetting a whole side, stayed green
+  until a case widened a copy-level term by a collection.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no
