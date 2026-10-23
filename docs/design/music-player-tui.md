@@ -6479,6 +6479,27 @@ Append here as decisions are made. Format: date, decision, rationale.
   held, not the best reachable. Nine targeted sabotages each fail a test. One, `+` forgetting a whole side, stayed green
   until a case widened a copy-level term by a collection.
 
+- **2026-10-23** **A rating answers the open rule once, and the librarian answers it (#326).** `:rate 5 here` with view
+  3 on a saved rule left the `:` line on screen long enough that the Enters pressed after it played the row. The engine
+  was not the cause: probed every 100 ms for 12 s after the same `library.edit`, `time.now` stayed under 1 ms. The
+  player's own log put it on the draw thread, at `rebuild 503ms` and `smart 515ms` for one `library` event.
+
+  **The rule was answered three times per rating.** `rate` answered it straight after proposing the rating, against a
+  fold that did not have it yet. Then the engine's event refolded, `rebuild_library` answered it, and `refresh_library`
+  answered it again on the next line. `record` now says where a write landed, as `Recorded::Here` or `Elsewhere`. A
+  caller refreshes, or asks for a refold, only for `Here`; an attached view's write is shown by the event that says it
+  landed. The same applies to the seven gestures that asked for `Stop::Refold` straight after a `record`.
+
+  **And each answer is the engine's now.** A saved rule is a composed view, and since #261 an attached view's views are
+  resolved by the librarian. The rule was not, so it read every row over the socket. Measured on the live library for
+  `rating>=4`: 326 ms in the view, 26–32 ms asked of the engine, with the order still applied in the view over only what
+  came back. A config rule's `where` stays in the view, because it filters copy by copy rather than resolving the way a
+  view does, and sending it as one would change what it answers.
+
+  Seven targeted sabotages each fail a test. An eighth, dropping the check for a broken reference on the engine path,
+  stayed green because the librarian already selects no rows for one, so the check was removed and the test keeps the
+  claim.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no
