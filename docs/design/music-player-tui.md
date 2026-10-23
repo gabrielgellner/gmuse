@@ -509,6 +509,10 @@ sort = "-added"
 
 `:playlist <name>` fills view 3 from the rule; `:freeze` turns the loaded one into an ordinary, editable playlist.
 
+A rule can also be saved **from the player**: `:playlist rule <name> [sort <keys>]` keeps the composed `:view` as a
+`RuleSaved` fact in the log, and `:playlist drop <name>` deletes one (#323). The config table still works and wins a
+name both define.
+
 The distinction that makes this coherent is _not_ persistence — catalogs are saved too. It is exclusivity. A catalog
 hides everything outside itself; a smart playlist sits alongside the library and is one more place to play from. A saved
 expression that narrows already exists and is spelled `[catalogs.x] where = "…"`, so making smart playlists narrow would
@@ -6397,6 +6401,38 @@ Append here as decisions are made. Format: date, decision, rationale.
   Two end-to-end tests asserted the old behaviour and now assert the new: the modes outlive the engine and the entries
   do not, and a first read takes the engine's queue, even an empty one. Each targeted sabotage fails a test, including
   putting the offer branch back.
+
+- **2026-10-23** **A rule can be saved from the player, and it lives in the log (#323).** Asked how to make a playlist
+  of 4- and 5-star songs, the only live answer was to edit `config.toml`. The player could keep the _answer_ with
+  `:freeze`, but not the _question_.
+
+  `:playlist rule <name> [sort <keys>]` keeps the composed view as `RuleSaved { rule, name, source, sort }`, and
+  `:playlist drop <name>` writes `RuleDropped`. It goes in the log rather than the config for the reason #119 gave for
+  saved views: `data_dir` is where what you decided about your music lives. A config table does not sync, does not merge
+  and says nothing about who wrote it, and nothing in the player writes config.
+
+  **Its own entity, `Rule`, and not a `ViewSaved` with an order.** A rule is a view in shape, but a view _narrows_ and a
+  rule is a place to play from (§7, #15). One name meaning both would make `saved="x"` and `:playlist open x` disagree
+  about what deleting `x` takes away. The same expression can be saved as both, under the two kinds.
+
+  **The question is the stack, not a `Filter`.** A config `where` is one predicate over copies. A saved rule is what
+  `:view` had composed, so it can say `in="Jazz" &rating>=4`, and it resolves the way the view did: recordings, then
+  every copy of each. `smart::Question` holds either, and nothing past `members` tells them apart. A rule naming a saved
+  view that has gone says so instead of reading as an empty match. The test uses a union, because a rule that is only
+  the missing view comes out empty with or without the guard, and the first test written that way passed against the
+  sabotage.
+
+  **The config wins a clash, and saving under a config name is refused.** The config is the one a person can see they
+  wrote. A rule written under a config name would be recorded and never shown, which is worse than a refusal. A clash
+  can still arrive by sync, and the config wins it then too. `:playlist drop` refuses a config rule by name, because a
+  drop that came back on the next launch would be the worst answer.
+
+  The order is introduced by the word `sort`, not by position, because a name may contain spaces. The last `sort` is the
+  split, and a trailing `sort` with no order is an error. The first parser cut missed that case: the line arrives
+  trimmed, so `best sort` would have saved a rule called "best sort".
+
+  `PROJECTION_VERSION` goes to 4, because `Catalogue` gained `rules`. The set of facts a view may propose goes from 11
+  to 13. Eight targeted sabotages each fail a test.
 
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause

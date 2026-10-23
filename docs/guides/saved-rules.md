@@ -18,6 +18,27 @@ where a catalog _narrows_, hiding everything outside it. Same expression, two di
 `:playlist open fresh` fills view 3 from it. `open` takes a rule or a saved file without caring which — both are places
 to play from.
 
+## Saving one without leaving the player
+
+A table in `config.toml` is one way to write a rule. The other is to compose the question with `:view`, then keep it:
+
+    :view rating>=4                          ask it
+    :playlist rule best                      keep the question, under a name
+    :playlist rule best sort -rating, artist the same, with an order
+    :playlist drop best                      delete it
+
+`best` then opens with `:playlist open best` and lists in view 7 like any other rule, and it is just as live. It is kept
+in the library rather than in the config, so it travels with your ratings and history.
+
+Whatever `:view` can compose, a saved rule can say — `in="Jazz" &rating>=4` included, which a `where` line cannot. With
+no `sort`, it plays in library order. Saving under the same name again rewrites the rule; that is how you change its
+order.
+
+**A name in `config.toml` is the config's.** Saving under one is refused, and so is dropping one: edit the file instead.
+
+**`:playlist rule` keeps the question; `:freeze` keeps the answer.** Rate another track and `best` gains it. A frozen
+copy only changes when you freeze it again.
+
 ## Sorting
 
 Comma-separated, applied left to right, `-` for descending. The keys are the same field names the filter and format
