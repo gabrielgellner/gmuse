@@ -469,7 +469,7 @@ The RT callback drains `ctl_ring` and `perf_ring` once per callback, in a fixed 
 | **Control state**     | Control thread | Protocol commands                                                  | Library snapshot pointer, the queue, playlists, the playback `Scope` (#234, formerly `aaa_mode`), which recording is loaded on each deck, **which deck is focused** (#224), cue points, loops (as data), automation lanes, MIDI mapping table, settings, output routing |
 | **Performance state** | RT callback    | Performance plane, automation lanes, and control-plane `param.set` | Fader and crossfader positions, EQ bands, deck rate, pitch bend and jog, gain, cue-bus selection                                                                                                                                                                        |
 | **Library state**     | Librarian      | Named operations (§8.4), and facts the player emits                | The fact log, the projection folded from it, holdings, the read cache. The control thread holds an `Arc` to the projection and nothing more.                                                                                                                            |
-| **View state**        | Each view      | That view's own input                                              | Cursor, selection, scroll, which cmus-style view is shown, fuzzy-filter text and nucleo matcher state, keymap, pending modal state                                                                                                                                      |
+| **View state**        | Each view      | That view's own input                                              | Cursor, selection, scroll, which view is shown, fuzzy-filter text and nucleo matcher state, keymap, pending modal state                                                                                                                                                 |
 
 Consequences:
 
@@ -477,8 +477,7 @@ Consequences:
   concurrency model (§8.8) — it is not merely a large field on the control thread.
 - The playback **`Scope`** is control state because it determines what plays next. It was `aaa_mode`, whose three values
   turned out to be the three depths of the grouping tree rather than music concepts — #234, and the Decision Log entry
-  of 2026-09-12. The cmus "views" (library tree, sorted list, playlist, queue, browser, filters, settings) are
-  client-side layouts over queries.
+  of 2026-09-12. The views (the library tree, playlists, the queue and the rest) are client-side layouts over queries.
 - Fuzzy filtering with nucleo is per-keystroke interaction, so it runs in the TUI over a result set fetched from the
   engine. The nvim plugin uses its own picker.
 - A view may _request_ a performance-state change through `param.set`, for example a volume change from a menu. The RT
@@ -582,7 +581,7 @@ field existed, which over-counts an older client rather than merging it with a s
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | Session       | `hello`, `engine.status`, `engine.shutdown`, `time.now`                                                                                                                                                                                                                                                    | Lifecycle and clock                                                                         |
 | Commands      | `player.play`, `player.pause`, `player.seek`, `queue.enqueue`, `queue.move`, `queue.remove`, `queue.clear`, `settings.set_scope`, `deck.load`, `deck.play`, `deck.cue`, `deck.loop`, `deck.sync`, `param.set`, `lane.put`, `lane.delete`, `mapping.learn`, `mapping.put`, `record.start`, `record.stop`, … | Mutations. Each is one variant of the typed `Command` enum.                                 |
-| Text commands | `cmd.exec_line`                                                                                                                                                                                                                                                                                            | A cmus-style command line, parsed by the engine into `Command` (§7.12)                      |
+| Text commands | `cmd.exec_line`                                                                                                                                                                                                                                                                                            | The `:` command line, parsed by the engine into `Command` (§7.12)                           |
 | Library       | `library.apply`, `library.import`, `library.scan`, `library.restore`, `library.remove`, `library.compact`, `library.unfiled`, `library.edit`                                                                                                                                                               | The named write operations (§8.4). Long-running ones acknowledge and report through events. |
 | Queries       | `query.parse`, `query.run`, `playback.get`, `queue.get`, `deck.get`, `lane.get`, `mapping.get`, `analysis.get`                                                                                                                                                                                             | Reads                                                                                       |
 | Subscriptions | `sub.subscribe`, `sub.unsubscribe`                                                                                                                                                                                                                                                                         | Topic-based event delivery (§7.8)                                                           |
@@ -851,8 +850,8 @@ packets. A position that matched the handed-over count exactly would be the bug 
 
 ### 7.12 Text commands
 
-- `cmd.exec_line { line }` accepts the cmus-style command language (for example `seek +10`, `set scope=album`) and
-  parses it engine-side into `Command`.
+- `cmd.exec_line { line }` accepts the `:` command language (for example `seek +10`, `set scope=album`) and parses it
+  engine-side into `Command`.
 - The TUI's `:` line, nvim's `:Gmuse …`, and `gmuse ctl` pass-through all use it, so there is exactly one textual
   command parser.
 - Typed JSON commands remain canonical; the text form is a convenience that is parsed once at its own boundary.
@@ -1335,11 +1334,11 @@ A control-plane `param.set` counts as a touch for precedence purposes.
 
 - Built on ratatui and crossterm, and connects through `gmuse-client` like every other view (I11).
 - Auto-starts the engine if it isn't running.
-- Its keymap maps crossterm key events to `Command` locally. The cmus interaction model (views, keybindings, playback
-  scope semantics) is the UX target.
+- Its keymap maps crossterm key events to `Command` locally. The interaction model started from cmus's views,
+  keybindings and playback scope, and is no longer fitted to them: where the two disagree, cmus loses (CLAUDE.md).
 - The vim-style modal input layer (modes, counts, operator-pending state, a configurable keymap) SHOULD be a small
   reusable module so other Rust TUIs can share it.
-- The cmus views are client-side layouts over queries; the `:` line uses `cmd.exec_line`; fuzzy filtering uses nucleo
+- The views are client-side layouts over queries; the `:` line uses `cmd.exec_line`; fuzzy filtering uses nucleo
   locally.
 - **Keyboard DJ control is not a design dependency.** Hold-to-preview needs key-release events. Those require the kitty
   keyboard protocol, requested with crossterm's keyboard enhancement flags (`REPORT_EVENT_TYPES`). **[verify]** tmux is
@@ -1435,7 +1434,7 @@ temporarily; in particular, the TUI never gets in-process access.
    and the writing `shelf` subcommands routed through the engine. _Exit:_ a fact appended by one client reaches another
    as a `scope: "ids"` event naming exactly what changed, and no process but the engine appends.
 4. **TUI as a client.** Port the existing TUI onto `gmuse-client` with auto-start and move the keymap client-side.
-   _Exit:_ day-to-day cmus replacement works through the socket.
+   _Exit:_ day-to-day playback works through the socket.
 5. **nvim plugin v0.** Connection, status line, the queue as a buffer with diff-to-commands, and `:Gmuse`. _Exit:_ the
    queue can be edited from nvim while the TUI stays in sync through events.
 6. **Scheduling.** Add `When`, sub-block processing, the preallocated event list, analysis artifacts (beat grid), and

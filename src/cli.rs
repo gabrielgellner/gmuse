@@ -40,7 +40,7 @@ impl Resample {
 
 /// gmuse — Gabriel's MUSical Experience.
 ///
-/// A cmus-shaped terminal music player.
+/// A terminal music player and library manager.
 #[derive(Debug, Parser)]
 #[command(name = "gmuse", version, about, long_about = None)]
 pub struct Cli {

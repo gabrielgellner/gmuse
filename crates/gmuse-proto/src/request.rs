@@ -87,7 +87,7 @@ pub enum Placement {
 pub enum Request {
     /// The handshake. Must be first on a connection (§7.3).
     Hello(HelloParams),
-    /// The cmus-style command language, parsed engine-side (§7.12).
+    /// The `:` command language, parsed engine-side (§7.12).
     ///
     /// **The line stays a string here on purpose.** Its parser is the `:`
     /// line's — one textual command language, which is the standing complaint
