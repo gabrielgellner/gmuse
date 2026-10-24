@@ -318,6 +318,7 @@ impl Playing {
         let rx = desk.programme_later(Ask::Start {
             recording,
             within: None,
+            order: None,
             // No `self` here, so no stepped seed — and a fresh one is what a rebuild is.
             seed: gmuse_programme::fresh_seed(),
             window: 1,
@@ -333,18 +334,26 @@ impl Playing {
     /// `within` is the view the play came from, already resolved to rows by the socket
     /// handler — this crate cannot parse a view and must not (`layers.md`). It is kept, so
     /// a later scope change or an empty-programme `next` rebuilds inside the same view.
+    ///
+    /// `order` is the playlist the play came from, in its order (#329): the programme is
+    /// those rows, and `within` becomes them as a set so a rebuild stays inside the list.
     pub fn start(
         &mut self,
         recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
         within: Option<std::sync::Arc<std::collections::HashSet<gmuse_ids::copy::CopyId>>>,
+        order: Option<Vec<gmuse_ids::copy::CopyId>>,
     ) {
-        self.within = within.clone();
+        self.within = match &order {
+            Some(rows) => Some(std::sync::Arc::new(rows.iter().copied().collect())),
+            None => within.clone(),
+        };
         self.supersede();
         let seed = self.next_seed();
         self.push(
             Ask::Start {
                 recording,
                 within,
+                order,
                 seed,
                 window: KEEP,
             },
@@ -599,9 +608,9 @@ mod tests {
         let mut playing = Playing::new();
         let recording = gmuse_ids::id::Id::derived(b"a recording");
 
-        playing.start(recording, None);
+        playing.start(recording, None, None);
         let first = seed_of_last_start(&playing).expect("the instrument: a start was queued");
-        playing.start(recording, None);
+        playing.start(recording, None, None);
         let second = seed_of_last_start(&playing).expect("a second start was queued");
 
         assert_ne!(first, 0, "the old constant is back");
@@ -633,7 +642,7 @@ mod tests {
         playing.resync();
         assert_eq!(playing.queued.len(), 1, "the resync was not queued");
 
-        playing.start(gmuse_ids::id::Id::derived(b"a recording"), None);
+        playing.start(gmuse_ids::id::Id::derived(b"a recording"), None, None);
 
         assert!(
             !playing.queued.iter().any(|(_, w)| *w == Awaiting::Resync),

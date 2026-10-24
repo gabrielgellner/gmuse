@@ -111,9 +111,49 @@ pub(crate) fn answer(
             }
         }
 
+        // **A playlist is the pool, not a filter on the library** — #329. An attached play
+        // from view 3 sent only the composed library view, so the track picked played and a
+        // shuffle of the whole library followed it. The rows are kept as given, so a
+        // hand-ordered list plays in its order, and remembered as `within` so a later
+        // rebuild stays inside them.
+        Ask::Start {
+            recording,
+            order: Some(order),
+            seed,
+            window,
+            ..
+        } => {
+            let shuffle = plan.shuffled();
+            let ordered = if shuffle {
+                crate::next::shuffled(&order, seed)
+            } else {
+                order.clone()
+            };
+            plan.replace(ordered);
+            plan.made_by(
+                plan.scope(),
+                shuffle,
+                Some(std::sync::Arc::new(order.into_iter().collect())),
+            );
+            let picked = plan
+                .entries()
+                .iter()
+                .copied()
+                .find(|e| library.recording_of(e.row) == Some(recording));
+            let entries = match picked {
+                Some(entry) => plan.window_at(entry.token, window),
+                None => plan.head(window),
+            };
+            Reply::Window {
+                standing: standing(plan),
+                cues: cues_for(entries, library, device),
+            }
+        }
+
         Ask::Start {
             recording,
             within,
+            order: None,
             seed,
             window,
         } => {
@@ -948,6 +988,7 @@ mod tests {
             Ask::Start {
                 recording,
                 within,
+                order: None,
                 seed: 0,
                 window: 2,
             },
@@ -977,6 +1018,7 @@ mod tests {
                 Ask::Start {
                     recording,
                     within: None,
+                    order: None,
                     seed,
                     window: 2,
                 },
@@ -991,6 +1033,66 @@ mod tests {
         );
         assert_ne!(a, b, "two seeds gave one order");
         assert_eq!(a, order(1), "one seed gave two orders");
+    }
+
+    /// **A play from a playlist is the playlist, in its order** — #329.
+    ///
+    /// An attached play from view 3 sent only the composed library view, so the track picked
+    /// played and a shuffle of all 7,000 rows followed it. The list here is out of library
+    /// order and holds one row twice, which a `within` set could carry neither of.
+    #[test]
+    fn a_play_from_a_playlist_is_the_playlist_in_its_order() {
+        let (l, rows) = library(12);
+        let list = vec![rows[9], rows[2], rows[7], rows[2]];
+        let recording = l.recording_of(rows[7]).expect("a recording");
+        let start = |plan: &mut Programme, order: Option<Vec<CopyId>>| {
+            let Reply::Window { cues, .. } = ask(
+                plan,
+                &l,
+                Ask::Start {
+                    recording,
+                    within: None,
+                    order,
+                    seed: 5,
+                    window: 3,
+                },
+            ) else {
+                panic!("a start did not answer with a window");
+            };
+            cues
+        };
+
+        // The instrument: the same play without the list opens the whole library.
+        let mut library_wide = Programme::new();
+        let _ = start(&mut library_wide, None);
+        assert_eq!(library_wide.len(), rows.len(), "the library was not opened");
+
+        let mut plan = Programme::new();
+        let cues = start(&mut plan, Some(list.clone()));
+        let held: Vec<CopyId> = plan.entries().iter().map(|e| e.row).collect();
+        assert_eq!(held, list, "the programme is not the playlist in its order");
+        assert_eq!(
+            cues.first().map(|c| c.recording),
+            Some(recording),
+            "the picked track is not the first to sound"
+        );
+        let kept: std::collections::HashSet<CopyId> = list.iter().copied().collect();
+        assert_eq!(
+            plan.within().as_deref(),
+            Some(&kept),
+            "a rebuild would leave the playlist"
+        );
+
+        // Shuffled, it is the same rows in another order.
+        let mut shuffled = Programme::new();
+        shuffled.made_by(crate::programme::Scope::All, true, None);
+        let _ = start(&mut shuffled, Some(list.clone()));
+        let mut got: Vec<CopyId> = shuffled.entries().iter().map(|e| e.row).collect();
+        assert_ne!(got, list, "a shuffled programme kept the playlist's order");
+        let mut want = list.clone();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "a shuffled playlist is not the playlist's rows");
     }
 
     /// **`e` lands after what was queued by hand, `E` right after what is sounding**, and

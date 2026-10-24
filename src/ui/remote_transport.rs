@@ -366,6 +366,9 @@ impl Transport for Remote {
             Some(serde_json::json!({
                 "recording": recording.to_string(),
                 "view": what.view,
+                "playlist": what.playlist.map(|rows| {
+                    rows.iter().map(ToString::to_string).collect::<Vec<_>>()
+                }),
             })),
         );
         Accepted::Yes

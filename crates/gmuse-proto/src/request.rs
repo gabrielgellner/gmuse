@@ -357,6 +357,9 @@ pub enum Request {
         /// The view the play came from, in the same terms `query.tree` takes — so
         /// what follows is drawn from what the person was looking at.
         view: Option<String>,
+        /// **The playlist the play came from**, as recordings in its order — #329. When
+        /// present, what follows is these and nothing else, and `view` is not consulted.
+        playlist: Option<Vec<String>>,
     },
     /// **Play, pause and toggle, as three distinct verbs** — #225,
     /// `transport-keymap-spec.md` D-6 to D-8.
@@ -739,11 +742,14 @@ impl Request {
                     recording: String,
                     #[serde(default)]
                     view: Option<String>,
+                    #[serde(default)]
+                    playlist: Option<Vec<String>>,
                 }
                 let p: Load = typed(method, params)?;
                 Ok(Self::PlayerLoad {
                     recording: p.recording,
                     view: p.view,
+                    playlist: p.playlist,
                 })
             }
             // **`format` is optional and absent is not empty.** A caller that wants

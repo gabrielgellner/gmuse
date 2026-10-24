@@ -1066,6 +1066,11 @@ pub enum Ask {
         recording: gmuse_ids::id::Id<gmuse_ids::entity::Recording>,
         /// The view the play came from, resolved — see `Programme::within`.
         within: Option<std::sync::Arc<std::collections::HashSet<CopyId>>>,
+        /// **The playlist the play came from, in its order** — #329. When present it *is*
+        /// the pool: the programme is these rows, shuffled if it is shuffled, and nothing
+        /// from the library around them. A `within` set could not carry a hand-ordered
+        /// collection's order, and a playlist may hold one row twice.
+        order: Option<Vec<CopyId>>,
         /// Seeds the shuffle, if the programme is shuffled — #320. **From the caller**,
         /// which owns a seed that moves; this ask used to say `0`, so every play and every
         /// session resume rebuilt the library in one order.

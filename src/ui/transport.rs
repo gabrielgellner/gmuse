@@ -53,6 +53,9 @@ pub struct Loading {
     /// The composed view the play came from, in the terms the engine's `query.tree`
     /// takes — so what follows is drawn from it. `None` is the whole library.
     pub view: Option<String>,
+    /// The playlist the play came from, as recordings in its order — #329. `None`
+    /// when the play came from the library, which is what `view` then describes.
+    pub playlist: Option<Vec<Id<Recording>>>,
     /// This device's copy, with its gain already resolved.
     pub source: TrackSource,
 }

@@ -4430,7 +4430,11 @@ fn run_engine(
                     Ok(serde_json::json!({ "accepted": true }))
                 }
 
-                Call::PlayerLoad { recording, view } => {
+                Call::PlayerLoad {
+                    recording,
+                    view,
+                    playlist,
+                } => {
                     let Ok(uuid) = recording.parse::<uuid::Uuid>() else {
                         return Err(RpcError::invalid_params(
                             "recording",
@@ -4461,8 +4465,28 @@ fn run_engine(
                             Some(std::sync::Arc::new(members))
                         }
                     };
-                    self.control
-                        .ask(gmuse::engine::control::Ask::Load { recording, within });
+                    // **A playlist, resolved to rows in its order** — #329. A recording the
+                    // library has no row for is left out rather than refused: a saved list
+                    // can outlive a `forget`, and the rest of it should still play.
+                    let mut order = None;
+                    if let Some(recordings) = playlist {
+                        let mut rows = Vec::with_capacity(recordings.len());
+                        for raw in &recordings {
+                            let Ok(uuid) = raw.parse::<uuid::Uuid>() else {
+                                return Err(RpcError::invalid_params(
+                                    "playlist",
+                                    format!("{raw:?} is not a recording id"),
+                                ));
+                            };
+                            rows.extend(self.row_of(gmuse::model::id::Id::from_uuid(uuid)));
+                        }
+                        order = Some(rows);
+                    }
+                    self.control.ask(gmuse::engine::control::Ask::Load {
+                        recording,
+                        within,
+                        order,
+                    });
                     // **Accepted, not played** — §7.4's acknowledgement
                     // semantics. Whether it sounded arrives as a `playback`
                     // event, and a load of something this device does not hold

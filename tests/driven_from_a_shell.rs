@@ -3207,6 +3207,7 @@ fn an_attached_view_learns_what_is_playing_from_the_event_stream() {
             view.load(gmuse::ui::transport::Loading {
                 recording: Some(recording.parse().expect("a recording id")),
                 view: None,
+                playlist: None,
                 // **Ignored, and deliberately a path that does not exist.** A
                 // locator does not cross (I17); the engine opens the copy its own
                 // projection names. If this were the half being used, nothing would
@@ -3317,6 +3318,7 @@ fn up_next_does_not_begin_with_the_track_that_is_playing() {
     let accepted = remote.load(gmuse::ui::transport::Loading {
         recording: Some(recording.parse().expect("a recording id")),
         view: None,
+        playlist: None,
         source: gmuse::audio::TrackSource {
             path: std::path::PathBuf::from("/nonexistent/ignored-over-the-wire.wav"),
             gain: 1.0,
@@ -3472,6 +3474,7 @@ fn an_attached_view_refuses_to_load_what_the_library_cannot_name() {
     let answer = view.load(Loading {
         recording: None,
         view: None,
+        playlist: None,
         source: gmuse::audio::TrackSource {
             path: std::path::PathBuf::from("/tmp/a-file-nobody-imported.wav"),
             gain: 1.0,
@@ -5918,4 +5921,85 @@ fn a_queue_edit_by_token_keeps_the_rest_of_the_programme() {
     // And a removal that names nothing is refused, not applied to whatever is at index 0.
     let refused = client.call("queue.remove", Some(serde_json::json!({})));
     assert!(refused.is_err(), "a removal naming nothing was accepted");
+}
+
+/// **A play from a playlist is the playlist, over the wire** — #329.
+///
+/// An attached view sent `player.load` with the library view and nothing else, so playing
+/// from view 3 played the picked track and then a shuffle of the whole library. The list
+/// here is longer than the library and holds one recording twice, which no narrowing of the
+/// library can produce.
+#[test]
+fn a_play_from_a_playlist_programmes_the_playlist() {
+    let (engine, first) = start_with_a_track("playlist-load");
+    let client = Client::connect(&engine.socket, "view", "0").expect("connect");
+    let rows = client
+        .call(
+            "query.run",
+            Some(serde_json::json!({ "filter": "any=\"*tone*\"", "limit": 10 })),
+        )
+        .expect("query.run")["rows"]
+        .as_array()
+        .cloned()
+        .expect("rows");
+    let second = rows
+        .iter()
+        .filter_map(|r| r["recording"].as_str())
+        .find(|r| *r != first)
+        .expect("a second recording")
+        .to_string();
+
+    let programme = |want: u64| -> serde_json::Value {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let page = client.call("queue.get", None).expect("queue.get");
+            if page["total"].as_u64() == Some(want) || std::time::Instant::now() > deadline {
+                return page;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // The instrument: a play without the list opens the library, which is two rows.
+    client
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": first })),
+        )
+        .expect("load");
+    let library_wide = programme(2);
+    assert_eq!(
+        library_wide["total"].as_u64(),
+        Some(2),
+        "a play from the library did not open the library: {library_wide}"
+    );
+
+    // Through the view's own transport, so the half that writes the wire is the one tested.
+    use gmuse::ui::transport::Transport;
+    let list = [first.clone(), second.clone(), first.clone()];
+    let attached =
+        std::sync::Arc::new(Client::connect(&engine.socket, "attached", "0").expect("connect"));
+    let view = gmuse::ui::remote_transport::Remote::attach(attached).expect("attach");
+    let id = |r: &str| r.parse().expect("a recording id");
+    assert_eq!(
+        view.load(gmuse::ui::transport::Loading {
+            recording: Some(id(&first)),
+            view: None,
+            playlist: Some(list.iter().map(|r| id(r)).collect()),
+            source: gmuse::audio::TrackSource {
+                path: std::path::PathBuf::from("/nonexistent/ignored-over-the-wire.wav"),
+                gain: 1.0,
+            },
+        }),
+        gmuse::ui::transport::Accepted::Yes,
+        "a play from a playlist was refused"
+    );
+    let page = programme(3);
+    assert_eq!(
+        page["entries"].as_array().cloned().unwrap_or_default(),
+        list.iter()
+            .map(|r| serde_json::Value::from(r.as_str()))
+            .collect::<Vec<_>>(),
+        "the programme is not the playlist in its order: {page}"
+    );
 }

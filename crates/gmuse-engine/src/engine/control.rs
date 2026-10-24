@@ -60,6 +60,9 @@ pub enum Ask {
         /// The rows of the view the play came from, resolved by the socket handler; the
         /// programme is built inside them. `None` is the whole library.
         within: Option<std::sync::Arc<std::collections::HashSet<gmuse_ids::copy::CopyId>>>,
+        /// The playlist the play came from, in its order — #329. When present, the
+        /// programme is these rows and `within` is not consulted.
+        order: Option<Vec<gmuse_ids::copy::CopyId>>,
     },
     /// **What is playing, as one answer** — #243, #248.
     ///
@@ -430,8 +433,12 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
             // doing nothing. It is loaded on the tick its answer arrives, so the `playback`
             // event follows the sound rather than the request — which is what §7.8 says an
             // event is for.
-            Ok(Ask::Load { recording, within }) => {
-                held.queue.start(recording, within);
+            Ok(Ask::Load {
+                recording,
+                within,
+                order,
+            }) => {
+                held.queue.start(recording, within, order);
                 false
             }
             // **Answered from the same three sources the event is built from**, and

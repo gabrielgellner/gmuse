@@ -2553,6 +2553,7 @@ pub fn restore_session(
                 let _ = player.load(crate::ui::transport::Loading {
                     recording: recording_of(ctx, id),
                     view: playing_within(ui),
+                    playlist: playing_from(ui, ctx),
                     source,
                 });
             }
@@ -2753,6 +2754,7 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: CopyId) {
         let accepted = player.load(crate::ui::transport::Loading {
             recording: recording_of(ctx, id),
             view: playing_within(ui),
+            playlist: playing_from(ui, ctx),
             source,
         });
         if accepted == crate::ui::transport::Accepted::NotNamed {
@@ -2775,6 +2777,24 @@ fn play(ui: &mut Ui, ctx: &Context<'_>, id: CopyId) {
 /// Empty composition means the whole library, which is `None` rather than `""`.
 fn playing_within(ui: &Ui) -> Option<String> {
     (!ui.composed.is_empty()).then(|| ui.composed.label())
+}
+
+/// **The playlist a play is made from**, as recordings in its order — #329.
+///
+/// `ActiveSource::Playlist` was only ever read by `next.rs`, which an attached view does
+/// not use: the engine builds the programme, and all it was told was the library view. So
+/// the picked track played and a shuffle of the whole library followed it.
+fn playing_from(ui: &Ui, ctx: &Context<'_>) -> Option<Vec<Id<Recording>>> {
+    if ui.playback.active != ActiveSource::Playlist {
+        return None;
+    }
+    Some(
+        ui.playlist
+            .entries()
+            .iter()
+            .filter_map(|&row| recording_of(ctx, row))
+            .collect(),
+    )
 }
 
 /// Whether a popup is up **and has something hidden to scroll to**.
@@ -10541,6 +10561,53 @@ mod tests {
         // `next` now walks the playlist, not the library.
         advance(&mut ui, &ctx, true);
         assert_eq!(ui.playback.current, Some(sorted[1]));
+    }
+
+    /// **An attached play from view 3 tells the engine the playlist** — #329.
+    ///
+    /// `ActiveSource::Playlist` was read only by `next.rs`, and an attached view does not
+    /// use it: the engine builds the programme, from what `load` carries. It carried the
+    /// library view, so the picked track played and a shuffle of the library followed.
+    #[test]
+    fn an_attached_play_from_the_playlist_carries_the_playlist() {
+        let store = fixture();
+        let noted = Noted::default();
+        let ctx = Context {
+            library: lib_of(&store),
+            player: Some(&noted),
+            gapless: None,
+        };
+        let mut ui = ui_of(&store, true);
+        let sorted: Vec<_> = ui.library.sorted().to_vec();
+        ui.playlist.push(sorted[3]);
+        ui.playlist.push(sorted[1]);
+        let recordings: Vec<_> = [sorted[3], sorted[1]]
+            .into_iter()
+            .map(|row| recording_of(&ctx, row).expect("a recording"))
+            .collect();
+
+        ui.set_view(View::Playlist);
+        ui.playlist_pane = Pane::Tracks;
+        start(&mut ui, &ctx);
+
+        // The instrument: a play from the queue is a play from the library, and the
+        // same double sees it carry no playlist.
+        ui.queue.push_back(sorted[0]);
+        ui.set_view(View::Queue);
+        start(&mut ui, &ctx);
+
+        let loads = noted.1.lock().expect("noted").clone();
+        assert_eq!(
+            loads.len(),
+            2,
+            "the double did not see both plays: {loads:?}"
+        );
+        assert_eq!(
+            loads[0].as_deref(),
+            Some(&recordings[..]),
+            "a play from the playlist did not carry it"
+        );
+        assert_eq!(loads[1], None, "a play from the queue carried a playlist");
     }
 
     #[test]
@@ -20666,7 +20733,11 @@ mod tests {
     /// momentary binding". Both assert an *absence*, and an absence is only
     /// worth anything if the same object can be seen to record a presence.
     #[derive(Default)]
-    struct Noted(std::sync::Mutex<Vec<String>>);
+    struct Noted(
+        std::sync::Mutex<Vec<String>>,
+        /// The playlist each `load` carried — #329.
+        std::sync::Mutex<Vec<Option<Vec<Id<Recording>>>>>,
+    );
 
     impl Noted {
         fn note(&self, what: &str) {
@@ -20699,8 +20770,9 @@ mod tests {
         fn cue_preview(&self) {
             self.note("cue-preview");
         }
-        fn load(&self, _what: transport::Loading) -> transport::Accepted {
+        fn load(&self, what: transport::Loading) -> transport::Accepted {
             self.note("load");
+            self.1.lock().expect("noted").push(what.playlist);
             transport::Accepted::Yes
         }
         fn seek(&self, _to: crate::audio::SeekTo) {
