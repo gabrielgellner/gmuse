@@ -147,6 +147,7 @@ just ui [root]       # launch the TUI
 just play <file>     # play one file at the line prompt
 just bench           # resampler comparison table
 just docs            # build both books; `docs-serve` for live reload
+just plex [write]    # render the library for Plex onto the NAS (renderings.md); a dry run by default
 ```
 
 `just ci` is the quality gate and it runs **locally**. GitHub Actions' `verify` workflow repeats the Rust half on every

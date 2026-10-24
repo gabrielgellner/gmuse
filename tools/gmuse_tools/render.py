@@ -61,6 +61,7 @@ from mutagen import MutagenError
 
 from gmuse_tools import stated
 from gmuse_tools.bronze import cache_dir
+from gmuse_tools.destination import MANIFEST, Destination, LocalDir, Unreachable, parse
 from gmuse_tools.library import open_library
 
 if TYPE_CHECKING:
@@ -68,16 +69,14 @@ if TYPE_CHECKING:
 
     import gmuse_core
 
-#: The file in a target that makes it a rendering.
-MANIFEST: Final = ".gmuse-rendering.json"
-
 #: The manifest's own shape. A reader meeting a version it does not know
 #: refuses rather than guessing; a column added later reads as absent.
 VERSION: Final = 1
 
-#: How often a long write saves the manifest, in files. An interrupted run
-#: loses at most this many rows; the files themselves are complete, because
-#: each lands by rename, and the next run reports them as not its own.
+#: How many files land together, and how often the manifest is saved. An
+#: interrupted run loses at most this many rows; the files themselves are
+#: complete, because each lands by rename, and the next run reports them as
+#: not its own. For a remote target it is also how many go in one rsync.
 SAVE_EVERY: Final = 50
 
 
@@ -188,7 +187,7 @@ TAGGER: Final = tag_with_mutagen
 class Job:
     """One run against one target: where, as what, holding what, encoding with what."""
 
-    target: Path
+    target: Destination
     settings: Settings
     #: The manifest's files, updated as the run writes and deletes.
     held: dict[str, dict[str, str]]
@@ -203,45 +202,39 @@ class Done:
     written: int = 0
     deleted: int = 0
     failed: list[tuple[str, str]] = field(default_factory=list)
+    #: Paths the manifest names that the target does not hold, after the run.
+    missing: list[str] = field(default_factory=list)
 
 
-def manifest_path(target: Path) -> Path:
-    """Where a target keeps the record that makes it a rendering."""
-    return target / MANIFEST
-
-
-def load_manifest(target: Path) -> dict[str, Any] | None:
+def load_manifest(target: Destination, listing: set[str]) -> dict[str, Any] | None:
     """The target's manifest, `None` if it has none.
 
     **A target with files and no manifest is refused**, because that is a
     directory somebody else filled — the renderer never adopts what it did
     not make. An empty or missing directory is a new rendering.
     """
-    at = manifest_path(target)
-    if not at.is_file():
-        if target.is_dir() and any(target.iterdir()):
-            msg = f"{target} holds files and no {MANIFEST}: not a rendering, so not written into"
+    text = target.read_manifest()
+    if text is None:
+        if listing:
+            msg = f"{target.name} holds files and no {MANIFEST}: not a rendering, so not written into"
             raise Refused(msg)
         return None
-    loaded = json.loads(at.read_text(encoding="utf-8"))
+    loaded = json.loads(text)
     if loaded.get("version") != VERSION:
-        msg = f"{at} is manifest version {loaded.get('version')!r}; this renderer reads {VERSION}"
+        msg = f"{target.name}'s manifest is version {loaded.get('version')!r}; this renderer reads {VERSION}"
         raise Refused(msg)
     return loaded
 
 
-def save_manifest(target: Path, settings: Settings, files: Mapping[str, Mapping[str, str]]) -> None:
-    """Write the manifest by rename, so a reader never sees half of one."""
-    at = manifest_path(target)
+def save_manifest(target: Destination, settings: Settings, files: Mapping[str, Mapping[str, str]]) -> None:
+    """Write the manifest; the destination lands it by rename, so a reader never sees half of one."""
     body = {
         "version": VERSION,
         "query": settings.query,
         "encode": settings.encode,
         "files": dict(sorted(files.items())),
     }
-    tmp = at.with_name(at.name + ".tmp")
-    tmp.write_text(json.dumps(body, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(at)
+    target.write_manifest(json.dumps(body, indent=1, ensure_ascii=False) + "\n")
 
 
 def settle(manifest: Mapping[str, Any] | None, query: str | None, encode: str | None) -> Settings:
@@ -462,16 +455,19 @@ def uncollided(files: list[Wanted], out: Plan) -> list[Wanted]:
     return kept
 
 
-def plan(target: Path, files: Iterable[Wanted], held: Mapping[str, Mapping[str, str]], base: Plan) -> Plan:
-    """Compare what the rendering should hold with what its manifest says it does."""
+def plan(listing: set[str], files: Iterable[Wanted], held: Mapping[str, Mapping[str, str]], base: Plan) -> Plan:
+    """Compare what the rendering should hold with what its manifest says, and what the target holds.
+
+    `listing` is what the target holds, read once: a manifest row whose file
+    is gone is not trusted, and a file the manifest does not name is not ours.
+    """
     out = base
     keep: set[str] = set()
     for f in files:
         keep.add(f.path)
-        at = target / f.path
-        if held.get(f.path) == f.row and at.is_file():
+        if held.get(f.path) == f.row and f.path in listing:
             out.unchanged += 1
-        elif f.path not in held and at.exists():
+        elif f.path not in held and f.path in listing:
             out.strangers.append(f.path)
         else:
             out.writes.append(f)
@@ -562,71 +558,77 @@ def carry_out(job: Job, p: Plan, *, write: bool) -> Done:
             raise Refused(msg)
         failed = fill_cache(p.writes, job.transcoding)
 
-    job.target.mkdir(parents=True, exist_ok=True)
+    staged = job.target.staging()
     try:
-        for path in p.deletes:
-            at = job.target / path
-            try:
-                at.unlink(missing_ok=True)
-            except OSError as e:
-                out.failed.append((path, str(e)))
-                continue
-            job.held.pop(path, None)
-            out.deleted += 1
-            prune(at.parent, job.target)
+        undeleted = dict(job.target.remove(p.deletes))
+        for d in p.deletes:
+            if d in undeleted:
+                out.failed.append((d, undeleted[d]))
+            else:
+                job.held.pop(d, None)
+                out.deleted += 1
 
-        for n, f in enumerate(p.writes, 1):
+        batch: list[Wanted] = []
+        for f in p.writes:
             if f.path in failed:
                 out.failed.append((f.path, failed[f.path]))
                 continue
-            if write_one(job, f, out):
-                out.written += 1
-            if n % SAVE_EVERY == 0:
-                save_manifest(job.target, job.settings, job.held)
+            if stage_one(job, f, staged, out):
+                batch.append(f)
+            if len(batch) >= SAVE_EVERY:
+                land(job, staged, batch, out)
+                batch = []
+        land(job, staged, batch, out)
     finally:
         save_manifest(job.target, job.settings, job.held)
+        job.target.done_staging(staged)
+
+    # **Counted, not trusted.** rsync has exited 0 on this NAS having skipped
+    # files, so what the manifest names is checked against what is there.
+    there = job.target.files()
+    out.missing = sorted(path for path in job.held if path not in there)
     return out
 
 
-def write_one(job: Job, f: Wanted, out: Done) -> bool:
-    """Put one file in place — from the master, or from the cache for an encode — and tag it.
+def stage_one(job: Job, f: Wanted, staged: Path, out: Done) -> bool:
+    """Build one file in the staging area — from the master, or the cache for an encode — and tag it.
 
-    **Tagged before it lands**, on the temporary: the path holds the old file
-    or the new one, tagged, and never a copy waiting for its tags. The
-    temporary keeps the real extension, because mutagen tells an MP3 partly
-    by its name.
+    **Tagged before it lands**: the target holds the old file or the new one,
+    tagged, and never a copy waiting for its tags. The staged file has its
+    real name, because mutagen tells an MP3 partly by it.
     """
-    at = job.target / f.path
+    at = staged / f.path
     source = (job.transcoding.at(f) if job.transcoding else None) or f.source
-    tmp = at.with_name(f".{at.stem}.rendering{at.suffix}")
     try:
         at.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, tmp)
+        shutil.copy2(source, at)
         if f.statement is not None:
-            job.tag(tmp, f.statement, f.source if f.encode is not None else None)
-        tmp.replace(at)
+            job.tag(at, f.statement, f.source if f.encode is not None else None)
     except (OSError, ValueError, MutagenError) as e:
-        tmp.unlink(missing_ok=True)
+        at.unlink(missing_ok=True)
         out.failed.append((f.path, str(e)))
         return False
-    job.held[f.path] = f.row
     return True
 
 
-def prune(folder: Path, target: Path) -> None:
-    """Take away directories a delete left empty, up to the target."""
-    while folder != target and folder.is_relative_to(target):
-        try:
-            folder.rmdir()
-        except OSError:
-            return
-        folder = folder.parent
+def land(job: Job, staged: Path, batch: list[Wanted], out: Done) -> None:
+    """Land a batch of staged files, record the ones that arrived, and save the manifest."""
+    if not batch:
+        return
+    failed = dict(job.target.put(staged, [f.path for f in batch]))
+    for f in batch:
+        if f.path in failed:
+            out.failed.append((f.path, failed[f.path]))
+        else:
+            job.held[f.path] = f.row
+            out.written += 1
+    save_manifest(job.target, job.settings, job.held)
 
 
 def report(job: Job, p: Plan) -> None:
     """Say what a run would do, before it does any of it."""
     s = job.settings
-    print(f"rendering {s.query or 'the whole library'} into {job.target}, lossless as {s.encode}")
+    print(f"rendering {s.query or 'the whole library'} into {job.target.name}, lossless as {s.encode}")
     print(f"  {p.unchanged} unchanged, {len(p.writes)} to write, {len(p.deletes)} to delete")
     encodes = {job.transcoding.at(f) for f in p.writes} - {None} if job.transcoding else set()
     if encodes:
@@ -653,7 +655,7 @@ def report(job: Job, p: Plan) -> None:
 
 def render(  # noqa: PLR0913 — the command's options, one for one
     lib: gmuse_core.Library,
-    target: Path,
+    target: Path | Destination,
     query: str | None,
     *,
     write: bool,
@@ -661,9 +663,12 @@ def render(  # noqa: PLR0913 — the command's options, one for one
     transcoding: Transcoding | None = None,
 ) -> Done:
     """Plan a rendering of `query` into `target`, say what it would do, and do it if told."""
-    check_outside(target, lib.roots)
-    manifest = load_manifest(target)
-    job = Job(target, settle(manifest, query, encode), dict(manifest["files"]) if manifest else {}, transcoding, TAGGER)
+    dest = LocalDir(target) if isinstance(target, Path) else target
+    if isinstance(dest, LocalDir):
+        check_outside(dest.root, lib.roots)
+    listing = dest.files()
+    manifest = load_manifest(dest, listing)
+    job = Job(dest, settle(manifest, query, encode), dict(manifest["files"]) if manifest else {}, transcoding, TAGGER)
 
     rows = lib.query(job.settings.query, every_copy=True)
     on_device = list(dict.fromkeys(r["encoding"] for r in rows if r.get("encoding") and r.get("locator")))
@@ -671,12 +676,14 @@ def render(  # noqa: PLR0913 — the command's options, one for one
     if not hasattr(lib, "statement"):
         msg = "gmuse_core cannot say what the library states about a copy; rebuild it (`just wheel-dev`)"
         raise Refused(msg)
-    p = plan(target, with_statements(files, lib.statement), job.held, base)
+    p = plan(listing, with_statements(files, lib.statement), job.held, base)
     report(job, p)
 
     done = carry_out(job, p, write=write)
     for path, why in done.failed:
         print(f"  failed  {path}  {why}")
+    for path in done.missing:
+        print(f"  MISSING  {path}  — named in the manifest and not on the target")
     if not write:
         print("dry run — nothing written. Read the deletes above, then --write.")
     else:
@@ -689,7 +696,7 @@ def register(app: typer.Typer) -> None:
 
     @app.command("render")
     def render_cmd(
-        target: Path = typer.Argument(..., help="the directory to render into"),
+        target: str = typer.Argument(..., help="the directory to render into: a path here, or HOST:/PATH over ssh"),
         query: str | None = typer.Option(
             None, help="a filter, as the `:` line takes one; defaults to the target's own, else everything"
         ),
@@ -703,11 +710,9 @@ def register(app: typer.Typer) -> None:
         """Render a query of the library into a directory, transcoding lossless if asked."""
         transcoding = Transcoding(cache_dir() / "transcodes", ffmpeg)
         try:
-            done = render(
-                open_library(), target.expanduser(), query, write=write, encode=encode, transcoding=transcoding
-            )
-        except Refused as e:
+            done = render(open_library(), parse(target), query, write=write, encode=encode, transcoding=transcoding)
+        except (Refused, Unreachable) as e:
             print(f"refused: {e}")
             raise typer.Exit(1) from e
-        if done.failed:
+        if done.failed or done.missing:
             raise typer.Exit(1)

@@ -571,3 +571,21 @@ archive write="":
     # means a file vanished between the file list and the transfer, which here
     # is the log being appended to while the copy runs.
     "${RSYNC[@]}" --stats "$LIB/" "$ARCHIVE" || [ $? -eq 24 ]
+
+# Render the library for Plex onto the NAS — `renderings.md`, #336. Dry run by default.
+[group('dev')]
+plex write="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # **A rendering, not a copy**: the best copy of each track, lossless
+    # encoded to MP3 320 on this machine where the FLAC is, every file tagged
+    # with what the library states. The archive above is the masters byte for
+    # byte; this is what Plex reads, and nothing reads it back.
+    #
+    # Over ssh like `archive` (#328), into its own directory beside it, which
+    # the renderer refuses to write into unless it holds its own manifest.
+    TARGET="${GMUSE_PLEX:-asnas:/volume1/Media/PlexMusic}"
+    WRITE=()
+    if [ "{{write}}" = "write" ]; then WRITE=(--write); fi
+    cd tools && uv run gmuse-tools render "$TARGET" --encode mp3-320 "${WRITE[@]}"
