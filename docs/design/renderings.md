@@ -46,6 +46,17 @@ holdings are complete (`storage-layout.md` §8), copied byte for byte with the l
 from. A rendering is what you _use_ somewhere. Restoring from a rendering would make a transcode a master, which is the
 thing §1 forbids.
 
+**A target is a directory here or `HOST:/PATH` over ssh (#336)**, parsed once at the edge, and `just plex` renders the
+library to `asnas:/volume1/Media/PlexMusic` beside the archive. Over ssh for #328's reasons, never the SMB mount. Files
+are built and tagged on this machine and sent by rsync in batches of 50, with the manifest saved after each; what the
+target holds is listed once before planning and once after writing, and **a path the manifest names that is not there is
+reported as missing** — rsync has exited 0 on this NAS having skipped files. The NAS's `find` and `xargs` are BusyBox,
+so the remote commands use only `find -print0`, `xargs -0`, `rm -f --` and `rmdir --`.
+
+Measured, 2026-10-24: a dry run of the whole library against the NAS takes 2.6 s and plans 8,440 files, about 59 GiB —
+some 31 minutes at 34 MB/s, plus the encodes. Three artists, 32 files and 289 MB, landed in 29 s with their six encodes;
+a second run sent nothing; narrowing the query deleted 29 on the NAS and pruned the folders they left.
+
 **The device you import on stays complete.** A partial device is a rendering of a query; the place new music arrives is
 not partial, because `import` binds a file into the library that the archive then copies.
 

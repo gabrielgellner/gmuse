@@ -7,6 +7,7 @@ computed some other way, proving the run it inspects did something at all.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import shutil
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from gmuse_tools import render as render_module
+from gmuse_tools.destination import LocalDir, Remote, Unreachable, parse
 from gmuse_tools.render import ENCODES, MANIFEST, Encode, Refused, Transcoding, check_length, ffmpeg, probe_ms, render
 
 if TYPE_CHECKING:
@@ -574,12 +576,12 @@ def test_a_choice_that_does_not_say_lossless_is_refused(lib: FakeLibrary, tmp_pa
 
 
 def test_every_file_is_tagged_with_its_statement_before_it_lands(lib: FakeLibrary, tmp_path: Path, tags: Tags) -> None:
-    """A file lands tagged; the temporary keeps its extension, for mutagen."""
+    """A file lands tagged, each with its own statement."""
     target = tmp_path / "PlexMusic"
     render(lib, target, None, write=True)
     assert len(files_in(target)) == 2, "instrument: both files landed"
     names = sorted(name for name, _, _ in tags.calls)
-    assert names == [".01 Elephant Gun.rendering.mp3", ".05 Lush.rendering.flac"]
+    assert names == ["01 Elephant Gun.mp3", "05 Lush.flac"], "staged under its real name, for mutagen"
     assert {s["title"] for _, s, _ in tags.calls} == {"title of e1", "title of e2"}
     assert all(p is None for _, _, p in tags.calls), "a copy has its own pictures"
 
@@ -595,8 +597,8 @@ def test_a_transcode_is_tagged_with_its_masters_pictures(lib: FakeLibrary, tmp_p
         transcoding=Transcoding(tmp_path / "c", Encoder()),
     )
     pictures = {name: p for name, _, p in tags.calls}
-    assert pictures[".05 Lush.rendering.mp3"] == lib.held["e1"][0]
-    assert pictures[".01 Elephant Gun.rendering.mp3"] is None
+    assert pictures["05 Lush.mp3"] == lib.held["e1"][0]
+    assert pictures["01 Elephant Gun.mp3"] is None
 
 
 def test_a_changed_statement_rewrites_that_file_and_no_other(lib: FakeLibrary, tmp_path: Path, tags: Tags) -> None:
@@ -642,3 +644,102 @@ def test_a_library_that_cannot_state_is_refused(lib: FakeLibrary, tmp_path: Path
     render(lib, tmp_path / "fine", None, write=False)  # instrument: the same library, stating, is fine
     with pytest.raises(Refused, match="cannot say what the library states"):
         render(Stale(), tmp_path / "PlexMusic", None, write=False)  # type: ignore[arg-type]
+
+
+# --- A target over ssh — #336 -------------------------------------------------
+#
+# `Remote(host=None, …)` runs the commands it would send a NAS through a local
+# `sh`, and rsync to a local directory: the strings a NAS gets, exercised
+# without one.
+
+
+#: The far side's root, with a space in it, so an unquoted root in a remote
+#: command splits and fails rather than passing by luck.
+FAR = "far side"
+
+
+def far(tmp_path: Path, rsync: tuple[str, ...] | None = None) -> Remote:
+    """A remote target that is really a directory here, optionally with another rsync."""
+    target = Remote(None, str(tmp_path / FAR))
+    return dataclasses.replace(target, rsync=rsync) if rsync else target
+
+
+def test_a_remote_rendering_lands_then_has_nothing_to_do(lib: FakeLibrary, tmp_path: Path) -> None:
+    """The whole cycle through the commands a NAS would run."""
+    target = far(tmp_path)
+    done = render(lib, target, None, write=True)
+    assert done.written == 2
+    assert done.missing == []
+    landed = files_in(tmp_path / FAR)
+    assert landed == {lib.held["e1"][1], lib.held["e2"][1]}, "instrument: both files arrived"
+    assert (tmp_path / FAR / MANIFEST).is_file()
+
+    again = render(lib, target, None, write=True)
+    assert again.written == 0
+
+
+def test_a_remote_rendering_deletes_and_prunes_what_left_the_query(lib: FakeLibrary, tmp_path: Path) -> None:
+    """A narrowed query deletes on the far side, and the emptied album folder goes too."""
+    target = far(tmp_path)
+    render(lib, target, None, write=True)
+    gone = tmp_path / FAR / lib.held["e2"][1]
+    assert gone.is_file(), "instrument: the file to delete is there"
+
+    done = render(lib, target, "e1", write=True)
+    assert done.deleted == 1
+    assert not gone.exists()
+    assert not gone.parent.exists()
+    assert (tmp_path / FAR / lib.held["e1"][1]).is_file()
+
+
+def test_a_name_a_shell_would_mangle_crosses_intact(lib: FakeLibrary, tmp_path: Path) -> None:
+    """Spaces, an apostrophe, a dollar and an accent — quoted once, sent as bytes."""
+    src, _ = lib.held["e1"]
+    name = "Sinéad O’Connor/Don't $top 'Me' Now/01 Troy (a) & [b].flac"
+    lib.held["e1"] = (src, name)
+    target = far(tmp_path)
+    render(lib, target, None, write=True)
+    assert (tmp_path / FAR / name).is_file()
+    assert render(lib, target, None, write=True).written == 0, "and the listing reads it back as the same name"
+
+    del lib.held["e1"]
+    render(lib, target, None, write=True)
+    assert not (tmp_path / FAR / "Sinéad O’Connor").exists(), "the delete found it by the same name"
+
+
+def test_an_rsync_that_says_success_and_sends_nothing_is_caught(lib: FakeLibrary, tmp_path: Path) -> None:
+    """Rsync has exited 0 on this NAS having skipped files; the count after is what notices."""
+    done = render(lib, far(tmp_path, rsync=("true",)), None, write=True)
+    assert done.written == 2, "instrument: the put reported success"
+    assert sorted(done.missing) == sorted([lib.held["e1"][1], lib.held["e2"][1]])
+
+
+def test_an_rsync_that_fails_records_nothing(lib: FakeLibrary, tmp_path: Path) -> None:
+    """A failed batch is failed files, and the manifest does not claim them."""
+    done = render(lib, far(tmp_path, rsync=("false",)), None, write=True)
+    assert len(done.failed) == 2
+    assert json.loads((tmp_path / FAR / MANIFEST).read_text())["files"] == {}
+
+
+def test_an_unreachable_host_is_refused_before_anything(lib: FakeLibrary) -> None:
+    """A host that cannot be reached is not an empty target, which would be planned as a full write."""
+    with pytest.raises(Unreachable):
+        render(lib, Remote("asnas", "/volume1/x", ssh=("false",)), None, write=False)
+
+
+def test_a_remote_target_with_files_and_no_manifest_is_refused(lib: FakeLibrary, tmp_path: Path) -> None:
+    """The far side's music is not adopted either."""
+    theirs = tmp_path / FAR / "Somebody" / "Album"
+    theirs.mkdir(parents=True)
+    (theirs / "01 x.mp3").write_bytes(b"theirs")
+    with pytest.raises(Refused, match="not a rendering"):
+        render(lib, far(tmp_path), None, write=True)
+
+
+def test_a_target_is_parsed_at_the_edge() -> None:
+    """`HOST:/PATH` is remote; anything else, including a colon in a local name, is a directory."""
+    assert parse("asnas:/volume1/Media/PlexMusic") == Remote("asnas", "/volume1/Media/PlexMusic")
+    assert parse("asnas:/volume1/Media/PlexMusic/") == Remote("asnas", "/volume1/Media/PlexMusic")
+    assert isinstance(parse("/Volumes/Media/PlexMusic"), LocalDir)
+    assert isinstance(parse("./a:b"), LocalDir), "a slash before the colon is a path, not a host"
+    assert isinstance(parse("host:relative"), LocalDir), "a remote path must be absolute"
