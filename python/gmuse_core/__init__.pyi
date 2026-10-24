@@ -59,6 +59,16 @@ class Library:
         """
         ...
 
+    def layout(self, encodings: list[str]) -> list[dict[str, Any]]:
+        """Where each copy belongs in a rendered tree, relative — #332.
+
+        One dict per encoding id, in the order given: `path` where it belongs,
+        or `refused` saying why there is nowhere, or `elsewhere` for a copy this
+        device does not hold. A path two of the copies want is refused for
+        both, because this is the function a re-render uses.
+        """
+        ...
+
     def encoding_at(self, path: Path | str) -> str | None:
         """Which encoding the bytes at this path *are*.
 

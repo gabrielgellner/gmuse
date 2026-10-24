@@ -14,6 +14,7 @@ gmuse-tools paths    survey             what a path knows
 gmuse-tools covers   survey|apply       the art out of the tags
 gmuse-tools tags     normalise
 gmuse-tools ingest   run
+gmuse-tools render   TARGET            a query, copied out (renderings.md)
 ```
 
 ## The shape every pass shares
@@ -50,6 +51,7 @@ from gmuse_tools import (
     joined,
     paths,
     quality,
+    render,
     tags,
     version,
 )
@@ -93,6 +95,7 @@ paths.register(app)
 tags.register(app)
 covers.register(app)
 ingest.register(app)
+render.register(app)
 audit_library.register(audit_app)
 audit_dj.register(audit_app)
 audit_identity.register(audit_app)

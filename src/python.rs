@@ -141,6 +141,50 @@ impl Library {
         Ok(items.len())
     }
 
+    /// **Where each of these copies belongs in a rendered tree** — #332.
+    ///
+    /// `storage-layout.md` §2's path, relative, for each encoding id: a dict
+    /// with `path`, or with `refused` saying why there is none, or with
+    /// `elsewhere` for a copy this device does not hold. A path two of the
+    /// copies want is refused for both, exactly as a re-render refuses it,
+    /// because it is the same function.
+    ///
+    /// `file_under` is an assembled credit line, not a tag (#200), which is why
+    /// a tool cannot derive this from the files and asks.
+    fn layout(&self, py: Python<'_>, encodings: Vec<String>) -> PyResult<Py<PyList>> {
+        let copies = encodings
+            .iter()
+            .map(|e| {
+                e.parse::<Id<crate::model::entity::Encoding>>()
+                    .map_err(|err| PyValueError::new_err(format!("encoding {e}: {err}")))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let mut library =
+            crate::model::seam::Librarian::from_catalogue(self.projection.catalogue());
+        // **This device's locators**, without which every copy reads as held
+        // elsewhere: a librarian built from the catalogue knows every holding
+        // and has not been told which machine it is on.
+        library.here(self.device);
+        let layout = crate::operations::storage::layout_of(&library, &copies);
+
+        let placed: std::collections::BTreeMap<_, _> = layout.placed.into_iter().collect();
+        let refused: std::collections::BTreeMap<_, _> = layout.refused.into_iter().collect();
+        let out = PyList::empty(py);
+        for (copy, raw) in copies.iter().zip(&encodings) {
+            let row = pyo3::types::PyDict::new(py);
+            row.set_item("encoding", raw)?;
+            if let Some(at) = placed.get(copy) {
+                row.set_item("path", at.to_string_lossy().into_owned())?;
+            } else if let Some(why) = refused.get(copy) {
+                row.set_item("refused", why.to_string())?;
+            } else {
+                row.set_item("elsewhere", true)?;
+            }
+            out.append(row)?;
+        }
+        Ok(out.into())
+    }
+
     /// **Which encoding are the bytes at this path?** — #199.
     ///
     /// A tool that opens a file and then proposes a fact about it has two ways

@@ -1,6 +1,7 @@
 # Renderings: what leaves the library, and why it is never a master
 
-**Status: proposal, not built.** The Plex half of #18, the first target of #165, and the subset device of #38.
+**Status: proposal, partly built.** The Plex half of #18, the first target of #165, and the subset device of #38.
+`gmuse-tools render` copies a query into a target with a manifest (#332); the rest is the Renderings milestone.
 
 The library has one complete copy of what was acquired and one log of what is known about it. Everything else a device
 holds — the tree Plex serves, a work laptop's few albums, an MP3 for a phone — is **made from those two**, and can be

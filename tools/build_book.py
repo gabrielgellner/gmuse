@@ -134,7 +134,7 @@ MODEL = [
             Doc(
                 file="renderings.md",
                 title="What leaves the library",
-                standing="**Proposal, not built.** The Plex tree, a subset device, a transcode: "
+                standing="**Proposal, partly built.** The Plex tree, a subset device, a transcode: "
                 "the master holds what was acquired, and a rendering is never read back.",
             ),
         ],
