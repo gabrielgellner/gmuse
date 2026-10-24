@@ -131,6 +131,12 @@ MODEL = [
                 standing="**Settled design, not built.** One rule: the storage tree may use "
                 "structural facts only.",
             ),
+            Doc(
+                file="renderings.md",
+                title="What leaves the library",
+                standing="**Proposal, not built.** The Plex tree, a subset device, a transcode: "
+                "the master holds what was acquired, and a rendering is never read back.",
+            ),
         ],
     ),
     Part(
