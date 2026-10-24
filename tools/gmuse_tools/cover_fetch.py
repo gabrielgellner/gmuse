@@ -294,11 +294,9 @@ def put(row: dict[str, str], *, write: bool) -> str:
     if row["action"] == "add" and there:
         return "a cover appeared since the survey; left alone"
     if row["action"] == "upgrade":
-        if len(there) != 1:
-            return "expected one cover to keep; left alone"
+        if why := not_upgradable(folder, there, row["current"]):
+            return why
         kept = folder / f"cover-small{there[0].suffix}"
-        if kept.exists():
-            return f"{kept.name} is already there; left alone"
         if write:
             there[0].rename(kept)
     if write:
@@ -335,3 +333,21 @@ def register(covers_app: typer.Typer) -> None:
             print(f"no {review.name} — run `covers fetch` first")
             raise typer.Exit(1)
         apply(review, write=write)
+
+
+def not_upgradable(folder: Path, there: list[Path], surveyed: str) -> str | None:
+    """Why a marked upgrade is left alone, or `None` where it may go ahead."""
+    if len(there) != 1:
+        return "expected one cover to keep; left alone"
+    # **Any kept cover, whatever its extension.** Checking only the replaced
+    # cover's own suffix let a second apply upgrade CAKE's *Comfort Eagle*
+    # twice: its `cover.png` was kept as `cover-small.png`, and the next run
+    # found no `cover-small.jpg` and kept the *new* `cover.jpg` as one.
+    if small := sorted(folder.glob("cover-small.*")):
+        return f"{small[0].name} is already there; left alone"
+    # **And only the cover that was surveyed** — the thumbnail a person looked
+    # at, not whatever is in the folder now.
+    size = dimensions(there[0].read_bytes())
+    if size is None or f"{size[0]}x{size[1]}" != surveyed:
+        return "the cover is not the one surveyed; left alone"
+    return None

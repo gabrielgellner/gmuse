@@ -16,6 +16,7 @@ import requests
 
 from gmuse_tools import cover_fetch
 from gmuse_tools.cover_fetch import Album, Offer, albums, apply, front, lookup, survey, wants_art
+from gmuse_tools.covers import dimensions
 from tests.test_covers import jpeg
 
 if TYPE_CHECKING:
@@ -240,6 +241,12 @@ def test_an_upgraded_png_keeps_its_own_name(tmp_path: Path) -> None:
     names = sorted(p.name for p in a.folder.iterdir())
     assert names == ["cover-small.png", "cover.jpg"]
 
+    # The CAKE *Comfort Eagle* case: a second apply found no `cover-small.jpg`
+    # and kept the new `cover.jpg` as one.
+    again = apply(out, write=True)
+    assert "cover-small.png is already there" in next(iter(again))
+    assert sorted(p.name for p in a.folder.iterdir()) == names
+
 
 class Lib:
     """What `albums` asks of the library."""
@@ -288,3 +295,15 @@ def test_a_second_survey_downloads_nothing_again(tmp_path: Path) -> None:
     survey([a], tmp_path / "out.tsv", tmp_path / "staged", look=look, fetch=fetch)
     assert len(calls) == 1
     assert read(tmp_path / "out.tsv")[0]["offered"] == "1200x1200", "and still offers it"
+
+
+def test_an_upgrade_replaces_only_the_cover_that_was_surveyed(tmp_path: Path) -> None:
+    """A cover changed since the survey is not the thumbnail a person looked at."""
+    a, out = surveyed(tmp_path, jpeg(300, 300), jpeg(1200, 1200))
+    mark(out)
+    assert a.cover is not None
+    a.cover.write_bytes(jpeg(450, 450))
+    tally = apply(out, write=True)
+    assert "not the one surveyed" in next(iter(tally))
+    assert dimensions(a.cover.read_bytes()) == (450, 450)
+    assert not (a.folder / "cover-small.jpg").exists()
