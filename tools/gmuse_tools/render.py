@@ -59,7 +59,7 @@ from typing import TYPE_CHECKING, Any, Final
 import typer
 from mutagen import MutagenError
 
-from gmuse_tools import stated
+from gmuse_tools import album_art, stated
 from gmuse_tools.bronze import cache_dir
 from gmuse_tools.destination import MANIFEST, Destination, LocalDir, Unreachable, parse
 from gmuse_tools.library import open_library
@@ -172,6 +172,8 @@ class Plan:
     #: `(path, chosen file, other files)` where only an id chose between held copies —
     #: a pick, not a judgement, so it is reported and the library is not told.
     ties: list[tuple[str, str, list[str]]] = field(default_factory=list)
+    #: `(album folder, master covers)` where the masters offered different art (#348).
+    cover_contests: list[tuple[str, list[Path]]] = field(default_factory=list)
 
 
 def tag_with_mutagen(path: Path, statement: Mapping[str, Any], pictures_from: Path | None) -> None:
@@ -430,6 +432,18 @@ def with_statements(files: list[Wanted], statement: Callable[[list[str]], list[d
     ]
 
 
+def covers(tracks: list[Wanted], out: Plan) -> list[Wanted]:
+    """The cover beside each album the rendering holds, as files like any other (#348).
+
+    In the manifest with its source's signature, so a cover is written once,
+    rewritten when the master's changes, and deleted with its album — a cover
+    is a file the renderer made, and only the manifest licenses deleting it.
+    """
+    art = album_art.covers_for((f.path, f.source) for f in tracks)
+    out.cover_contests = art.contested
+    return [Wanted(path, {"cover": album_art.signature(src)}, src) for path, src in art.chosen.items()]
+
+
 def folded(path: str) -> str:
     """A path as a case- and form-folding filesystem matches it."""
     return unicodedata.normalize("NFC", path).casefold()
@@ -642,6 +656,17 @@ def report(job: Job, p: Plan) -> None:
         print(f"  not ours, left alone  {path}")
     for enc, why in p.refused:
         print(f"  refused  {enc}  {why}")
+    questions(p)
+
+
+def questions(p: Plan) -> None:
+    """Say what a run found and would not settle: art that disagreed, copies only an id chose between."""
+    for folder, offered in p.cover_contests:
+        # Which art an album wears is a judgement, so two different covers
+        # leave the folder without one until a person picks.
+        print(f"  covers disagree, none carried  {folder}")
+        for cover in offered:
+            print(f"         offered  {cover}")
     if p.ties:
         # **Said, not settled.** Which of two equal copies to keep is a
         # question for a person (`CLAUDE.md`, reported, never decided); the
@@ -676,7 +701,8 @@ def render(  # noqa: PLR0913 — the command's options, one for one
     if not hasattr(lib, "statement"):
         msg = "gmuse_core cannot say what the library states about a copy; rebuild it (`just wheel-dev`)"
         raise Refused(msg)
-    p = plan(listing, with_statements(files, lib.statement), job.held, base)
+    tracks = with_statements(files, lib.statement)
+    p = plan(listing, tracks + covers(tracks, base), job.held, base)
     report(job, p)
 
     done = carry_out(job, p, write=write)

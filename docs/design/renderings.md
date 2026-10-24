@@ -171,8 +171,16 @@ mutagen, and a second writer behind the binding would be a second answer. The li
 
 Measured on three albums, 2026-10-24: the 45 masters byte-identical before and after; all 19 copies tagged in place
 still hash to the encoding they were made from; James Blake's _The Bells Sketch_, whose master tags have two titles
-transposed, renders with the library's; a second run writes nothing. **Art beside an album is not carried yet** —
-Orbital's FLACs hold none embedded, and their `cover.jpg` stays behind.
+transposed, renders with the library's; a second run writes nothing. Art beside an album was not carried by #335 —
+Orbital's FLACs hold none embedded, and their `cover.jpg` stayed behind.
+
+**The cover beside each album is carried (#348)**: `cover.jpg` or `cover.png`, the names `covers apply` writes and Plex
+reads, and not rip logs or cue sheets, which help nobody listening. It comes from the master folders the album's files
+came from, and is in the manifest like a track — keyed by the source's size and mtime, rewritten when that changes,
+deleted with its album. **Two folders offering different covers is a question**, reported, and the album gets none until
+a person picks. A track on no release lands directly under its artist and gets no cover, which would be the artist's.
+Measured on the whole library: 1,135 rendered album folders, 1,078 with a cover, 56 with none offered, and one contest —
+Enya's _The Celts_, filed from the _Enya_ and _The Celts_ folders, whose covers differ.
 
 ---
 

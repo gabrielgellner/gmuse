@@ -13,7 +13,7 @@ import math
 import shutil
 import struct
 import wave
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -743,3 +743,116 @@ def test_a_target_is_parsed_at_the_edge() -> None:
     assert isinstance(parse("/Volumes/Media/PlexMusic"), LocalDir)
     assert isinstance(parse("./a:b"), LocalDir), "a slash before the colon is a path, not a host"
     assert isinstance(parse("host:relative"), LocalDir), "a remote path must be absolute"
+
+
+# --- The cover beside an album — #348 -----------------------------------------
+
+
+def in_folder(
+    lib: FakeLibrary, enc: str, folder: str, cover: bytes | None = b"a cover", name: str = "cover.jpg"
+) -> Path:
+    """Move a master into its own album folder, with a cover beside it unless `cover` is `None`."""
+    src, rel = lib.held[enc]
+    home = lib.roots[0] / folder
+    home.mkdir(parents=True, exist_ok=True)
+    moved = home / src.name
+    src.replace(moved)
+    lib.held[enc] = (moved, rel)
+    if cover is not None:
+        (home / name).write_bytes(cover)
+    return home
+
+
+def cover_of(rel: str) -> str:
+    """Where a rendered track's album cover lands."""
+    return str(PurePosixPath(rel).parent / "cover.jpg")
+
+
+def test_an_album_renders_with_its_cover_once(lib: FakeLibrary, tmp_path: Path) -> None:
+    """The cover lands beside the album, and a second run writes nothing."""
+    in_folder(lib, "e1", "Orbital/Diversions")
+    target = tmp_path / "PlexMusic"
+    first = render(lib, target, None, write=True)
+    assert first.written == 3, "instrument: two tracks and a cover"
+    at = target / cover_of(lib.held["e1"][1])
+    assert at.read_bytes() == b"a cover"
+    assert not (target / cover_of(lib.held["e2"][1])).exists(), "an album with no cover gets none"
+    assert render(lib, target, None, write=True).written == 0
+
+
+def test_a_cover_replaced_in_the_master_is_rewritten(lib: FakeLibrary, tmp_path: Path) -> None:
+    """Size and mtime are the signature, so a new picture is a new file."""
+    home = in_folder(lib, "e1", "Orbital/Diversions")
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    (home / "cover.jpg").write_bytes(b"a better, larger cover")
+    done = render(lib, target, None, write=True)
+    assert done.written == 1
+    assert (target / cover_of(lib.held["e1"][1])).read_bytes() == b"a better, larger cover"
+
+
+def test_an_album_leaving_the_query_takes_its_cover(lib: FakeLibrary, tmp_path: Path) -> None:
+    """A cover is the renderer's file, so the manifest deletes it with its album."""
+    in_folder(lib, "e1", "Orbital/Diversions")
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    at = target / cover_of(lib.held["e1"][1])
+    assert at.is_file(), "instrument: the cover is there to go"
+    render(lib, target, "e2", write=True)
+    assert not at.exists()
+    assert not at.parent.exists(), "and the album folder with it"
+
+
+def test_two_masters_offering_different_covers_are_reported_not_resolved(
+    lib: FakeLibrary, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One rendered album drawn from two folders whose art differs: a question, not a pick."""
+    hold_twice(lib, "e1-b", "Orbital/Diversions/06 Lush 3-3.flac", b"another track", of="e1-b")
+    first = in_folder(lib, "e1", "Orbital/Diversions")
+    second = in_folder(lib, "e1-b", "Orbital/Diversions (reissue)", cover=b"the reissue's cover")
+    assert (first / "cover.jpg").read_bytes() != (second / "cover.jpg").read_bytes(), "instrument: they differ"
+
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert not (target / cover_of(lib.held["e1"][1])).exists()
+    out = capsys.readouterr().out
+    assert "covers disagree, none carried  Orbital/Diversions" in out
+    assert out.count("offered") == 2
+
+
+def test_two_masters_offering_the_same_cover_are_one_cover(lib: FakeLibrary, tmp_path: Path) -> None:
+    """Identical bytes from two folders are not a disagreement."""
+    hold_twice(lib, "e1-b", "Orbital/Diversions/06 Lush 3-3.flac", b"another track", of="e1-b")
+    in_folder(lib, "e1", "Orbital/Diversions")
+    in_folder(lib, "e1-b", "Orbital/Diversions (reissue)")
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert (target / cover_of(lib.held["e1"][1])).read_bytes() == b"a cover"
+
+
+def test_a_track_on_no_album_gets_no_cover(lib: FakeLibrary, tmp_path: Path) -> None:
+    """A cover beside a loose track would be the artist's, which `covers.py` refuses too."""
+    in_folder(lib, "e1", "Jeremie Albino/Somewhere")
+    src, _ = lib.held["e1"]
+    lib.held["e1"] = (src, "Jeremie Albino/Rollin'.flac")
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert "Jeremie Albino/Rollin'.flac" in files_in(target), "instrument: the track rendered"
+    assert not (target / "Jeremie Albino" / "cover.jpg").exists()
+
+
+def test_a_png_cover_keeps_its_name(lib: FakeLibrary, tmp_path: Path) -> None:
+    """`cover.png` is carried as itself, not renamed to a format it is not."""
+    in_folder(lib, "e1", "Orbital/Diversions", cover=b"\x89PNG a cover", name="cover.png")
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    folder = target / PurePosixPath(lib.held["e1"][1]).parent
+    assert (folder / "cover.png").read_bytes() == b"\x89PNG a cover"
+    assert not (folder / "cover.jpg").exists()
+
+
+def test_a_remote_rendering_carries_the_cover(lib: FakeLibrary, tmp_path: Path) -> None:
+    """The cover goes through the same put as the tracks."""
+    in_folder(lib, "e1", "Orbital/Diversions")
+    render(lib, far(tmp_path), None, write=True)
+    assert (tmp_path / FAR / cover_of(lib.held["e1"][1])).read_bytes() == b"a cover"
