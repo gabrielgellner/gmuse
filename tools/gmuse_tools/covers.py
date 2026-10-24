@@ -411,3 +411,8 @@ def register(app: typer.Typer) -> None:
         """Write `cover.jpg` for the rows marked `y`, taking nothing away."""
         _ = root
         apply(out_path("covers-review.tsv"), write=write)
+
+    # `fetch` and `fetch-apply` are #352's, and that module imports this one.
+    from gmuse_tools import cover_fetch  # noqa: PLC0415
+
+    cover_fetch.register(covers_app)
