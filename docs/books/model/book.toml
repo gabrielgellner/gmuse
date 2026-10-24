@@ -15,7 +15,9 @@ language = "en"
 # own theme, which is good and needs no help.
 default-theme = "rust"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://gitlab.com/gabrielgellner/gmuse"
+git-repository-url = "https://github.com/gabrielgellner/gmuse"
+# Served under the project's Pages path, so the 404 page's links need it.
+site-url = "/gmuse/model/"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
 # **No edit-url-template.** It would point at a generated file that is not in git;
 # each chapter carries a "Source:" link to the document it came from instead.

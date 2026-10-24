@@ -1,7 +1,8 @@
 # gmuse — development workflow
 #
 # The quality gate is local: `just ci`, enforced by the pre-push hook
-# (`just hooks-install`). GitLab CI is deliberately minimal — see .gitlab-ci.yml.
+# (`just hooks-install`). GitHub Actions repeats the Rust half on each pull
+# request — see .github/workflows/.
 
 # List available recipes
 default:
@@ -197,11 +198,11 @@ docs-serve:
 # So this is the half that cannot be automated honestly, made cheap enough to run
 # deliberately. The audit it replaces took an afternoon and found ten.
 
-# Report deferrals whose issue has since closed (needs glab)
+# Report deferrals whose issue has since closed (needs gh)
 stale-claims:
     #!/usr/bin/env bash
     set -uo pipefail
-    command -v glab >/dev/null 2>&1 || { echo "stale-claims needs glab" >&2; exit 1; }
+    command -v gh >/dev/null 2>&1 || { echo "stale-claims needs gh" >&2; exit 1; }
     echo "Deferrals that name an issue, and whether that issue is still open:"
     echo
     # Forward-looking only. "was called `qualifier` until #117" is a record of something
@@ -222,11 +223,12 @@ stale-claims:
             continue
         fi
         for n in $issues; do
-            state=$(glab api "projects/:id/issues/$n" 2>/dev/null \
-                | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state","?"))' 2>/dev/null)
+            # The GitHub tracker kept GitLab's numbers (every issue was imported in
+            # order), so a `#n` written before the move still names the same issue.
+            state=$(gh issue view "$n" --json state --jq .state 2>/dev/null)
             case "$state" in
-                closed) printf '  %-58s #%-5s %s  <-- look\n' "$where:$line" "$n" "$state" ;;
-                opened) printf '  %-58s #%-5s %s\n' "$where:$line" "$n" "$state" ;;
+                CLOSED) printf '  %-58s #%-5s %s  <-- look\n' "$where:$line" "$n" "closed" ;;
+                OPEN)   printf '  %-58s #%-5s %s\n' "$where:$line" "$n" "open" ;;
                 *)      printf '  %-58s #%-5s unknown\n' "$where:$line" "$n" ;;
             esac
         done
@@ -394,16 +396,18 @@ next-version:
 
 # First release needs an explicit version: just bump v0.1.0
 #
-# **`main` is protected, so a release is an MR like anything else.** Push
-# access is "No one" (see CLAUDE.md), which is what makes plv's
+# **`main` is protected, so a release is a pull request like anything else.**
+# Nothing pushes to `main` directly (see CLAUDE.md), which is what makes plv's
 # `git push origin HEAD` fail here. So this cuts `chore/release-vX.Y.Z` from
-# `main` when run there, and the bump commit lands through a merge request.
-# The tag rides along: merges are fast-forward, so the commit it points at is
-# the one that reaches `main` — a squash would orphan it.
+# `main` when run there, and the bump commit lands through a pull request.
 #
-# Does NOT push — review with `git log --oneline -5`, then `glab mr create`.
+# **No tag here.** GitHub's rebase-merge writes the commit again, so a tag made
+# on the branch would point at a commit `main` never holds. `release` tags the
+# merged commit instead.
 #
-# Bump version: every crate's Cargo.toml + CHANGELOG.md, commit, tag — on a branch
+# Does NOT push — review with `git log --oneline -5`, then `gh pr create --fill`.
+#
+# Bump version: every crate's Cargo.toml + CHANGELOG.md, commit — on a branch
 [group('release')]
 bump version="":
     #!/usr/bin/env bash
@@ -440,31 +444,34 @@ bump version="":
 
     git add Cargo.toml Cargo.lock crates/*/Cargo.toml CHANGELOG.md
     git commit -m "chore(release): $NEXT"
-    git tag -a "$NEXT" -m "Release $NEXT"
 
     echo ""
-    echo "Created commit and tag $NEXT."
+    echo "Created the release commit for $NEXT (untagged until it merges)."
     echo "Review with:  git log --oneline -5"
-    echo "Then:         git push -u origin HEAD && glab mr create --fill"
+    echo "Then:         git push -u origin HEAD && gh pr create --fill"
     echo "Once merged:  git switch main && git pull --ff-only && just release"
 
-# Run on `main` after the bump MR has merged — the tag has to point at a
-# commit `main` already holds, because nothing can push to `main` directly.
+# Run on `main` after the bump pull request has merged. The tag goes on the
+# release commit as `main` holds it, which is the only copy a rebase-merge leaves.
 #
-# Push the latest tag and create the GitLab release
+# Tag the merged release commit, push the tag, create the GitHub release
 [group('release')]
 release:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    TAG=$(git describe --tags --abbrev=0)
-
     git fetch origin main --quiet
-    git merge-base --is-ancestor "$TAG" origin/main || {
-        echo "ERROR: $TAG is not on origin/main yet — merge the release MR first." >&2
+    VER=$(cargo metadata --no-deps --format-version 1 \
+        | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "gmuse"))')
+    TAG="v$VER"
+    ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "ERROR: $TAG is already tagged." >&2; exit 1; }
+    COMMIT=$(git log origin/main --format=%H -n 1 --grep="^chore(release): $TAG\$")
+    [ -n "$COMMIT" ] || {
+        echo "ERROR: no 'chore(release): $TAG' on origin/main yet — merge the release pull request first." >&2
         exit 1
     }
 
+    git tag -a "$TAG" -m "Release $TAG" "$COMMIT"
     git push origin "$TAG"
 
     # Release notes = this tag's section of the changelog, from the first
@@ -472,11 +479,11 @@ release:
     # titled for its version, so repeating it inside the notes is noise.
     NOTES=$(git-cliff --latest --strip all | awk 'f || /^###/ { f = 1; print }')
 
-    glab release create "$TAG" \
-        --name "Release $TAG" \
+    gh release create "$TAG" \
+        --title "Release $TAG" \
         --notes "$NOTES"
 
-    echo "Released $TAG to GitLab."
+    echo "Released $TAG to GitHub."
 
 # Copy the library to the archive — `storage-layout.md` §8. Dry run by default.
 [group('dev')]

@@ -385,7 +385,7 @@ def one(book: Book, published: set[str]) -> int:
             body = strip_title(source.read_text())
             stem = slug(doc.title)
             link = (
-                f"https://gitlab.com/gabrielgellner/gmuse/-/blob/main/docs/"
+                f"https://github.com/gabrielgellner/gmuse/blob/main/docs/"
                 f"{'guides' if doc.source == 'guides' else 'design'}/{doc.file}"
             )
             header = f"> {doc.standing}\n>\n> Source: [`docs/{'guides' if doc.source == 'guides' else 'design'}/{doc.file}`]({link})"

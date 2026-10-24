@@ -973,7 +973,7 @@ Append here as decisions are made. Format: date, decision, rationale.
   every keystroke" is a scan today and would be an index lookup there.
 
 - **2026-08-28** **Catalogs are planned and recorded in §4**
-  ([issue #3](https://gitlab.com/gabrielgellner/gmuse/-/issues/3)): several separate bodies of music, one or a subset
+  ([issue #3](https://github.com/gabrielgellner/gmuse/issues/3)): several separate bodies of music, one or a subset
   active at a time, with playlists still crossing between them. It is written into §4 rather than left in the issue
   because it constrains what §4 and §5 may become, and both are INVARIANT — specifically, **nothing may start building a
   pool from the `Store` instead of the `Library`**, or confining the library would stop confining shuffle.

@@ -90,7 +90,7 @@ from gmuse_tools.genre.common import out_path, secret
 if TYPE_CHECKING:
     import sqlite3
 
-USER_AGENT: Final = {"User-Agent": "gmuse-identify/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
+USER_AGENT: Final = {"User-Agent": "gmuse-identify/0.1 ( https://github.com/gabrielgellner/gmuse )"}
 MB_RECORDING: Final = "https://musicbrainz.org/ws/2/recording"
 HTTP_OK: Final = 200
 #: How many candidates to ask for.

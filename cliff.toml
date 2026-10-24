@@ -4,7 +4,7 @@ header = """
 All notable changes to this project will be documented in this file.\n
 """
 body = """
-{% set repo = "https://gitlab.com/gabrielgellner/gmuse" %}\
+{% set repo = "https://github.com/gabrielgellner/gmuse" %}\
 {% if version %}\
     ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 {% else %}\
@@ -19,7 +19,7 @@ body = """
 {% endfor %}\n
 """
 footer = """
-{% set repo = "https://gitlab.com/gabrielgellner/gmuse" %}\
+{% set repo = "https://github.com/gabrielgellner/gmuse" %}\
 {% for release in releases %}\
     {% if release.version %}\
         {% if release.previous.version %}\

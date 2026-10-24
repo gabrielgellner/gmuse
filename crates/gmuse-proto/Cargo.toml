@@ -4,7 +4,7 @@ version = "0.2.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "What crosses the socket: the envelope, the handshake, the errors"
-repository = "https://gitlab.com/gabrielgellner/gmuse"
+repository = "https://github.com/gabrielgellner/gmuse"
 
 # **It MUST NOT depend on engine internals** (§4.3), which is why `gmuse-ids`
 # exists: §7.6 wants ids on the wire to be real domain identities, and the only

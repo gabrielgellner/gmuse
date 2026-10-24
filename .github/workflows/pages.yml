@@ -1,0 +1,72 @@
+# **The books** — #247. `docs/design/` and `docs/guides/` rendered with mdBook, at
+# https://gabrielgellner.github.io/gmuse/.
+#
+# **By hand, from `main` only.** Pages has one published copy, so building it from a
+# branch would publish a draft over the real thing. And a push does not publish: most
+# pushes change no document, and `just docs` builds the same books locally in a second.
+#
+# Cheap by construction: two binary downloads, no cargo build, no toolchain. The guard is
+# the point of the loop's last line — `mdbook build` reports a broken include as a warning
+# and exits 0, so a book with a hole in it would otherwise publish itself.
+
+name: pages
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mdBook and mdbook-mermaid
+        run: |
+          curl -fsSL -o /tmp/mdbook.tar.gz \
+            https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-musl.tar.gz
+          sudo tar -xzf /tmp/mdbook.tar.gz -C /usr/local/bin
+          # **The diagrams need their own binary.** `mermaid.min.js` is generated rather
+          # than committed, and without it mdBook's `additional-js` points at files that
+          # are not there: it warns, exits 0, and publishes pages whose diagrams are inert.
+          # `book_guard.py` counts them for exactly that reason.
+          curl -fsSL -o /tmp/mermaid.tar.gz \
+            https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.1/mdbook-mermaid-v0.17.1-x86_64-unknown-linux-musl.tar.gz
+          sudo tar -xzf /tmp/mermaid.tar.gz -C /usr/local/bin
+      - name: Build both books
+        run: |
+          python3 tools/build_book.py
+          mkdir -p public
+          cp docs/books/landing/index.html public/index.html
+          for b in model interaction; do
+            mdbook-mermaid install "docs/books/$b"
+            mdbook build "docs/books/$b"
+            python3 tools/book_guard.py "docs/books/$b/book"
+            mv "docs/books/$b/book" "public/$b"
+          done
+          # **The landing page must survive the loop above**, which is the one way this
+          # could publish a site with no way in.
+          test -s public/index.html
+          test -f public/model/index.html
+          test -f public/interaction/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

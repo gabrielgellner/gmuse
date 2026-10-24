@@ -119,7 +119,7 @@ WITHIN: Final = re.compile(r"\s+feat\.?\s+|\s+ft\.?\s+|\s+[xX]\s+|\s+vs\.?\s+", 
 MB_ARTIST: Final = "https://musicbrainz.org/ws/2/artist"
 #: The one status that carries an answer.
 HTTP_OK: Final = 200
-USER_AGENT: Final = {"User-Agent": "gmuse-joined/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
+USER_AGENT: Final = {"User-Agent": "gmuse-joined/0.1 ( https://github.com/gabrielgellner/gmuse )"}
 
 
 def key(name: str) -> str:

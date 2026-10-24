@@ -20,7 +20,7 @@ version = "0.2.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Gabriel's MUSical Experience"
-repository = "https://gitlab.com/gabrielgellner/gmuse"
+repository = "https://github.com/gabrielgellner/gmuse"
 
 [lib]
 name = "gmuse"

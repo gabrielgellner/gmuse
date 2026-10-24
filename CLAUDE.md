@@ -115,7 +115,8 @@ into facts. Read `quality-albums.tsv` before assuming the library has never been
 ## The book
 
 `just docs` builds both books; `just docs-serve` serves one with live reload (`BOOK=interaction just docs-serve` for the
-other). A push to `main` publishes them to GitLab Pages.
+other). The `pages` workflow publishes them to GitHub Pages at <https://gabrielgellner.github.io/gmuse/>, started by
+hand from `main` (`gh workflow run pages.yml`).
 
 **They hold no second copy of anything.** `tools/build_book.py` derives the chapters from `docs/design/` and
 `docs/guides/`, splitting the long documents on their own `##` headings — so a renamed section renames a chapter rather
@@ -143,8 +144,9 @@ just bench           # resampler comparison table
 just docs            # build both books; `docs-serve` for live reload
 ```
 
-`just ci` is the quality gate and it runs **locally**. GitLab CI is deliberately minimal (a manual `verify` job) to
-avoid spending shared-runner minutes re-running checks the hooks already made.
+`just ci` is the quality gate and it runs **locally**. GitHub Actions' `verify` workflow repeats the Rust half on every
+pull request, as a second look on a clean machine. On GitLab it ran only by hand, to save shared-runner minutes; a
+public GitHub repository's minutes are free.
 
 ### Git hooks
 
@@ -181,26 +183,33 @@ only, so it has **no merge commits at all** and that rule could never do its job
 `feat(model): merge by redirect` (#68), a real feature it dropped. It now matches what git actually writes,
 `^Merge (branch|remote-tracking|pull request)`.
 
-### Merge requests
+### Pull requests
 
-`main` is protected: **push access is "No one"**, so every change lands through an MR. The project is set to
-fast-forward merges, **squash off**, and source branches delete themselves. Branch names follow the commit type:
-`feat/…`, `fix/…`, `docs/…`, `chore/…`.
+The project moved from GitLab to GitHub on 2026-10-24. **The issue tracker kept GitLab's numbers**: every issue was
+imported in order, the closed ones as stubs linking back, so a `#n` in a commit, a comment or a document still names the
+same issue. Merge requests were not moved; a `!n` names a GitLab merge request.
 
-Because merges are fast-forward, an MR that has fallen behind `main` needs a rebase before it can merge.
+`main` is protected: **nothing pushes to it directly**, so every change lands through a pull request. The only merge
+method allowed is **rebase and merge** — no squash, no merge commits — and source branches delete themselves. Branch
+names follow the commit type: `feat/…`, `fix/…`, `docs/…`, `chore/…`.
+
+**GitHub cannot fast-forward.** Rebase-and-merge writes each commit again, with GitHub as committer and a new hash, even
+when the branch is already level with `main`. The authors, subjects and bodies survive, which is what this section is
+for; the hashes on the branch do not. So nothing may point at a branch commit and expect `main` to hold it, which is why
+`release` tags after the merge rather than `bump` before it.
 
 **Every commit on the branch lands on `main`, so every commit must be a well-formed Conventional Commit** — not just the
-MR title. `filter_unconventional = true` drops a badly typed one from the changelog without a word, and that is now a
-per-commit risk rather than a per-MR one.
+pull request title. `filter_unconventional = true` drops a badly typed one from the changelog without a word, and that
+is now a per-commit risk rather than a per-pull-request one.
 
 In exchange, **the bodies survive**. This repository puts its reasoning in commit messages — the measurement, the thing
 that was tried and did not work, the rule that came out of being wrong — and squash kept only the subject line. Ten
 well-typed commits are ten changelog entries and ten explanations, rather than one of each.
 
 **One branch per issue, cut from `main`.** Under squash this was a tidiness preference; now it is not, because a branch
-carrying two issues' work lands as two sets of commits with no MR boundary between them in the history. Reusing a
-long-lived branch for successive MRs is how `ddd51bb` came to contain `shelf compact` and six design-doc commits under a
-title about blast radii — which was unfixable, for the reason below.
+carrying two issues' work lands as two sets of commits with no pull request boundary between them in the history.
+Reusing a long-lived branch for successive merge requests is how `ddd51bb` came to contain `shelf compact` and six
+design-doc commits under a title about blast radii — which was unfixable, for the reason below.
 
 **A merged commit cannot be corrected.** Rewriting one is a force-push by definition and `main` is protected precisely
 so that cannot happen. It has bitten twice: `8b84fd3` (the #151 fix, an untyped title) and `ddd51bb` (a squash that
@@ -239,15 +248,16 @@ git-cliff builds the changelog from commit history:
 ```sh
 just changelog-preview   # what would land
 just next-version        # what the version would become
-just bump                # cut chore/release-vX.Y.Z, bump every crate, write CHANGELOG.md, commit, tag
-git push -u origin HEAD && glab mr create --fill
-just release             # on main, once merged: push the tag, create the GitLab release
+just bump                # cut chore/release-vX.Y.Z, bump every crate, write CHANGELOG.md, commit
+git push -u origin HEAD && gh pr create --fill
+just release             # on main, once merged: tag the merged release commit, push it, create the GitHub release
 ```
 
-**A release is an MR, because nothing can push to `main`.** This is where the flow differs from plv's: `bump` runs on a
-branch it cuts itself, the bump commit lands through a merge request like any other, and `release` refuses until the tag
-is an ancestor of `origin/main`. The tag survives the merge because merges are fast-forward — the commit it points at is
-the commit that reaches `main`. A squash would orphan it, which is one more reason squash stays off.
+**A release is a pull request, because nothing can push to `main`.** This is where the flow differs from plv's: `bump`
+runs on a branch it cuts itself, and the bump commit lands through a pull request like any other. **The tag is made
+after the merge, not before**: rebase-and-merge writes the release commit again, so a tag made on the branch would point
+at a commit `main` never holds. `release` finds `chore(release): vX.Y.Z` on `origin/main`, tags it, and refuses until it
+is there.
 
 `bump` uses `cargo set-version --workspace`: every crate carries its own `version`, and without the flag only the root
 moves. The first release needs an explicit version (`just bump v0.1.0`) because there is no tag to bump from; after that

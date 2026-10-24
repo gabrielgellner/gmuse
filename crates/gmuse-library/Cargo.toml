@@ -4,7 +4,7 @@ version = "0.2.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "The librarian: the log, the projection, the query, the named operations"
-repository = "https://gitlab.com/gabrielgellner/gmuse"
+repository = "https://github.com/gabrielgellner/gmuse"
 
 # **Nothing here knows how the library is shown or played.** That used to be a
 # test scanning `use` lines; it is now the dependency list. cpal, ratatui and

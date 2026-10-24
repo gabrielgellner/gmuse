@@ -4,7 +4,7 @@ version = "0.2.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "The blocking socket client every view speaks through"
-repository = "https://gitlab.com/gabrielgellner/gmuse"
+repository = "https://github.com/gabrielgellner/gmuse"
 
 # **Only the protocol.** §4.3: this is used by the TUI, the CLI and later the
 # MCP adapter, so one implementation rather than three — and it can only stay

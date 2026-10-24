@@ -26,7 +26,7 @@ import typer
 from gmuse_tools import bronze
 from gmuse_tools.genre.common import album_key, album_mbid, out_path, secret, tags_of, tracklist_match, walk
 
-USER_AGENT: Final = {"User-Agent": "gmuse-genre-tool/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
+USER_AGENT: Final = {"User-Agent": "gmuse-genre-tool/0.1 ( https://github.com/gabrielgellner/gmuse )"}
 MB_RELEASE: Final = "https://musicbrainz.org/ws/2/release/{}"
 MB_RELEASE_GROUP: Final = "https://musicbrainz.org/ws/2/release-group/{}"
 DISCOGS_RELEASE: Final = "https://api.discogs.com/releases/{}"

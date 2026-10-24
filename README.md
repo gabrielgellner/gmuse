@@ -64,12 +64,12 @@ statically linked).
 
 ## The book
 
-Two books at <https://gmuse-805512.gitlab.io>:
+Two books at <https://gabrielgellner.github.io/gmuse>:
 
-- **[The information model and the layers](https://gmuse-805512.gitlab.io/model/)** — what a library entry is, as
-  against a file, and which part of the program may talk to which.
-- **[The interaction model](https://gmuse-805512.gitlab.io/interaction/)** — how the player is driven, and the seven
-  guides the program itself ships.
+- **[The information model and the layers](https://gabrielgellner.github.io/gmuse/model/)** — what a library entry is,
+  as against a file, and which part of the program may talk to which.
+- **[The interaction model](https://gabrielgellner.github.io/gmuse/interaction/)** — how the player is driven, and the
+  seven guides the program itself ships.
 
 Build them with `just docs`.
 

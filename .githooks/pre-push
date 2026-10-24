@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Local CI gate. GitLab CI is kept minimal to save shared-runner minutes, so
-# `just ci` runs here instead — format + lint + typecheck + tests + build.
+# Local CI gate: `just ci` runs here — format + lint + typecheck + tests + build.
+# GitHub Actions repeats the Rust half on each pull request, as a second look.
 #
 # Install: just hooks-install
 # Bypass:  git push --no-verify   (use sparingly, and say why)

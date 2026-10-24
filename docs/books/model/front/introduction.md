@@ -4,7 +4,7 @@ A terminal music player and library manager, in Rust, with a pure-Rust audio pat
 
 This book publishes the design documents that describe **what the library is** and **which part of the program may talk
 to which**. It adds no new prose beyond the framing you are reading: every chapter below is a document from
-[`docs/design/`](https://gitlab.com/gabrielgellner/gmuse/-/tree/main/docs/design), rendered rather than retold.
+[`docs/design/`](https://github.com/gabrielgellner/gmuse/tree/main/docs/design), rendered rather than retold.
 
 That is deliberate. A book that paraphrased those documents would be a second copy of every claim in them, and this
 project has already paid for what happens next: an audit in September 2026 found ten load-bearing sentences that had
@@ -50,6 +50,6 @@ The two books meet at the query language: what you type after `:` filters the sa
 
 ## What is in neither
 
-`NOT_IN_ANY_BOOK` in [`tools/build_book.py`](https://gitlab.com/gabrielgellner/gmuse/-/blob/main/tools/build_book.py)
+`NOT_IN_ANY_BOOK` in [`tools/build_book.py`](https://github.com/gabrielgellner/gmuse/blob/main/tools/build_book.py)
 lists every document that is in no book and why, and the build **fails** if one is neither published nor listed — so
 nothing goes missing by being forgotten.

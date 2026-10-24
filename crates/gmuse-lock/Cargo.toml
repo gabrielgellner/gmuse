@@ -4,7 +4,7 @@ version = "0.2.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "One holder at a time, enforced by the kernel"
-repository = "https://gitlab.com/gabrielgellner/gmuse"
+repository = "https://github.com/gabrielgellner/gmuse"
 
 # **A crate because three things need it and none of them may depend on the
 # others** — #257.

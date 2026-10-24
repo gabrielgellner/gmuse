@@ -211,7 +211,7 @@ def named_release(mbid: str, ours: list[str]) -> Match | None:
 HTTP_OK: Final = 200
 
 #: The user agent MusicBrainz sees, per its rate-limit policy.
-ASKING: Final = {"User-Agent": "gmuse-ingest/0.1 ( https://gitlab.com/gabrielgellner/gmuse )"}
+ASKING: Final = {"User-Agent": "gmuse-ingest/0.1 ( https://github.com/gabrielgellner/gmuse )"}
 
 
 def identified(folder: Path, wanted: Wanted, ours: list[str]) -> Match | None:
