@@ -13,6 +13,19 @@
 # `seen` means "the scanner walked past this", and a scan re-derives it. The decoder
 # in `events.rs` stays — `--migrate-log` needs it for the logs on a real disk.
 *.log
+
+# **Report data, wherever a run writes it.** A tool's output goes where its caller says
+# (`library-api.md` §7), so a report can land anywhere in the tree, and the repository is
+# public while the library is not. `just leak-check` refuses what gets past this.
+/out/
+*.tsv
+*.csv
+*.jsonl
+*.sqlite
+*.db
+*.postcard
+*.m3u
+*.m3u8
 *.zip
 *.tar
 *.tar.gz

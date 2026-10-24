@@ -602,6 +602,13 @@ out/credits-snapshot.tsv    every artist field before an apply, for restore
 The whole folder is gitignored. Nothing in it is a source file, and nothing in it is precious — every one is regenerable
 from the cache or the library.
 
+**A report is never committed, wherever it was written.** The repository is public and these files are lists of the
+library. A pass that takes `--out` writes where it is told, so `--out out/x.tsv` run from the repository root lands in
+the root rather than here; the root `.gitignore` ignores `out/` and every report format anywhere in the tree, and
+`just leak-check`, run before each commit, refuses one that got past it. A result worth keeping belongs in the log as a
+fact, or outside the repository: `out/quarantined-albums.tsv`, the one report that was committed, now lives untracked in
+`~/.local/share/gmuse-reports/`.
+
 ## Credentials
 
 `common.secret()` reads, in order: the environment, the macOS Keychain, then a `.env` beside the scripts (gitignored,

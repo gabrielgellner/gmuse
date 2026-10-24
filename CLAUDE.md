@@ -153,10 +153,24 @@ public GitHub repository's minutes are free.
 `just hooks-install` points `core.hooksPath` at `.githooks/`:
 
 - **commit-msg** — the subject must be a Conventional Commit, because the changelog is built from it
-- **pre-commit** — `just fmt-check` only, so committing stays fast
+- **pre-commit** — `just fmt-check` and `just leak-check`, so committing stays fast
 - **pre-push** — the full `just ci`
 
 Bypass with `--no-verify` sparingly, and say why in the message.
+
+### The repository is public; the library is not
+
+**No report data is committed, ever.** Three scan logs listing 3,490 of the library's files were committed by accident
+in September 2026 and deleted a week later. They were still in the history when the repository went public on
+2026-10-24, along with a 66-line album list and a genre sample, and taking them out meant rewriting the history and
+recreating the repository. That is why every commit hash from 2026-09-02 on differs from the one GitLab has.
+
+A tool's output goes where its caller says (`library-api.md` §7). So the repository refuses report data rather than
+relying on where it is written: `.gitignore` ignores the report formats (`*.tsv`, `*.jsonl`, `*.csv`, `*.sqlite`,
+`*.postcard`, playlists) anywhere in the tree, and `just leak-check` refuses a commit that tracks one or that has a file
+listing more than five library paths. Write reports to `tools/out/`, or outside the repository.
+
+A document may still name an artist or an album as evidence for a rule. What it may not carry is a listing.
 
 ## Conventions
 
@@ -208,11 +222,11 @@ well-typed commits are ten changelog entries and ten explanations, rather than o
 
 **One branch per issue, cut from `main`.** Under squash this was a tidiness preference; now it is not, because a branch
 carrying two issues' work lands as two sets of commits with no pull request boundary between them in the history.
-Reusing a long-lived branch for successive merge requests is how `ddd51bb` came to contain `shelf compact` and six
+Reusing a long-lived branch for successive merge requests is how `b5f9bdb` came to contain `shelf compact` and six
 design-doc commits under a title about blast radii — which was unfixable, for the reason below.
 
 **A merged commit cannot be corrected.** Rewriting one is a force-push by definition and `main` is protected precisely
-so that cannot happen. It has bitten twice: `8b84fd3` (the #151 fix, an untyped title) and `ddd51bb` (a squash that
+so that cannot happen. It has bitten twice: `18511bf` (the #151 fix, an untyped title) and `b5f9bdb` (a squash that
 swallowed a whole branch). That is a cost worth accepting rather than working around — a `cliff.toml` preprocessor
 special-casing a subject line would be a permanent wart describing a historical accident.
 
