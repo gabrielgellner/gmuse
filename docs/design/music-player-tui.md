@@ -6533,6 +6533,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   control thread, the engine's queue, and four in the librarian. An attached `:scope` change rebuilds from the library
   inside the playlist's rows, and so loses the list's order; that is not addressed here.
 
+- **2026-10-24** **What leaves the library is a rendering, and tags go into renderings first
+  ([`renderings.md`](renderings.md)).** Asked whether Plex could serve the archive copy on the NAS. It could, but the
+  archive is a backup of what was acquired, and Plex wants something else: the library's knowledge in the tags, and MP3
+  for Plexamp rather than FLAC. Putting either into the archive means retagging or transcoding the masters.
+
+  **The master holds what was acquired. A file gmuse can regenerate is a rendering, and a rendering is never read
+  back.** A rendering is `(device, query, policy)`: the Plex tree is one, and a work laptop's subset is another. It
+  keeps a manifest from target path to audio id, which makes it incremental and is the identity bridge #18 lacked, so a
+  play read back from Plex lands on the right recording by audio, not by name. Lossless is transcoded on render: a
+  9-minute FLAC took 3.8 s on one core, and every FLAC held is 24.8 hours of audio. Lossy is copied as it is.
+
+  **This revises #165's in-place retag, not its rule.** #165 still decides what to write. Writing it into a rendering
+  removes the corroboration loop, because nothing scans a rendering, and removes the cold read cache, because the
+  masters do not change. Retagging the masters stays possible later, with both costs.
+
+  **Two acquisitions of one recording are untouched.** The rule is about derivation, not redundancy. A FLAC beside a
+  purchased MP3 is two masters, and the rendering just prefers the FLAC. An MP3 that is provably a transcode of the FLAC
+  beside it is reported as a candidate to retire, and a person decides per album. At import, a pair is a notice pointing
+  at `replace`, not a refusal.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no

@@ -178,6 +178,7 @@ A transcode is the same performance, different bytes, and #132 built the edge th
   lossless-versus-lossy does not answer disposability, which is why the edge exists.
 
 A `Sync/` for a phone is a rendering of a _query_, made where it is used, and it is not part of the library tree.
+[`renderings.md`](renderings.md) is where outside is: the Plex tree, a subset device, and the transcode cache.
 
 ---
 
