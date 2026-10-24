@@ -6500,6 +6500,23 @@ Append here as decisions are made. Format: date, decision, rationale.
   stayed green because the librarian already selects no rows for one, so the check was removed and the test keeps the
   claim.
 
+- **2026-10-23** **A rated row shows its stars (#327).** After `:rate` the only sign was a status line that cleared in
+  four seconds, so rating down a `rating>=4` rule meant `:rate here` on each row to see what it already had. The stars
+  are drawn out of five, `★★★☆☆`, after the duration in views 1–3. An unrated row draws nothing.
+
+  **Not a `Field`.** That vocabulary is shared with the filter and the tree's levels, and every name in it is a property
+  of the row. The tree can group by it, and `:add-view` asks who authors it. A rating is neither: it is in what the
+  library has heard, keyed by recording, where the filter already reads `rating` through its own `HistoryField`. So the
+  template language has a small `Heard` beside `Field`, holding `{stars}` and `{rating}`, and a caller passes an `About`
+  with the row. `render` passes none and draws the row as unrated, so a template naming `{stars}` never refuses.
+
+  **Two drawers, so two places.** View 1 draws through `format.track`, whose default now ends `[  {stars}]`. Views 2 and
+  3 draw through `list::items`, which puts the stars in the same place. The status line, the transport panel and the
+  engine's `playback.get` format take `{stars}` too, but none of their defaults names it.
+
+  Ten targeted sabotages each fail a test. The picker's candidates and the transport panel's `next` line are wired the
+  same way and are not asserted separately.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no

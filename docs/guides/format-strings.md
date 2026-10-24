@@ -4,7 +4,7 @@ Two lines are yours to write: the now-playing description in the status bar, and
 
     [format]
     now_playing = "{artist}[ — {album}] — {title:.40}"
-    track = "{track:2}  {display_title}  {duration}"
+    track = "[{track:2}  ]{display_title}  {duration}[  {stars}]"
 
 ## Fields
 
@@ -16,6 +16,17 @@ Two lines are yours to write: the now-playing description in the status bar, and
 the album artist, or the artist, or "Unknown Artist".
 
 The same names work in filters and in `sort`. One vocabulary, three uses.
+
+## What you said about it
+
+    stars   ★★★☆☆, the rating out of five
+    rating  3, the same as a digit
+
+A rating belongs to the song, not the file, so every copy of a track shows the same stars. An unrated track has neither,
+so put them in a group: `[  {stars}]` leaves nothing behind on an unrated row. The tree's line ends that way unless you
+change it, and the flat lists in views 2 and 3 show the stars in the same place.
+
+These two are for lines only. A filter asks `rating>=4`; `stars` is just how a rating looks.
 
 ## Sizing
 
