@@ -6517,6 +6517,22 @@ Append here as decisions are made. Format: date, decision, rationale.
   Ten targeted sabotages each fail a test. The picker's candidates and the transport panel's `next` line are wired the
   same way and are not asserted separately.
 
+- **2026-10-23** **An attached play from a playlist programmes the playlist (#329).** Pressing `x` on a track in view 3
+  played that track, and then a shuffle of the whole library. The fact log showed it: a five-star track from `best`,
+  then an unrated Orbital track. `x` set `ActiveSource::Playlist`, but only `next.rs` reads that, and an attached view
+  does not use `next.rs`. The engine builds the programme from what `player.load` carries, which was the composed
+  library view. With nothing composed, that is the whole library.
+
+  **The playlist crosses, in its order.** `player.load` takes an optional `playlist`, the list's recordings in order.
+  The librarian's `Ask::Start` takes the resolved rows as `order`, and they are the programme: shuffled if the programme
+  is shuffled, cued from the picked track, and kept as `within` so a later rebuild stays inside them. A `within` set
+  could not do this alone, because a hand-ordered collection has an order and may hold one row twice. A recording the
+  library has no row for is left out, not refused, because a saved list can outlive a `forget`.
+
+  Ten targeted sabotages each fail a test, one at each hop: the view, the remote transport, the wire, the handler, the
+  control thread, the engine's queue, and four in the librarian. An attached `:scope` change rebuilds from the library
+  inside the playlist's rows, and so loses the list's order; that is not addressed here.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no
