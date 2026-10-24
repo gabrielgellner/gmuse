@@ -317,17 +317,32 @@ pub fn plan(l: &Librarian, root: &Path) -> Plan {
     plan_of(l, root, &l.every_copy())
 }
 
-/// The same, over a chosen set — what an import plans for the files it just
-/// took in, rather than for the whole library.
-pub fn plan_of(l: &Librarian, root: &Path, copies: &[Id<Encoding>]) -> Plan {
-    let mut wanted: BTreeMap<String, Vec<(Id<Encoding>, PathBuf)>> = BTreeMap::new();
-    let mut out = Plan::default();
+/// Where each of a set of copies belongs, relative to whatever root it lands
+/// under — the half of a plan that does not care where the file is now.
+#[derive(Debug, Default)]
+pub struct Layout {
+    /// Held on this device but with no row to render from, or not held here.
+    pub elsewhere: usize,
+    pub placed: Vec<(Id<Encoding>, PathBuf)>,
+    pub refused: Vec<(Id<Encoding>, Refused)>,
+}
+
+/// Lay out a set of copies, refusing a path two of them want.
+///
+/// **One notion of "contested" for a re-render and a rendering** (#332). A
+/// rendering writes the same tree into a different root, so two copies that
+/// would collide in the library collide there too, and a second check written
+/// for the rendering would be a second answer to one question.
+pub fn layout_of(l: &Librarian, copies: &[Id<Encoding>]) -> Layout {
+    let mut wanted: BTreeMap<String, usize> = BTreeMap::new();
+    let mut out = Layout::default();
+    let mut proposals = Vec::new();
 
     for copy in copies.iter().copied() {
-        let Some(here) = l.where_held(copy) else {
+        if l.where_held(copy).is_none() {
             out.elsewhere += 1;
             continue;
-        };
+        }
         match proposed(l, copy) {
             None => out.elsewhere += 1,
             Some(Err(refused)) => out.refused.push((copy, refused)),
@@ -335,24 +350,36 @@ pub fn plan_of(l: &Librarian, root: &Path, copies: &[Id<Encoding>]) -> Plan {
                 // **Case-insensitively**, because APFS and SMB fold case: two
                 // artists differing only in capitals are one directory, and
                 // finding that out during a move is finding out too late.
-                let key = folded(&at);
-                let from = PathBuf::from(here);
-                wanted.entry(key).or_default().push((copy, from));
-                out.moves.push((copy, PathBuf::new(), at));
+                *wanted.entry(folded(&at)).or_default() += 1;
+                proposals.push((copy, at));
             }
         }
     }
 
     // Second pass, now that every wanted path is known.
+    for (copy, at) in proposals {
+        if wanted.get(&folded(&at)).copied().unwrap_or(0) > 1 {
+            out.refused.push((copy, Refused::Contested(at)));
+        } else {
+            out.placed.push((copy, at));
+        }
+    }
+    out
+}
+
+/// The same, over a chosen set — what an import plans for the files it just
+/// took in, rather than for the whole library.
+pub fn plan_of(l: &Librarian, root: &Path, copies: &[Id<Encoding>]) -> Plan {
+    let layout = layout_of(l, copies);
+    let mut out = Plan {
+        elsewhere: layout.elsewhere,
+        refused: layout.refused,
+        ..Plan::default()
+    };
+
     let mut settled = 0;
     let mut moves = Vec::new();
-    for (copy, _, to) in std::mem::take(&mut out.moves) {
-        let key = folded(&to);
-        let holders = wanted.get(&key).map(Vec::len).unwrap_or(0);
-        if holders > 1 {
-            out.refused.push((copy, Refused::Contested(to)));
-            continue;
-        }
+    for (copy, to) in layout.placed {
         let from = l.where_held(copy).map(PathBuf::from).unwrap_or_default();
         // Folded, not byte-equal: a file already in the right place on a share
         // that decomposed its name would otherwise be proposed for a move on
