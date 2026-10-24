@@ -71,6 +71,18 @@ class Library:
         """
         ...
 
+    def statement(self, encodings: list[str]) -> list[dict[str, Any]]:
+        """What the library says about each copy's appearance — #335.
+
+        One dict per encoding id, in order: `title`, `artist`, `album`,
+        `album_artist`, `label`, `track`, `disc`, `discs`, `year`, `genres`,
+        `compilation`, `musicbrainz_recording`, `musicbrainz_release`, and the
+        source's `track_gain_db`, `track_peak`, `album_gain_db`, `album_peak`.
+        A field the library has no value for is absent, not empty; `{}` for a
+        copy with no row. Read from the projection, never from the file.
+        """
+        ...
+
     def layout(self, encodings: list[str]) -> list[dict[str, Any]]:
         """Where each copy belongs in a rendered tree, relative — #332.
 

@@ -13,11 +13,15 @@ import shutil
 import struct
 import wave
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from gmuse_tools import render as render_module
 from gmuse_tools.render import ENCODES, MANIFEST, Encode, Refused, Transcoding, check_length, ffmpeg, probe_ms, render
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class FakeLibrary:
@@ -39,6 +43,7 @@ class FakeLibrary:
         self.held = held
         self.recording: dict[str, str] = {}
         self.chosen: dict[frozenset[str], dict[str, Any]] = {}
+        self.said: dict[str, dict[str, Any]] = {}
 
     def rec(self, enc: str) -> str:
         """The recording a copy is of."""
@@ -58,6 +63,10 @@ class FakeLibrary:
         """Each copy's rendered path, uncontested."""
         return [{"encoding": e, "path": self.held[e][1]} for e in encodings]
 
+    def statement(self, encodings: list[str]) -> list[dict[str, Any]]:
+        """What the library says about each copy: its title, unless `said` says more."""
+        return [self.said.get(e, {"title": f"title of {e}"}) for e in encodings]
+
     def choose(self, groups: list[list[str]]) -> list[dict[str, Any]]:
         """The first of each group, or what `chosen` says."""
         out = []
@@ -74,6 +83,34 @@ class FakeLibrary:
             }
             out.append(self.chosen.get(frozenset(group), default))
         return out
+
+
+class Tags:
+    """A tagger that records what it was asked, standing in for mutagen.
+
+    The fixture's masters are not audio, so the real writer is `test_stated.py`'s
+    business; here the question is only what the renderer asks it to write.
+    """
+
+    def __init__(self) -> None:
+        """Record nothing yet."""
+        self.calls: list[tuple[str, dict[str, Any], Path | None]] = []
+        self.fail = False
+
+    def __call__(self, path: Path, statement: Mapping[str, Any], pictures_from: Path | None) -> None:
+        """Record the call, or fail as a file mutagen cannot read would."""
+        if self.fail:
+            msg = "not a format mutagen reads"
+            raise ValueError(msg)
+        self.calls.append((path.name, dict(statement), pictures_from))
+
+
+@pytest.fixture(autouse=True)
+def tags(monkeypatch: pytest.MonkeyPatch) -> Tags:
+    """Every render in this file tags through a recorder."""
+    recorder = Tags()
+    monkeypatch.setattr(render_module, "TAGGER", recorder)
+    return recorder
 
 
 @pytest.fixture
@@ -528,10 +565,80 @@ def test_ffmpeg_makes_an_mp3_as_long_as_its_source(tmp_path: Path) -> None:
         ffmpeg(src, tmp_path / "again.mp3", ENCODES["mp3-320"], 9000)
 
 
-
 def test_a_choice_that_does_not_say_lossless_is_refused(lib: FakeLibrary, tmp_path: Path) -> None:
     """A stale `gmuse_core` omits `lossless`, and absent must not read as lossy."""
     lib.chosen[frozenset({"e1"})] = {"encoding": "e1", "locator": str(lib.held["e1"][0]), "tied": []}
     render(lib, tmp_path / "copying", None, write=False)  # instrument: without a policy it does not matter
     with pytest.raises(Refused, match="which copies are lossless"):
         render(lib, tmp_path / "PlexMusic", None, write=False, encode="mp3-320")
+
+
+def test_every_file_is_tagged_with_its_statement_before_it_lands(lib: FakeLibrary, tmp_path: Path, tags: Tags) -> None:
+    """A file lands tagged; the temporary keeps its extension, for mutagen."""
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert len(files_in(target)) == 2, "instrument: both files landed"
+    names = sorted(name for name, _, _ in tags.calls)
+    assert names == [".01 Elephant Gun.rendering.mp3", ".05 Lush.rendering.flac"]
+    assert {s["title"] for _, s, _ in tags.calls} == {"title of e1", "title of e2"}
+    assert all(p is None for _, _, p in tags.calls), "a copy has its own pictures"
+
+
+def test_a_transcode_is_tagged_with_its_masters_pictures(lib: FakeLibrary, tmp_path: Path, tags: Tags) -> None:
+    """The encode carries audio only, so the master is where the art comes from."""
+    render(
+        lib,
+        tmp_path / "PlexMusic",
+        None,
+        write=True,
+        encode="mp3-320",
+        transcoding=Transcoding(tmp_path / "c", Encoder()),
+    )
+    pictures = {name: p for name, _, p in tags.calls}
+    assert pictures[".05 Lush.rendering.mp3"] == lib.held["e1"][0]
+    assert pictures[".01 Elephant Gun.rendering.mp3"] is None
+
+
+def test_a_changed_statement_rewrites_that_file_and_no_other(lib: FakeLibrary, tmp_path: Path, tags: Tags) -> None:
+    """The tag hash is in the manifest row, so a retitle is a rewrite of exactly one file."""
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert len(tags.calls) == 2, "instrument: the first render tagged both"
+
+    lib.said["e1"] = {"title": "Lush 3–4 (retitled)"}
+    done = render(lib, target, None, write=True)
+    assert done.written == 1
+    assert tags.calls[-1][1]["title"] == "Lush 3–4 (retitled)"
+
+
+def test_a_file_that_cannot_be_tagged_does_not_land(lib: FakeLibrary, tmp_path: Path, tags: Tags) -> None:
+    """An untagged copy is not a rendering of what the library says."""
+    tags.fail = True
+    target = tmp_path / "PlexMusic"
+    done = render(lib, target, None, write=True)
+    assert len(done.failed) == 2, "instrument: both were tried"
+    assert files_in(target) == set(), "and neither landed, nor left a temporary"
+    assert json.loads((target / MANIFEST).read_text())["files"] == {}
+
+
+def test_a_dry_run_tags_nothing(lib: FakeLibrary, tmp_path: Path, tags: Tags) -> None:
+    """Tagging is writing."""
+    done = render(lib, tmp_path / "PlexMusic", None, write=False)
+    assert done.written == 2, "instrument: the dry run planned both"
+    assert tags.calls == []
+
+
+def test_a_library_that_cannot_state_is_refused(lib: FakeLibrary, tmp_path: Path) -> None:
+    """A `gmuse_core` built before #335 has no `statement`, and an untagged rendering is not one."""
+
+    class Stale:
+        """The library without `statement`, as an extension built before #335 is."""
+
+        def __getattr__(self, name: str) -> object:
+            if name == "statement":
+                raise AttributeError(name)
+            return getattr(lib, name)
+
+    render(lib, tmp_path / "fine", None, write=False)  # instrument: the same library, stating, is fine
+    with pytest.raises(Refused, match="cannot say what the library states"):
+        render(Stale(), tmp_path / "PlexMusic", None, write=False)  # type: ignore[arg-type]

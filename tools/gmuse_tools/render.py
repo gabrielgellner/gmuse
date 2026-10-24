@@ -1,10 +1,10 @@
-"""Render a query of the library into a target directory — #332, #333, #334.
+"""Render a query of the library into a target directory — #332, #333, #334, #335.
 
 `docs/design/renderings.md` is the design. A rendering is **made from the
 masters and the log and can be made again**: the tree Plex reads, a laptop's
-few albums. It copies the best copy of each track this device holds, and
-transcodes the lossless ones when the target asks for it. It writes no tags
-yet (#335).
+few albums. It copies the best copy of each track this device holds,
+transcodes the lossless ones when the target asks for it, and writes what the
+library states into every file's tags (`stated.py`) — never into a master.
 
 ```
 gmuse-tools render TARGET [--query FILTER] [--encode mp3-320|mp3-v0|copy] [--write]
@@ -45,6 +45,7 @@ which is why this is a tool and not an operation (#200).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -56,7 +57,9 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final
 
 import typer
+from mutagen import MutagenError
 
+from gmuse_tools import stated
 from gmuse_tools.bronze import cache_dir
 from gmuse_tools.library import open_library
 
@@ -135,6 +138,8 @@ class Wanted:
     #: The policy this file is encoded to, `None` where it is a copy.
     encode: Encode | None = None
     length_ms: int | None = None
+    #: What the library says about it — written into its tags (#335).
+    statement: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +175,15 @@ class Plan:
     ties: list[tuple[str, str, list[str]]] = field(default_factory=list)
 
 
+def tag_with_mutagen(path: Path, statement: Mapping[str, Any], pictures_from: Path | None) -> None:
+    """The tagger a rendering uses: `stated.write`."""
+    stated.write(path, statement, pictures_from=pictures_from)
+
+
+#: Looked up when a run starts, so a test can stand another in its place.
+TAGGER: Final = tag_with_mutagen
+
+
 @dataclass
 class Job:
     """One run against one target: where, as what, holding what, encoding with what."""
@@ -179,6 +193,7 @@ class Job:
     #: The manifest's files, updated as the run writes and deletes.
     held: dict[str, dict[str, str]]
     transcoding: Transcoding | None = None
+    tag: Callable[[Path, Mapping[str, Any], Path | None], None] = tag_with_mutagen
 
 
 @dataclass
@@ -408,6 +423,20 @@ def one_file(path: str, c: Mapping[str, Any], encode: Encode | None) -> Wanted:
     )
 
 
+def with_statements(files: list[Wanted], statement: Callable[[list[str]], list[dict[str, Any]]]) -> list[Wanted]:
+    """Give each file what the library says about its copy, and its hash to the manifest row.
+
+    **The hash is in the row**, so a retitle or an artist merge rewrites
+    exactly the files whose statement it changed and no other — the row is
+    compared whole (`plan`).
+    """
+    said = statement([f.row["encoding"] for f in files])
+    return [
+        dataclasses.replace(f, statement=s, row={**f.row, "tags": stated.digest(s)})
+        for f, s in zip(files, said, strict=True)
+    ]
+
+
 def folded(path: str) -> str:
     """A path as a case- and form-folding filesystem matches it."""
     return unicodedata.normalize("NFC", path).casefold()
@@ -560,17 +589,24 @@ def carry_out(job: Job, p: Plan, *, write: bool) -> Done:
 
 
 def write_one(job: Job, f: Wanted, out: Done) -> bool:
-    """Put one file in place — from the master, or from the cache for an encode."""
+    """Put one file in place — from the master, or from the cache for an encode — and tag it.
+
+    **Tagged before it lands**, on the temporary: the path holds the old file
+    or the new one, tagged, and never a copy waiting for its tags. The
+    temporary keeps the real extension, because mutagen tells an MP3 partly
+    by its name.
+    """
     at = job.target / f.path
     source = (job.transcoding.at(f) if job.transcoding else None) or f.source
+    tmp = at.with_name(f".{at.stem}.rendering{at.suffix}")
     try:
         at.parent.mkdir(parents=True, exist_ok=True)
-        # **Through a temporary and a rename**, so the path holds the old
-        # file or the new one and never part of either.
-        tmp = at.with_name(f".{at.name}.rendering")
         shutil.copy2(source, tmp)
+        if f.statement is not None:
+            job.tag(tmp, f.statement, f.source if f.encode is not None else None)
         tmp.replace(at)
-    except OSError as e:
+    except (OSError, ValueError, MutagenError) as e:
+        tmp.unlink(missing_ok=True)
         out.failed.append((f.path, str(e)))
         return False
     job.held[f.path] = f.row
@@ -627,12 +663,15 @@ def render(  # noqa: PLR0913 — the command's options, one for one
     """Plan a rendering of `query` into `target`, say what it would do, and do it if told."""
     check_outside(target, lib.roots)
     manifest = load_manifest(target)
-    job = Job(target, settle(manifest, query, encode), dict(manifest["files"]) if manifest else {}, transcoding)
+    job = Job(target, settle(manifest, query, encode), dict(manifest["files"]) if manifest else {}, transcoding, TAGGER)
 
     rows = lib.query(job.settings.query, every_copy=True)
     on_device = list(dict.fromkeys(r["encoding"] for r in rows if r.get("encoding") and r.get("locator")))
     files, base = wanted(rows, lib.layout(on_device), lib.choose, ENCODES.get(job.settings.encode))
-    p = plan(target, files, job.held, base)
+    if not hasattr(lib, "statement"):
+        msg = "gmuse_core cannot say what the library states about a copy; rebuild it (`just wheel-dev`)"
+        raise Refused(msg)
+    p = plan(target, with_statements(files, lib.statement), job.held, base)
     report(job, p)
 
     done = carry_out(job, p, write=write)
