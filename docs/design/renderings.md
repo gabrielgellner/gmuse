@@ -87,6 +87,18 @@ transcode happens where the FLAC already is and the MP3 travels.
 FLAC is encoded once however many targets want it. Changing the encoder or its settings changes the key, which
 re-renders everything that used it — the right answer, since the old files really are a different encoding.
 
+**Built (#334).** A target names its policy — `--encode mp3-320`, `mp3-v0` or `copy` — and remembers it like its query.
+The key is the encoder and its settings, **not its version**: an upgraded LAME makes the same kind of file, and keying
+on it would re-render the library on every `brew upgrade`. The cache is `~/Library/Caches/gmuse/transcodes`, beside
+`bronze`'s, on the machine that renders: a device fact, what a backup skips, and never `data_dir`, which the archive
+copies. Each encode is checked against its source's length with `ffprobe`; a short one fails and nothing lands. An
+encode can collide where the layout saw nothing — `05 Lush.flac` becomes `05 Lush.mp3` — so two files wanting one final
+path are both refused.
+
+**Measured again, 2026-10-24, on the whole library**: 314 lossless copies, 25.9 hours, encoded to MP3 320 in **210 s
+wall** across ten workers, none failing their length check, 3.47 GiB. That is slower than the single-file estimate above
+— efficiency cores, an `ffprobe` per file, and the disk — and still a one-off: a second pass is all cache hits.
+
 ---
 
 ## 4. The manifest
@@ -208,10 +220,10 @@ declared operation like any other import, never by a renderer writing to the log
 
 - **The Plex source.** A play or a rating from Plex needs a `Source` to stand at, and whether that is a new rung or an
   existing one with a device is a domain-model question.
-- **The encoder setting.** 320 kbps CBR is what was asked for; LAME V0 is smaller at the same transparency. Either is a
-  cache key, so the choice can change later at the cost of one re-render.
-- **Where the transcode cache lives.** On the NAS beside the renderings, so every target shares it, or on the machine
-  that renders. §3's measurement says the CPU is not the constraint either way.
+- ~~**The encoder setting.**~~ Settled in #334: `mp3-320` for Plex, as asked, with `mp3-v0` available. Either is a cache
+  key, so the choice can change later at the cost of one re-render.
+- ~~**Where the transcode cache lives.**~~ Settled in #334: on the machine that renders, in the tools' cache directory.
+  The FLAC is there, and the network is the slower half (§3).
 - **Tracks on no release.** `storage-layout.md` gives them no album level, and Plex files a track with no album as
   "Unknown Album". The rendering could leave the tag empty or say so; it must not invent a release.
 - **A target's subset changing.** Narrowing a work laptop's query deletes from that device. That is what a rendering

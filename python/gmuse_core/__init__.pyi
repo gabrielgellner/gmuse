@@ -65,8 +65,9 @@ class Library:
         A group is the encoding ids that compete for one place: the copies of
         one recording that would land in one folder. The best this device
         holds, in the order a view ranks copies by. One dict per group, in
-        order: `encoding`, its `locator`, `tied` (the copies only an id
-        separated from it) and `tied_at` — or `{}` where none is held here.
+        order: `encoding`, its `locator`, whether it is `lossless`, its
+        `length_ms`, `tied` (the copies only an id separated from it) and
+        `tied_at` — or `{}` where none is held here.
         """
         ...
 

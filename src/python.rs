@@ -168,6 +168,12 @@ impl Library {
             if let Some(held) = library.encodings.best_held(&candidates, self.device) {
                 row.set_item("encoding", held.best.id.to_string())?;
                 row.set_item("locator", library.where_held(held.best.id))?;
+                // **Whether a rendering may transcode it** (#334): lossless
+                // only, and the format's to say, not the extension's.
+                row.set_item("lossless", held.best.format.is_lossless())?;
+                // What a transcode is checked against: an encode that came
+                // back short is a broken file, not a smaller one.
+                row.set_item("length_ms", held.best.length.as_millis() as u64)?;
                 let tied: Vec<String> = held.tied.iter().map(ToString::to_string).collect();
                 row.set_item("tied", tied)?;
                 // Where each one is, because a tie is reported to a person,
