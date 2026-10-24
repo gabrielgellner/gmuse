@@ -59,13 +59,26 @@ class Library:
         """
         ...
 
+    def choose(self, groups: list[list[str]]) -> list[dict[str, Any]]:
+        """The copy each group's rendering is made from — #333.
+
+        A group is the encoding ids that compete for one place: the copies of
+        one recording that would land in one folder. The best this device
+        holds, in the order a view ranks copies by. One dict per group, in
+        order: `encoding`, its `locator`, `tied` (the copies only an id
+        separated from it) and `tied_at` — or `{}` where none is held here.
+        """
+        ...
+
     def layout(self, encodings: list[str]) -> list[dict[str, Any]]:
         """Where each copy belongs in a rendered tree, relative — #332.
 
         One dict per encoding id, in the order given: `path` where it belongs,
         or `refused` saying why there is nowhere, or `elsewhere` for a copy this
         device does not hold. A path two of the copies want is refused for
-        both, because this is the function a re-render uses.
+        both, because this is the function a re-render uses — and carries
+        `contested` and the `path`, so a caller that can resolve the contest
+        knows where it is.
         """
         ...
 

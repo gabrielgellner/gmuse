@@ -59,15 +59,24 @@ stale against it.
 
 Four decisions per recording, made in this order.
 
-1. **Which encoding.** The best one the library holds, preferring lossless. Where two acquired copies tie, the renderer
-   picks one and **records the pick in the manifest** (§4), so a report can say which copy a target got. It never
-   retires the other — choosing for a target and choosing for the library are different decisions.
+1. **Which encoding — per place, not per recording** (#333). A place is the rendered path without its extension: a FLAC
+   and an MP3 of one track compete for one, and the best this device holds wins, by `canonical_key` — the order a view
+   ranks copies by (#325). **One recording on an album and on a compilation is two places**, and so is one recording
+   twice on one album (`Furious Angels` holds an instrumental at 1-08 and 2-06); choosing per recording left a hole in
+   one of them, and Plex shows albums whole. Two copies of one recording that the layout calls contested for one path
+   are one place too, and the better is rendered; two _recordings_ wanting one path stay refused. Where only an id
+   separates the copies, the pick is **reported as a tie**, and the manifest records which copy each path came from. It
+   never retires the other — choosing for a target and choosing for the library are different decisions.
 2. **Whether to transcode.** **Lossless only**, to the target's lossy format (MP3 320 for Plexamp). A lossy master is
    copied as it is: transcoding Vorbis to MP3 loses twice for nothing, and a client that cannot play the source has the
    server transcode it on the fly, which is cheap for audio.
 3. **The tags.** Written from the library, not copied from the master (§5).
 4. **The path.** `storage-layout.md` §2's layout, rendered from the library. The masters do not conform yet; a rendering
    can, today, because it is generated whole.
+
+**Measured, 2026-10-24**, on the whole library: 8,440 places from the 8,523 copies held here, no contest left refused
+and no tie. Choosing per recording had rendered 8,081 and reported 17 ties, every one of them an album and a
+compilation.
 
 **Measured, 2026-10-24.** One 9-minute FLAC to MP3 320 with ffmpeg/LAME took **3.8 s on one core**, about 140× real
 time. Every FLAC the library holds is **24.8 hours** of audio — about eleven minutes of one core, a minute or two across

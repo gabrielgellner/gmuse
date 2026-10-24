@@ -19,21 +19,44 @@ from gmuse_tools.render import MANIFEST, Refused, render
 class FakeLibrary:
     """What `render` asks of `gmuse_core.Library`, over files on disk.
 
-    `held` maps encoding → (source file, rendered path). A query is a set of
-    encodings, or everything.
+    `held` maps encoding → (source file, rendered path). Each encoding is its
+    own recording, `rec-<encoding>`, unless `recording` says otherwise — which
+    is how a test holds one recording twice. A query is a set of encodings, or
+    everything.
+
+    `choose` keeps the first of each group in `held`'s order. The ranking is
+    `canonical_key`'s and is tested in Rust; here `chosen` overrides the answer
+    for a group, keyed by its encodings, so a test can make it anything.
     """
 
     def __init__(self, roots: list[Path], held: dict[str, tuple[Path, str]]) -> None:
         self.roots = roots
         self.held = held
+        self.recording: dict[str, str] = {}
+        self.chosen: dict[frozenset[str], dict[str, Any]] = {}
 
-    def query(self, spec: str | None = None) -> list[dict[str, Any]]:
+    def rec(self, enc: str) -> str:
+        return self.recording.get(enc, f"rec-{enc}")
+
+    def query(self, spec: str | None = None, *, every_copy: bool = False) -> list[dict[str, Any]]:
+        assert every_copy, "a rendering chooses among every copy, so it must ask for every copy"
         wanted = set(spec.split(",")) if spec else set(self.held)
-        return [{"encoding": e, "locator": str(src)} for e, (src, _) in self.held.items() if e in wanted]
+        return [
+            {"recording": self.rec(e), "encoding": e, "locator": str(src)}
+            for e, (src, _) in self.held.items()
+            if e in wanted
+        ]
 
     def layout(self, encodings: list[str]) -> list[dict[str, Any]]:
         return [{"encoding": e, "path": self.held[e][1]} for e in encodings]
 
+    def choose(self, groups: list[list[str]]) -> list[dict[str, Any]]:
+        out = []
+        for group in groups:
+            first = min(group, key=list(self.held).index)
+            default = {"encoding": first, "locator": str(self.held[first][0]), "tied": []}
+            out.append(self.chosen.get(frozenset(group), default))
+        return out
 
 @pytest.fixture
 def lib(tmp_path: Path) -> FakeLibrary:
@@ -180,6 +203,138 @@ def test_a_layout_that_disowns_copies_the_query_located_is_refused(lib: FakeLibr
         return [{"encoding": e, "elsewhere": True} for e in encodings]
 
     lib.layout = disowning  # type: ignore[method-assign]
-    with pytest.raises(Refused, match="layout says they are not"):
+    with pytest.raises(Refused, match="and then that they are not"):
         render(lib, target, None, write=True)
     assert len(files_in(target)) == 2, "and nothing was deleted on its word"
+
+
+def hold_twice(lib: FakeLibrary, enc: str, rel: str, body: bytes, *, of: str) -> Path:
+    """A second copy of `of`'s recording, at `rel` when rendered."""
+    src = lib.roots[0] / "masters" / f"{enc}.bin"
+    src.write_bytes(body)
+    lib.held[enc] = (src, rel)
+    lib.recording[enc] = lib.rec(of)
+    return src
+
+
+def test_two_copies_of_one_track_render_as_one(lib: FakeLibrary, tmp_path: Path) -> None:
+    """A FLAC and an MP3 of one track in one album are one appearance."""
+    flac_at = lib.held["e1"][1]
+    mp3_at = flac_at.removesuffix(".flac") + ".mp3"
+    hold_twice(lib, "e1-mp3", mp3_at, b"the mp3", of="e1")
+
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    on_disk = files_in(target)
+    assert flac_at in on_disk, "instrument: the album rendered"
+    assert mp3_at not in on_disk, "the other copy of that place is not rendered beside it"
+
+
+def test_one_recording_on_two_albums_renders_on_both(lib: FakeLibrary, tmp_path: Path) -> None:
+    """An album and a compilation are two appearances, and Plex shows both
+    whole — choosing one copy per *recording* would leave a hole in one."""
+    album = lib.held["e1"][1]
+    sampler = "Various Artists/Diversions Sampler/03 Lush.mp3"
+    hold_twice(lib, "e1-sampler", sampler, b"the sampler's copy", of="e1")
+
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert {album, sampler} <= files_in(target)
+
+
+def test_the_file_comes_from_the_copy_chosen_here(lib: FakeLibrary, tmp_path: Path) -> None:
+    """The renderer copies what `choose` named, whichever copy that is."""
+    flac_at = lib.held["e1"][1]
+    mp3_at = flac_at.removesuffix(".flac") + ".mp3"
+    src = hold_twice(lib, "e1-mp3", mp3_at, b"the copy chosen", of="e1")
+    assert src.read_bytes() != lib.held["e1"][0].read_bytes(), "instrument: the two copies differ"
+    lib.chosen[frozenset({"e1", "e1-mp3"})] = {"encoding": "e1-mp3", "locator": str(src), "tied": []}
+
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert (target / mp3_at).read_bytes() == b"the copy chosen"
+    assert flac_at not in files_in(target)
+
+
+def test_a_tie_is_reported_and_still_rendered(
+    lib: FakeLibrary, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = str(lib.held["e1"][0])
+    lib.chosen[frozenset({"e1"})] = {"encoding": "e1", "locator": src, "tied": ["e9"], "tied_at": ["/m/e9.mp3"]}
+
+    target = tmp_path / "PlexMusic"
+    done = render(lib, target, None, write=False)
+    out = capsys.readouterr().out
+    assert done.written == 2, "instrument: the tie did not stop the rendering"
+    assert f"tie  {lib.held['e1'][1]}\n         took  {src}\n         over  /m/e9.mp3" in out
+    assert "1 chosen by id alone" in out
+
+
+def test_a_copy_the_query_located_and_choose_disowned_is_refused(lib: FakeLibrary, tmp_path: Path) -> None:
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert len(files_in(target)) == 2, "instrument: a full rendering exists to be lost"
+
+    lib.chosen[frozenset({"e2"})] = {}
+    with pytest.raises(Refused, match="and then that they are not"):
+        render(lib, target, None, write=True)
+    assert len(files_in(target)) == 2
+
+
+def test_copies_of_one_recording_contesting_a_path_are_a_choice(lib: FakeLibrary, tmp_path: Path) -> None:
+    """The layout refuses a path two copies want, which is right for moving
+    files and wrong here when both are one recording: that is one place, and
+    the better copy is rendered."""
+    path = lib.held["e1"][1]
+    hold_twice(lib, "e1-again", path, b"another copy", of="e1")
+    contested = lib.layout
+
+    def contesting(encodings: list[str]) -> list[dict[str, Any]]:
+        rows = contested(encodings)
+        for r in rows:
+            if r["encoding"] in {"e1", "e1-again"}:
+                r.update(refused=f"two copies want {path}", contested=True)
+        return rows
+
+    lib.layout = contesting  # type: ignore[method-assign]
+    target = tmp_path / "PlexMusic"
+    done = render(lib, target, None, write=True)
+    assert path in files_in(target)
+    assert done.written == 2, "instrument: both places rendered, the contested one once"
+
+
+def test_two_recordings_contesting_a_path_stay_refused(
+    lib: FakeLibrary, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = lib.held["e1"][1]
+    src = lib.roots[0] / "masters" / "other.bin"
+    src.write_bytes(b"a different recording")
+    lib.held["other"] = (src, path)
+    contested = lib.layout
+
+    def contesting(encodings: list[str]) -> list[dict[str, Any]]:
+        rows = contested(encodings)
+        for r in rows:
+            if r["encoding"] in {"e1", "other"}:
+                r.update(refused=f"two copies want {path}", contested=True)
+        return rows
+
+    lib.layout = contesting  # type: ignore[method-assign]
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert files_in(target) == {lib.held["e2"][1]}, "instrument: the uncontested file rendered"
+    assert "two recordings want" in capsys.readouterr().out
+
+
+def test_one_recording_twice_on_one_album_renders_twice(lib: FakeLibrary, tmp_path: Path) -> None:
+    """A disc really can play one recording twice. Grouping by folder kept
+    one of `Furious Angels`' two slots for the same instrumental."""
+    first = "Rob Dougan/Furious Angels/1-08 Instrumental.mp3"
+    second = "Rob Dougan/Furious Angels/2-06 Instrumental.mp3"
+    src, _ = lib.held["e1"]
+    lib.held["e1"] = (src, first)
+    hold_twice(lib, "e1-disc2", second, b"disc two", of="e1")
+
+    target = tmp_path / "PlexMusic"
+    render(lib, target, None, write=True)
+    assert {first, second} <= files_in(target)

@@ -40,13 +40,13 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final
 
 import typer
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     import gmuse_core
 
@@ -91,6 +91,9 @@ class Plan:
     refused: list[tuple[str, str]] = field(default_factory=list)
     #: Recordings in the query this device holds no copy of.
     elsewhere: int = 0
+    #: `(path, chosen file, other files)` where only an id chose between held copies —
+    #: a pick, not a judgement, so it is reported and the library is not told.
+    ties: list[tuple[str, str, list[str]]] = field(default_factory=list)
 
 
 @dataclass
@@ -149,42 +152,104 @@ def check_outside(target: Path, roots: Iterable[Path]) -> None:
             raise Refused(msg)
 
 
-def wanted(rows: Iterable[Mapping[str, Any]], layout: Iterable[Mapping[str, Any]]) -> tuple[list[Wanted], Plan]:
-    """Join the query's rows to the layout: what this rendering should hold.
+def place(recording: str, path: str) -> tuple[str, str]:
+    """The one place in a rendering that copies of a recording compete for.
+
+    **The rendered path without its extension.** A FLAC and an MP3 of one
+    track on one album differ only there, so they are one place and the
+    better is kept. Two track numbers are two places even on one album — a
+    disc really can play one recording twice (`Furious Angels` holds one
+    instrumental at 1-08 and 2-06) — and grouping by folder dropped one.
+    """
+    return recording, str(PurePosixPath(path).with_suffix(""))
+
+
+def wanted(
+    rows: Iterable[Mapping[str, Any]],
+    layout: Iterable[Mapping[str, Any]],
+    choose: Callable[[list[list[str]]], list[dict[str, Any]]],
+) -> tuple[list[Wanted], Plan]:
+    """Join the query, the layout and the choice of copy: what this rendering should hold.
+
+    `rows` is every copy the query matched (`every_copy=True`), and `layout`
+    is where each held one would land.
+
+    **What competes is one place, not one recording** (#333). The copies of a
+    recording that would land in one [`place`] — a FLAC and an MP3 of one
+    track — are one appearance, and `choose` keeps the best this device
+    holds. The same recording on an album and on a compilation, or twice on
+    one album, is two places, and both are rendered: an album with a track
+    missing is not a rendering of that album.
 
     Returns the files wanted, and a plan carrying only what the join itself
-    found — refusals and recordings held elsewhere.
+    found — refusals, ties, and recordings held elsewhere.
     """
-    located: dict[str, str] = {}
     out = Plan()
-    for row in rows:
-        enc, at = row.get("encoding"), row.get("locator")
-        if not enc or not at:
-            out.elsewhere += 1
-            continue
-        located.setdefault(enc, at)
+    recording: dict[str, str] = {}
+    held: set[str] = set()
+    for r in rows:
+        enc = r.get("encoding")
+        if enc and r.get("recording"):
+            recording[enc] = r["recording"]
+            if r.get("locator"):
+                held.add(enc)
+    unheld = {recording[e] for e in recording} - {recording[e] for e in held}
+    out.elsewhere = len(unheld) + sum(1 for r in rows if not r.get("encoding"))
 
-    files: list[Wanted] = []
+    places: dict[tuple[str, str], list[str]] = {}
+    at: dict[str, str] = {}
+    contested: dict[str, list[str]] = {}
     disagree = 0
     for placed in layout:
         enc = placed["encoding"]
-        if "path" in placed:
-            files.append(Wanted(placed["path"], {"encoding": enc}, Path(located[enc])))
+        if placed.get("contested"):
+            contested.setdefault(placed["path"], []).append(enc)
+        elif "path" in placed:
+            at[enc] = placed["path"]
+            places.setdefault(place(recording[enc], placed["path"]), []).append(enc)
         elif "refused" in placed:
             out.refused.append((enc, placed["refused"]))
-        elif enc in located:
-            disagree += 1
         else:
-            out.elsewhere += 1
+            # The query located it here and the layout says it is not.
+            disagree += 1
 
-    # **The query and the layout answer "is it here" by different routes**, so
-    # they can disagree, and when they do the rendering is wrong in silence:
-    # the first `layout` built its librarian without naming this device and
-    # called every copy on the machine "held elsewhere" — an empty rendering,
-    # and a `--write` that would have deleted all of a full one.
+    # **A contest between copies of one recording is the choice, not a
+    # conflict.** Two of its copies wanting one path are one appearance — the
+    # library's `Enya` and `The Celts` copies of one track, here, fourteen
+    # times — and the better is rendered. Copies of two recordings wanting
+    # one path are a real collision, and both stay refused.
+    for path, encs in contested.items():
+        if len({recording[e] for e in encs}) == 1:
+            for e in encs:
+                at[e] = path
+            places.setdefault(place(recording[encs[0]], path), []).extend(encs)
+        else:
+            out.refused.extend((e, f"two recordings want {path}") for e in encs)
+
+    groups = list(places.values())
+    files: list[Wanted] = []
+    # `strict`: one answer per group, or the pairing below is a guess.
+    for _, c in zip(groups, choose(groups), strict=True):
+        enc, locator = c.get("encoding"), c.get("locator")
+        if not enc or not locator:
+            # Every copy in the group was located here, so "none held" is the
+            # library contradicting itself.
+            disagree += 1
+            continue
+        path = at[enc]
+        files.append(Wanted(path, {"encoding": enc}, Path(locator)))
+        if c.get("tied"):
+            others = [where or e for where, e in zip(c.get("tied_at") or [], c["tied"], strict=False)]
+            out.ties.append((path, locator, others or list(c["tied"])))
+
+    # **Three routes to "is it here"**, so they can disagree, and when they do
+    # the rendering is wrong in silence: the first `layout` built its librarian
+    # without naming this device and called every copy on the machine "held
+    # elsewhere" — an empty rendering, and a `--write` that would have deleted
+    # all of a full one.
     if disagree:
         msg = (
-            f"the query says {disagree} copies are on this device and the layout says they are not; "
+            f"the library says {disagree} copies are on this device and then that they are not; "
             "a rendering built on that would be missing them. Rebuild gmuse_core (`just wheel-dev`)"
         )
         raise Refused(msg)
@@ -282,9 +347,9 @@ def render(lib: gmuse_core.Library, target: Path, query: str | None, *, write: b
     elif manifest and query != was:
         print(f"query changes: {was!r} → {query!r}")
 
-    rows = lib.query(query)
-    encodings = list(dict.fromkeys(r["encoding"] for r in rows if r.get("encoding")))
-    files, base = wanted(rows, lib.layout(encodings))
+    rows = lib.query(query, every_copy=True)
+    on_device = list(dict.fromkeys(r["encoding"] for r in rows if r.get("encoding") and r.get("locator")))
+    files, base = wanted(rows, lib.layout(on_device), lib.choose)
     p = plan(target, files, held, base)
 
     print(f"rendering {query or 'the whole library'} into {target}")
@@ -297,6 +362,15 @@ def render(lib: gmuse_core.Library, target: Path, query: str | None, *, write: b
         print(f"  not ours, left alone  {path}")
     for enc, why in p.refused:
         print(f"  refused  {enc}  {why}")
+    if p.ties:
+        # **Said, not settled.** Which of two equal copies to keep is a
+        # question for a person (`CLAUDE.md`, reported, never decided); the
+        # rendering needs one and takes the id's, and neither is retired.
+        print(f"  {len(p.ties)} chosen by id alone among equal copies held here:")
+        for path, took, others in p.ties:
+            print(f"  tie  {path}\n         took  {took}")
+            for other in others:
+                print(f"         over  {other}")
 
     done = carry_out(target, p, held, query, write=write)
     for path, why in done.failed:
