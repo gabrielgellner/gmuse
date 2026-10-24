@@ -2785,6 +2785,66 @@ fn a_late_client_can_ask_what_is_playing() {
     );
 }
 
+/// **A status bar's `{stars}` is the recording's rating** — #327.
+///
+/// The engine renders `playback.get`'s `format` itself, from its own fold, so the rating has
+/// to reach that render as well as the player's. Unrated first, as the instrument: a line
+/// that always carried stars would pass the second half.
+#[test]
+fn a_status_bar_template_shows_the_rating() {
+    let (engine, recording) = start_with_a_track("stars");
+    let client = Client::connect(&engine.socket, "bar", "0").expect("connect");
+    client
+        .call(
+            "player.load",
+            Some(serde_json::json!({ "recording": recording })),
+        )
+        .expect("load");
+    let line = || {
+        client
+            .call(
+                "playback.get",
+                Some(serde_json::json!({ "format": "{title}[ {stars}]" })),
+            )
+            .expect("ask")["rendered"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while line().is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let unrated = line();
+    assert!(
+        !unrated.is_empty(),
+        "nothing loaded, so nothing was rendered"
+    );
+    assert!(
+        !unrated.contains('★'),
+        "an unrated track drew stars: {unrated:?}"
+    );
+
+    let song: gmuse::model::id::Id<gmuse::model::entity::Recording> =
+        recording.parse().expect("a recording id");
+    let mut scratch = gmuse::model::instance::Instance::new(gmuse::model::id::Id::derived(b"bar"));
+    scratch.rate(1_000, song, Some(3));
+    let facts: Vec<_> = scratch.records().iter().map(|r| &r.fact).collect();
+    client
+        .call("library.edit", Some(serde_json::json!({ "facts": facts })))
+        .expect("the engine takes it");
+
+    let mut rated = String::new();
+    while std::time::Instant::now() < deadline + Duration::from_secs(10) {
+        rated = line();
+        if rated.contains('★') {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(rated, format!("{unrated} ★★★☆☆"));
+}
+
 /// **Two clients, `StaleVersion` on the queue** — #217's last Done-when line,
 /// and #232 is what made it expressible.
 ///

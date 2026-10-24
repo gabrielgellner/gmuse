@@ -156,6 +156,8 @@ pub struct RowStyle<'a> {
     /// The search pattern in force, so a row can paint what it matched.
     /// `None` once `<Esc>` has cleared it, as vim's `nohlsearch` does.
     pub needle: Option<&'a crate::text::Needle>,
+    /// What the library has heard, so a rated row shows its stars (#327). `None` draws none.
+    pub heard: Option<&'a crate::projection::heard::Heard>,
 }
 
 /// The distance gutter for one row.
@@ -255,6 +257,15 @@ pub fn items<'a>(
                     },
                     body,
                 ));
+                // **The stars after the length, as view 1's default template puts them**
+                // (#327): an unrated row ends where it did, so the column only appears
+                // where there is something in it.
+                if let Some(stars) = style
+                    .heard
+                    .and_then(|heard| super::about_row(heard, lib, *id).stars())
+                {
+                    spans.push(Span::styled(format!("  {stars}"), body));
+                }
                 ListItem::new(Line::from(spans))
             }
         })

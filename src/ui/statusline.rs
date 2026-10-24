@@ -76,7 +76,10 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
             theme.get(Role::StatusPlaying),
         ));
         spans.push(Span::styled(
-            ui.now_playing.render(&track.listed()),
+            ui.now_playing.render_about(
+                &track.listed(),
+                super::about_row(&ui.listened, ctx.library, id),
+            ),
             theme.get(Role::StatusText),
         ));
         let position = ctx.player.map(|p| p.position()).unwrap_or(Duration::ZERO);

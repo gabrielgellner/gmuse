@@ -1047,7 +1047,7 @@ impl Ui {
             // `  Trilogy`, two spellings of the same row. `[...]` drops the
             // literal with the field, which is what grouping is for.
             track_line: crate::query::format::Template::parse(
-                "[{track:2}  ]{display_title}  {duration}",
+                "[{track:2}  ]{display_title}  {duration}[  {stars}]",
             )
             .expect("a literal template"),
             library,
@@ -2668,6 +2668,21 @@ fn recording_of(ctx: &Context<'_>, id: CopyId) -> Option<Id<Recording>> {
     rows.recording_of(id)
 }
 
+/// **What the library has heard about a row, for a template to show** — #327.
+///
+/// Keyed by the recording, as a rating is, so every copy of a song shows the same stars.
+pub fn about_row(
+    heard: &crate::projection::heard::Heard,
+    rows: &dyn Listing,
+    id: CopyId,
+) -> crate::query::format::About {
+    crate::query::format::About {
+        rating: rows
+            .recording_of(id)
+            .and_then(|r| heard.ratings.get(&r).copied()),
+    }
+}
+
 fn replay_gain(ui: &Ui, loudness: Option<crate::model::rows::Loudness>) -> f32 {
     use crate::cmd::ReplayGainMode as Mode;
 
@@ -3105,7 +3120,9 @@ fn refresh_picker(ui: &mut Ui, ctx: &Context<'_>) {
                     // **The rendered row, not the raw fields** — what you see
                     // is what you match, the rule the completion menu follows.
                     Some(Candidate {
-                        label: ui.track_line.render(&row.listed()),
+                        label: ui
+                            .track_line
+                            .render_about(&row.listed(), about_row(&ui.listened, rows, id)),
                         detail: String::new(),
                         chosen: Chosen::Track(id),
                     })
@@ -8778,6 +8795,11 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
     let position = ctx.player.map(|p| p.position()).unwrap_or(Duration::ZERO);
     let files: &dyn Listing = ctx.library;
     let track = ui.playback.current.and_then(|id| files.listed(id));
+    let about = ui
+        .playback
+        .current
+        .map(|id| about_row(&ui.listened, files, id))
+        .unwrap_or_default();
 
     match track {
         Some(track) => {
@@ -8795,7 +8817,7 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
                     },
                     theme.get(theme::Role::StatusPlaying),
                 ),
-                Span::styled(ui.transport_line.render(&track.listed()), text),
+                Span::styled(ui.transport_line.render_about(&track.listed(), about), text),
             ]));
             lines.push(Line::from(Span::styled(
                 progress_bar(
@@ -8836,8 +8858,14 @@ fn draw_transport(frame: &mut Frame, body: Rect, ui: &Ui, ctx: &Context<'_>) {
     // What is next is worth a line precisely because shuffle makes it
     // unguessable, and the projection is pure so asking costs nothing.
     let next = what_is_next(ui, ctx)
-        .and_then(|id| files.listed(id))
-        .map(|row| format!("next  {}", ui.now_playing.render(&row.listed())))
+        .and_then(|id| Some((id, files.listed(id)?)))
+        .map(|(id, row)| {
+            let about = about_row(&ui.listened, files, id);
+            format!(
+                "next  {}",
+                ui.now_playing.render_about(&row.listed(), about)
+            )
+        })
         .unwrap_or_else(|| "next  —".to_string());
     lines.push(Line::from(Span::styled(next, dim)));
 
@@ -9093,7 +9121,10 @@ fn draw_tree(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>) {
                     let text = files
                         .listed(*id)
                         .map(|listed| {
-                            let line = ui.track_line.render(&listed.listed());
+                            let line = ui.track_line.render_about(
+                                &listed.listed(),
+                                about_row(&ui.listened, files, *id),
+                            );
                             // **The album it stands in for, drawn here because
                             // it has nowhere else to be** (#135). A collapsed
                             // group has no row above to carry its name, and a
@@ -9410,6 +9441,7 @@ fn draw_track_list(frame: &mut Frame, area: Rect, ui: &Ui, ctx: &Context<'_>, sp
                 .count(),
             playing: ui.playback.current,
             needle: ui.highlight.as_ref(),
+            heard: Some(&ui.listened),
         },
     );
     let mut items = items;
@@ -10846,6 +10878,44 @@ mod tests {
 
         assert_eq!(ui.playlist.len(), 1, "the rule did not notice the rating");
         assert_eq!(ui.open.as_ref().map(Open::name), Some("good"));
+    }
+
+    /// **A rated row shows its stars, in the tree and the flat list** — #327.
+    ///
+    /// The two panes draw rows two ways: view 1 through `format.track`, view 2 and the
+    /// playlist through `list::items`. So it is asserted in both, and on the screen rather
+    /// than on a template. The instrument is the row count: three rows drawn, one of them
+    /// starred, so "one" cannot come from a pane that drew a single row.
+    #[test]
+    fn a_rated_row_shows_its_stars_in_both_panes() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+        let rows = |screen: &str, what: &str| screen.lines().filter(|l| l.contains(what)).count();
+
+        flat_view(&mut ui);
+        ui.sorted = 0;
+        let before = render(&ui, &ctx, 80, 12);
+        assert_eq!(rows(&before, "★"), 0, "nothing is rated yet:\n{before}");
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Rate(crate::cmd::RateSpec::Set(4), crate::cmd::RateWhat::Here),
+        );
+        let flat = render(&ui, &ctx, 80, 12);
+        let drawn = ["Zebra", "Antelope", "Marmot"]
+            .iter()
+            .filter(|t| flat.contains(*t))
+            .count();
+        assert_eq!(drawn, 3, "the flat list did not draw every row:\n{flat}");
+        assert_eq!(rows(&flat, "★★★★☆"), 1, "view 2:\n{flat}");
+        assert_eq!(rows(&flat, "★"), 1, "and only that row:\n{flat}");
+
+        ui.set_view(View::Tree);
+        ui.set_levels(crate::shelf::Levels::default());
+        ui.tree.open_everything(&ui.library);
+        let tree = render(&ui, &ctx, 80, 12);
+        assert_eq!(rows(&tree, "★★★★☆"), 1, "view 1:\n{tree}");
     }
 
     /// **A refold answers the open rule once** — #326.
@@ -20372,6 +20442,51 @@ mod tests {
 
         press(&mut ui, &ctx, "escape");
         assert_eq!(ui.mode, crate::cmd::Mode::Normal);
+    }
+
+    /// **`{stars}` in the status line and the transport panel** — #327.
+    ///
+    /// Neither default names it, so a person who adds it to `format.now_playing` or
+    /// `format.transport` is the case: both must be handed the rating, or the field draws
+    /// as unrated forever. The unrated frame first, as the instrument.
+    #[test]
+    fn the_playing_lines_show_stars_when_their_template_asks() {
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let mut ui = with_playlists(&store);
+        ui.set_view(View::Tree);
+        ui.playback.current = ui.library.sorted().first().copied();
+        ui.now_playing = crate::query::format::Template::parse("{title}[ {stars}]").unwrap();
+        ui.transport_line = crate::query::format::Template::parse("{title}[ {stars}]").unwrap();
+        let status = |screen: &str| screen.lines().last().unwrap_or_default().to_string();
+
+        let before = render(&ui, &ctx, 84, 20);
+        assert!(!before.contains('★'), "nothing is rated yet:\n{before}");
+        execute(
+            &mut ui,
+            &ctx,
+            Command::Rate(crate::cmd::RateSpec::Set(2), crate::cmd::RateWhat::Playing),
+        );
+        ui.status.clear();
+        let after = render(&ui, &ctx, 84, 20);
+        assert!(
+            status(&after).contains("★★☆☆☆"),
+            "the status line:\n{after}"
+        );
+
+        press(&mut ui, &ctx, "i");
+        let panel = render(&ui, &ctx, 84, 20);
+        let top = panel
+            .lines()
+            .position(|l| l.contains("╔ -- TRANSPORT --"))
+            .expect("the panel is up");
+        assert!(
+            panel
+                .lines()
+                .nth(top + 1)
+                .is_some_and(|l| l.contains("★★☆☆☆")),
+            "the transport line:\n{panel}"
+        );
     }
 
     /// The panel rises with the mode and is not there without it — which is

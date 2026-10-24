@@ -495,15 +495,83 @@ enum Atom {
         field: Field,
         pad: Pad,
     },
+    /// What the library has heard about the row's recording — #327.
+    Heard {
+        heard: Heard,
+        pad: Pad,
+    },
     /// Emitted only if every field inside it has a value. This is what lets one
     /// template cope with tracks that are tagged differently, without a
     /// conditional in the caller.
     Group(Vec<Atom>),
 }
 
+/// **What the library has heard about a row, as a template can show it** — #327.
+///
+/// Not a [`Field`], because that vocabulary is shared with the filter and the tree's levels
+/// and every name in it is a property of the row: the tree can group by it and `:add-view` asks
+/// who authors it. A rating is neither. It lives in what the library has heard, keyed by the
+/// recording, where the filter language reads `rating` through its own `HistoryField` — so a
+/// template asks for it the same way, beside the row rather than of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Heard {
+    /// The stars as a digit, `1`–`5`.
+    Rating,
+    /// The stars drawn out of five, `★★★☆☆`, so a column of them lines up.
+    Stars,
+}
+
+impl Heard {
+    const NAMES: &[&str] = &["rating", "stars"];
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "rating" => Some(Heard::Rating),
+            "stars" => Some(Heard::Stars),
+            _ => None,
+        }
+    }
+
+    /// **Nothing for an unrated row**, so `[  {stars}]` leaves no gap behind it.
+    fn value(self, about: About) -> Option<String> {
+        let n = about.rating.filter(|n| (1..=5).contains(n))?;
+        Some(match self {
+            Heard::Rating => n.to_string(),
+            Heard::Stars => {
+                let n = usize::from(n);
+                format!("{}{}", "★".repeat(n), "☆".repeat(5 - n))
+            }
+        })
+    }
+}
+
+/// What a caller knows about a row beyond the row itself — #327.
+///
+/// The default knows nothing, which is what [`Template::render`] passes: a template naming
+/// `{stars}` then renders as an unrated row does, rather than refusing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct About {
+    pub rating: Option<u8>,
+}
+
+impl About {
+    /// The stars as `{stars}` draws them, for a list that is not drawn from a template.
+    pub fn stars(self) -> Option<String> {
+        Heard::Stars.value(self)
+    }
+}
+
+/// Every name a template takes, sorted — the row's fields and what has been heard.
+fn template_names() -> String {
+    let mut names = Field::names();
+    names.extend(Heard::NAMES);
+    names.sort_unstable();
+    names.join(", ")
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FormatError {
-    #[error("unknown field {name:?} — try one of: {}", Field::names().join(", "))]
+    #[error("unknown field {name:?} — try one of: {}", template_names())]
     UnknownField { name: String },
     #[error(
         "{name:?} is a property of this machine's copy, not of the track — a displayed row carries no location"
@@ -554,8 +622,13 @@ impl Template {
     }
 
     pub fn render(&self, row: &crate::model::rows::Listed<'_>) -> String {
+        self.render_about(row, About::default())
+    }
+
+    /// The same, with what the library has heard about the row — #327.
+    pub fn render_about(&self, row: &crate::model::rows::Listed<'_>, about: About) -> String {
         let mut out = String::new();
-        render_atoms(&self.atoms, row, &mut out);
+        render_atoms(&self.atoms, row, about, &mut out);
         out
     }
 }
@@ -603,6 +676,11 @@ fn parse_atoms(
                     Some((n, s)) => (n, s),
                     None => (name.as_str(), ""),
                 };
+                let pad = || Pad::parse(spec).ok_or_else(|| FormatError::BadPad(spec.into()));
+                if let Some(heard) = Heard::parse(name.trim()) {
+                    atoms.push(Atom::Heard { heard, pad: pad()? });
+                    continue;
+                }
                 let field = Field::parse(name.trim())
                     .ok_or_else(|| FormatError::UnknownField { name: name.into() })?;
                 // Refused here rather than rendered blank. A row holds no
@@ -613,8 +691,7 @@ fn parse_atoms(
                         name: name.trim().into(),
                     });
                 }
-                let pad = Pad::parse(spec).ok_or_else(|| FormatError::BadPad(spec.into()))?;
-                atoms.push(Atom::Field { field, pad });
+                atoms.push(Atom::Field { field, pad: pad()? });
             }
             '[' => {
                 flush!();
@@ -637,7 +714,12 @@ fn parse_atoms(
 }
 
 /// Render into `out`, returning whether every field encountered had a value.
-fn render_atoms(atoms: &[Atom], row: &crate::model::rows::Listed<'_>, out: &mut String) -> bool {
+fn render_atoms(
+    atoms: &[Atom],
+    row: &crate::model::rows::Listed<'_>,
+    about: About,
+    out: &mut String,
+) -> bool {
     let mut complete = true;
     for atom in atoms {
         match atom {
@@ -648,12 +730,18 @@ fn render_atoms(atoms: &[Atom], row: &crate::model::rows::Listed<'_>, out: &mut 
                 }
                 None => complete = false,
             },
+            Atom::Heard { heard, pad } => match heard.value(about) {
+                Some(v) => {
+                    let _ = write!(out, "{}", pad.apply(&v));
+                }
+                None => complete = false,
+            },
             Atom::Group(inner) => {
                 // Rendered aside, so a group with a missing field leaves
                 // nothing behind — including its literal text, which is the
                 // whole point of grouping.
                 let mut nested = String::new();
-                if render_atoms(inner, row, &mut nested) {
+                if render_atoms(inner, row, about, &mut nested) {
                     out.push_str(&nested);
                 }
             }
@@ -703,6 +791,52 @@ mod tests {
             "Trilogy Feat. Sabota",
             "the group left its literal behind"
         );
+    }
+
+    /// **A rating is drawn out of five, and an unrated row draws nothing** — #327.
+    ///
+    /// Out of five so a column of them lines up and three reads apart from four. Nothing for
+    /// an unrated row, so `[  {stars}]` takes its separator with it — the default track line
+    /// leans on that, or every unrated row would end in two stray spaces.
+    #[test]
+    fn a_rating_draws_as_stars_and_an_unrated_row_draws_none() {
+        let line = Template::parse("{display_title}[  {stars}]").expect("parses");
+        let digit = Template::parse("{rating}/5").expect("parses");
+        let mut row = full();
+        row.title = Some("Energy Flash".into());
+        let row = row.drawn();
+        let rated = |n| About { rating: Some(n) };
+
+        assert_eq!(
+            line.render_about(&row.listed(), rated(5)),
+            "Energy Flash  ★★★★★"
+        );
+        assert_eq!(
+            line.render_about(&row.listed(), rated(3)),
+            "Energy Flash  ★★★☆☆"
+        );
+        assert_eq!(digit.render_about(&row.listed(), rated(4)), "4/5");
+        assert_eq!(
+            line.render_about(&row.listed(), About::default()),
+            "Energy Flash",
+            "an unrated row kept the separator"
+        );
+        // `render` knows nothing heard, so it draws a rated template as an unrated row does.
+        assert_eq!(line.render(&row.listed()), "Energy Flash");
+        // Out of range is no rating rather than six stars or a panic on `5 - n`.
+        assert_eq!(line.render_about(&row.listed(), rated(6)), "Energy Flash");
+    }
+
+    /// **`stars` is a name a template takes, and the error says so** — #327.
+    #[test]
+    fn an_unknown_field_lists_what_has_been_heard_too() {
+        let err = Template::parse("{starz}").expect_err("not a field");
+        let said = err.to_string();
+        assert!(
+            said.contains("title"),
+            "the row's fields are listed: {said}"
+        );
+        assert!(said.contains("stars") && said.contains("rating"), "{said}");
     }
 
     /// **Every field is classified, in one place** — #96.

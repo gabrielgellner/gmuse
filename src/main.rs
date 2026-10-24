@@ -3913,7 +3913,13 @@ fn run_engine(
                 .into_iter()
                 .find(|&row| rows.recording_of(row) == Some(id))
                 .and_then(|row| rows.listed(row))
-                .map(|listed| template.render(&listed.listed()))
+                .map(|listed| {
+                    // A status bar's `{stars}` is the recording's rating, as a row's is (#327).
+                    let about = gmuse::query::format::About {
+                        rating: answer.listened.ratings.get(&id).copied(),
+                    };
+                    template.render_about(&listed.listed(), about)
+                })
                 .unwrap_or_default()
         }
 
