@@ -182,6 +182,11 @@ a person picks. A track on no release lands directly under its artist and gets n
 Measured on the whole library: 1,135 rendered album folders, 1,078 with a cover, 56 with none offered, and one contest —
 Enya's _The Celts_, filed from the _Enya_ and _The Celts_ folders, whose covers differ.
 
+**A missing or small cover is filled in the masters, not the rendering** (#352): `covers fetch` offers the Cover Art
+Archive's 1,200 px front for each album whose release the library names, falling back to its release group, and
+`covers fetch-apply` writes the rows a person marked — an upgrade keeping the old cover as `cover-small.*`. A rendering
+then carries it like any other cover; art that lived only in a rendering could not be rebuilt from the masters.
+
 ---
 
 ## 6. Plex
