@@ -253,19 +253,44 @@ pub struct Encoding {
     pub encoder_delay: Option<u32>,
 }
 
+/// Below this, a lossless file whose spectrum ends at a wall is carrying lossy
+/// audio. The same number as `quality.py`'s `LOSSLESS_FLOOR_KHZ`, which is the
+/// report this verdict agrees with.
+const LOSSLESS_FLOOR_HZ: u32 = 19_000;
+
+/// A fall this steep above the cutoff, in hundredths of a dB, is an encoder's
+/// lowpass rather than music running out — `quality.py`'s `CLIFF_DB`.
+const WALL_CENTI_DB: u16 = 2_500;
+
 impl Encoding {
     /// Whether the file is as good as it says it is.
     ///
     /// The worked example in §9 is a real file here: *320k declared, 15.7 kHz*
     /// — a lossy source re-encoded upward, which measures as a low cutoff under
-    /// a high claimed bitrate. Lossless is exempt because a lossless file's
-    /// cutoff is a property of the source, not of the encoder.
+    /// a high claimed bitrate.
+    ///
+    /// **A lossless file is suspect when its spectrum ends at a wall below
+    /// 19 kHz** — a lossy source in a lossless container. This used to exempt
+    /// lossless outright, "because a lossless file's cutoff is a property of
+    /// the source", and that was half right: a cutoff alone *is* the source's,
+    /// and 140 FLACs here stop below 19 kHz on a gentle slope because the music
+    /// has nothing up there. A *wall* is not music. Joe Purdy's FLACs stop at
+    /// 15.4 kHz on one, beside MP3s of the same tracks that reach 19.9, and the
+    /// exemption let them outrank the better file everywhere (2026-10-24).
+    ///
+    /// **No cliff, no charge.** A cutoff measured before #184 recorded the
+    /// fall cannot tell a wall from a slope, so it is not evidence either way.
     pub fn verdict(&self) -> Verdict {
         let Some(cutoff) = self.cutoff_hz else {
             return Verdict::Unmeasured;
         };
         if self.format.is_lossless() {
-            return Verdict::Good;
+            let walled = self.cliff_db.is_some_and(|c| c.value >= WALL_CENTI_DB);
+            return if walled && cutoff.value < LOSSLESS_FLOOR_HZ {
+                Verdict::Suspect
+            } else {
+                Verdict::Good
+            };
         }
         // A real 320k MP3 keeps content to about 20 kHz; a 128k source
         // re-encoded to 320k still stops around 16.
@@ -316,7 +341,8 @@ pub struct DeviceRecord {
 /// ordering should read as an explainable diff rather than as a mystery.
 ///
 /// 2 — measurement stopped outranking the format (#110).
-pub const POLICY: u16 = 2;
+/// 3 — a lossless file walled below 19 kHz is suspect, so it sinks (2026-10-24).
+pub const POLICY: u16 = 3;
 
 /// The ordering that decides which encoding represents a recording.
 ///
@@ -363,7 +389,8 @@ pub fn quality_key(
         //
         // Suspect still sinks to the bottom outright. A suspect FLAC is a
         // lossy file upsampled to lossless, this library has real examples,
-        // and it must not beat a good MP3.
+        // and it must not beat a good MP3 — which since POLICY 3 it cannot,
+        // because `verdict` can finally say a FLAC is suspect.
         verdict != Verdict::Suspect,
         std::cmp::Reverse(format.rank()),
         bitrate,
@@ -683,11 +710,9 @@ mod tests {
     /// good bitrate, and it should lose to an honest copy in a worse format at
     /// half the rate.
     ///
-    /// Note the shape of the case. A *lossless* file cannot currently be
-    /// `Suspect` at all — `verdict` returns `Good` for any measured lossless
-    /// format without looking at the spectrum — so an upsampled lossy-to-FLAC
-    /// file reads as good. That is a hole in `verdict`, not in this ordering,
-    /// and it is why the case here is a lying MP3 rather than a lying FLAC.
+    /// The case here is a lying MP3. The lying FLAC is
+    /// `a_walled_flac_loses_to_a_real_mp3`, which could not be written until
+    /// `verdict` looked at a lossless file's spectrum (POLICY 3).
     #[test]
     fn a_copy_that_lies_about_its_bitrate_loses_to_an_honest_one() {
         let rec = Id::<Recording>::derived(b"r");
@@ -708,6 +733,66 @@ mod tests {
         e.encodings.insert(honest.id, honest);
 
         assert_eq!(e.canonical(rec).unwrap().id, want);
+    }
+
+    fn walled(mut e: Encoding, cliff: Option<u16>) -> Encoding {
+        e.cliff_db = cliff.map(Measured::now);
+        e
+    }
+
+    /// **A lossy source in a FLAC loses to a real MP3** — POLICY 3. Joe
+    /// Purdy's numbers: the FLAC stops at 15.4 kHz on a 26 dB wall, and the
+    /// MP3 of the same track reaches 19.9.
+    #[test]
+    fn a_walled_flac_loses_to_a_real_mp3() {
+        let rec = Id::<Recording>::derived(b"r");
+        let here = Id::<Device>::derived(b"laptop");
+        let mut flac = walled(encoding(rec, Format::Flac, 900, Some(15_400)), Some(2_600));
+        let mut mp3 = walled(encoding(rec, Format::Mp3, 320, Some(19_900)), Some(4_300));
+        assert_eq!(flac.verdict(), Verdict::Suspect);
+        assert_eq!(mp3.verdict(), Verdict::Good);
+        stack_the_ids_against(&mut mp3, &mut flac);
+        let want = mp3.id;
+        let mut e = Encodings::default();
+        for enc in [flac, mp3] {
+            let id = enc.id;
+            e.encodings.insert(id, enc);
+            hold(&mut e, id, here);
+        }
+        assert_eq!(e.canonical(rec).unwrap().id, want, "the view's choice");
+        assert_eq!(
+            e.best_held(&ids_of(&e, rec), here).unwrap().best.id,
+            want,
+            "the rendering's"
+        );
+    }
+
+    /// The other side of the rule, and the larger: 140 FLACs here stop below
+    /// 19 kHz on a slope, because the music has nothing up there. A cutoff
+    /// alone is the source's, and charging it would sink them all.
+    #[test]
+    fn a_flac_that_rolls_off_is_not_suspect() {
+        let rec = Id::<Recording>::derived(b"r");
+        let sloped = walled(encoding(rec, Format::Flac, 900, Some(8_100)), Some(1_000));
+        assert_eq!(sloped.verdict(), Verdict::Good);
+        let unknown = walled(encoding(rec, Format::Flac, 900, Some(8_100)), None);
+        assert_eq!(
+            unknown.verdict(),
+            Verdict::Good,
+            "no cliff recorded is no evidence"
+        );
+        let full = walled(encoding(rec, Format::Flac, 900, Some(21_000)), Some(6_000));
+        assert_eq!(
+            full.verdict(),
+            Verdict::Good,
+            "a wall above 19 kHz is a real lossless edge"
+        );
+        let walled_low = walled(encoding(rec, Format::Flac, 900, Some(15_400)), Some(2_600));
+        assert_eq!(
+            walled_low.verdict(),
+            Verdict::Suspect,
+            "instrument: the rule does fire"
+        );
     }
 
     /// **Measuring a copy does not move the canonical**, unless what it finds
@@ -767,10 +852,19 @@ mod tests {
             // expects 19 kHz and 256 expects 19 kHz, and each clears it.
             ("fat mp3", Format::Mp3, 320, Some(19_200)),
             ("wide mp3", Format::Mp3, 256, Some(21_000)),
+            // POLICY 3: two FLACs stopping below 19 kHz, told apart only by
+            // the fall above it — a wall sinks, a slope does not.
+            ("walled flac", Format::Flac, 1000, Some(15_400)),
+            ("sloped flac", Format::Flac, 1000, Some(12_000)),
         ];
         let mut named = Vec::new();
         for (name, format, bitrate, cutoff) in cases {
-            let enc = encoding(rec, format, bitrate, cutoff);
+            let mut enc = encoding(rec, format, bitrate, cutoff);
+            enc.cliff_db = match name {
+                "walled flac" => Some(Measured::now(2_600)),
+                "sloped flac" => Some(Measured::now(1_000)),
+                _ => None,
+            };
             named.push((name, enc.id));
             e.encodings.insert(enc.id, enc);
         }
@@ -784,6 +878,9 @@ mod tests {
             order,
             vec![
                 "measured flac",
+                // A low cutoff on a slope is the music, and only breaks the
+                // tie among FLACs — it does not sink.
+                "sloped flac",
                 "unmeasured flac",
                 // `low mp3` above `high aac` is the format outranking the
                 // bitrate, which is the whole reason the pair is here.
@@ -795,12 +892,15 @@ mod tests {
                 "low mp3",
                 "high aac",
                 "honest opus",
+                // Both suspect, so both at the bottom, and the format still
+                // orders them there.
+                "walled flac",
                 "suspect mp3",
             ],
             "the canonical ordering changed — say what changed and bump POLICY \
              (it is {POLICY})"
         );
-        assert_eq!(POLICY, 2, "the ordering above is what POLICY 2 means");
+        assert_eq!(POLICY, 3, "the ordering above is what POLICY 3 means");
     }
 
     /// Every replica computes the same canonical without talking to anyone.

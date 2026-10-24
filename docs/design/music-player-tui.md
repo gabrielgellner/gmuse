@@ -6553,6 +6553,23 @@ Append here as decisions are made. Format: date, decision, rationale.
   beside it is reported as a candidate to retire, and a person decides per album. At import, a pair is a notice pointing
   at `replace`, not a refusal.
 
+- **2026-10-24** **A lossless file walled below 19 kHz is suspect, and sinks (POLICY 3).** `verdict` exempted lossless
+  outright, "because a lossless file's cutoff is a property of the source". The pin test said this was a hole, and
+  `quality_key`'s comment assumed the opposite: "a suspect FLAC... must not beat a good MP3." Nothing made a FLAC
+  suspect, so one did. Joe Purdy's self-titled FLACs stop at 15.4 kHz on a 26 dB wall, and the MP3s of the same tracks
+  reach 19.9 kHz. The FLACs represented those recordings in every view and every rendering. #333's renderer found it.
+
+  **The exemption was half right.** A cutoff alone is the source's. 140 FLACs here stop below 19 kHz on a slope, because
+  the music has nothing up there, and charging those would sink them all. A wall is an encoder's lowpass. So a lossless
+  file is `Suspect` when its cutoff is under 19 kHz **and** the fall above it is at least 25 dB, the same rule
+  `quality.py` reports as `LOSSY SOURCE`. A cutoff with no recorded cliff is no evidence, and stays `Good`.
+
+  It marks 23 FLACs on 7 albums. Only Joe Purdy's 7 have a better copy beside them, so only those change which copy
+  represents a recording. The rest (Aphex Twin, AFX, Polygon Window and others) now filter as `verdict=suspect` and
+  still play from the only copy held. A suspect FLAC still outranks a suspect MP3, because the format orders the bottom.
+  Four targeted sabotages each fail a test: restoring the exemption, charging the cutoff alone, treating a missing cliff
+  as a wall, and raising the floor.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no
