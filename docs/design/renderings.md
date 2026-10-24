@@ -145,6 +145,24 @@ rendering are the library's statement and nothing else's.
 **Retagging the masters stays possible**, as a later and separate choice, for players that read `~/MusicLibrary`
 directly. It inherits both costs and the loop, which is why it is not first.
 
+**Built (#335).** `gmuse_core.Library.statement` hands out what the library says about each copy's appearance — title,
+credited artist, album, album artist, track, disc and disc count, year, label, genres, compilation, the MusicBrainz
+recording and release, and the source's ReplayGain — and `stated.py` writes it with mutagen, on the temporary, before
+the file lands. **Not `lofty`, as #335 said**: `src/python.rs` keeps tag writing in Python, the tools already write with
+mutagen, and a second writer behind the binding would be a second answer. The library states; the tool writes.
+
+- **What the library does not say is removed**, so no stale value contradicts it. **Pictures, lyrics and comments are
+  kept**, because the library does not model them.
+- **An MP3 ends with one ID3v2.4 tag**: the ID3v1 block, the APE tag and any stacked second ID3v2 tag are cut with
+  `tags.py`'s own verified cuts.
+- **A transcode carries its master's pictures**, which ffmpeg's audio-only encode drops.
+- **The manifest row carries the statement's hash**, so a retitle rewrites exactly the files it changed.
+
+Measured on three albums, 2026-10-24: the 45 masters byte-identical before and after; all 19 copies tagged in place
+still hash to the encoding they were made from; James Blake's _The Bells Sketch_, whose master tags have two titles
+transposed, renders with the library's; a second run writes nothing. **Art beside an album is not carried yet** —
+Orbital's FLACs hold none embedded, and their `cover.jpg` stays behind.
+
 ---
 
 ## 6. Plex
@@ -224,7 +242,7 @@ declared operation like any other import, never by a renderer writing to the log
   key, so the choice can change later at the cost of one re-render.
 - ~~**Where the transcode cache lives.**~~ Settled in #334: on the machine that renders, in the tools' cache directory.
   The FLAC is there, and the network is the slower half (§3).
-- **Tracks on no release.** `storage-layout.md` gives them no album level, and Plex files a track with no album as
-  "Unknown Album". The rendering could leave the tag empty or say so; it must not invent a release.
+- ~~**Tracks on no release.**~~ Settled in #335: no album tag, because the library names none, and Plex will file it as
+  "Unknown Album". That is Plex's word for the truth, and a rendering must not invent a release to avoid it.
 - **A target's subset changing.** Narrowing a work laptop's query deletes from that device. That is what a rendering
   means, and it wants a dry run the way `archive write` does.

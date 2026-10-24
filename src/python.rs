@@ -187,6 +187,102 @@ impl Library {
         Ok(out.into())
     }
 
+    /// **What the library says about each of these copies** — #335.
+    ///
+    /// The values a rendering writes into its tags: the library's statement,
+    /// read from the projection and never from the file. A dict per encoding
+    /// id, in the order given; a field the library has no value for is
+    /// **absent**, because a rendering clears what the library does not say
+    /// rather than leaving a stale tag to contradict it. `{}` for a copy with
+    /// no row.
+    ///
+    /// Of the copy's *appearance*: the album, track and disc are the slot the
+    /// copy is placed in, so one recording on an album and on a compilation
+    /// states two different things.
+    fn statement(&self, py: Python<'_>, encodings: Vec<String>) -> PyResult<Py<PyList>> {
+        let catalogue = self.projection.catalogue();
+        let mut library = crate::model::seam::Librarian::from_catalogue(catalogue);
+        library.here(self.device);
+        let genre = Id::<crate::model::entity::Facet>::of_key(crate::model::facet::GENRE);
+        let out = PyList::empty(py);
+        for raw in &encodings {
+            let copy = raw
+                .parse::<Id<crate::model::entity::Encoding>>()
+                .map_err(|err| PyValueError::new_err(format!("encoding {raw}: {err}")))?;
+            let row = pyo3::types::PyDict::new(py);
+            let listed = library.row_of_copy(copy).and_then(|r| library.describe(r));
+            if let Some(listed) = listed {
+                let some = |k: &str, v: Option<&str>| -> PyResult<()> {
+                    match v.filter(|s| !s.is_empty()) {
+                        Some(s) => row.set_item(k, s),
+                        None => Ok(()),
+                    }
+                };
+                // `_if_named`, not the stand-ins a tree draws for a nameless row:
+                // a tag reading "No Album" would be the library inventing one.
+                some("title", listed.title_if_named)?;
+                some("artist", listed.artist)?;
+                some("album", listed.album_if_named)?;
+                some("album_artist", listed.album_artist)?;
+                some("label", listed.label)?;
+                if let Some(track) = listed.track {
+                    row.set_item("track", track)?;
+                }
+                if let Some(disc) = listed.disc {
+                    row.set_item("disc", disc)?;
+                }
+                let release = library.release_of(library.placed_at(copy));
+                if let Some(discs) = release.and_then(|r| library.release_media(r)) {
+                    row.set_item("discs", discs)?;
+                }
+                if let Some(year) = listed.year {
+                    row.set_item("year", year)?;
+                }
+                if let Some(genres) = listed.concepts.get(&genre).filter(|g| !g.is_empty()) {
+                    row.set_item("genres", genres.clone())?;
+                }
+                if listed
+                    .release_secondary
+                    .contains(&crate::model::spine::ReleaseSecondary::Compilation)
+                {
+                    row.set_item("compilation", true)?;
+                }
+                let recording = library
+                    .encoding(copy)
+                    .and_then(|e| e.recording)
+                    .map(|r| r.id());
+                if let Some(crate::model::basis::Basis::MusicBrainz(id)) =
+                    recording.and_then(|r| catalogue.identified.get(&r))
+                {
+                    row.set_item("musicbrainz_recording", id.to_string())?;
+                }
+                if let Some(mbid) = release
+                    .and_then(|r| catalogue.releases.get(&r))
+                    .and_then(|p| p.musicbrainz)
+                {
+                    row.set_item("musicbrainz_release", mbid.to_string())?;
+                }
+                // **The source's loudness**, which a transcode keeps: ReplayGain
+                // is about how loud the music is, and an MP3 of a FLAC is the
+                // same music within a fraction of a decibel.
+                if let Some(levels) = library.encoding(copy).map(|e| e.levels) {
+                    let gain = |k: &str, v: Option<f32>| -> PyResult<()> {
+                        match v {
+                            Some(x) => row.set_item(k, x),
+                            None => Ok(()),
+                        }
+                    };
+                    gain("track_gain_db", levels.track_db())?;
+                    gain("track_peak", levels.track_peak())?;
+                    gain("album_gain_db", levels.album_db())?;
+                    gain("album_peak", levels.album_peak())?;
+                }
+            }
+            out.append(row)?;
+        }
+        Ok(out.into())
+    }
+
     /// **Where each of these copies belongs in a rendered tree** — #332.
     ///
     /// `storage-layout.md` §2's path, relative, for each encoding id: a dict
