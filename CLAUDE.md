@@ -70,7 +70,7 @@ rule — **the storage tree may use structural facts only**, who made it and wha
 catalog or tempo, because those are browsing and a tree has one dimension. `{file_under}/{album}/{track} {title}`, and
 nothing else. Read it before writing anything that puts a file somewhere.
 
-[`docs/design/renderings.md`](docs/design/renderings.md) is a **proposal**, not built: what leaves the library — the
+[`docs/design/renderings.md`](docs/design/renderings.md) is a **proposal, partly built**: what leaves the library — the
 Plex tree, a work laptop's subset, a transcode. Read it before writing a file anywhere but the master tree. The rule it
 turns on is that **the master holds what was acquired, and a rendering is never read back**, which is why tags go into
 renderings first rather than into the masters (#165).
