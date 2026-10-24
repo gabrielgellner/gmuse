@@ -138,7 +138,7 @@ baked into the noun. The projection picker, if it is wanted at all, is `<leader>
 
 `playback-programme.md` is settled design and says otherwise on both halves. **The librarian owns the ordered
 programme**; the engine holds a window of two or three `(token, path)` pairs and no ordering policy. An entry is named
-by **token, not by position** — #271 is exactly that, and `f2949d6` ("a queue-pane edit names its entry by token, not
+by **token, not by position** — #271 is exactly that, and `b3ac7d0` ("a queue-pane edit names its entry by token, not
 the page it is on") is the commit that removed the index the proposal reintroduces.
 
 So the queue panel is a rendering of a page of the programme, obtained by asking the librarian. It holds a cursor and a

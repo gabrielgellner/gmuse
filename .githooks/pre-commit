@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Fast gate: formatting only, so committing stays quick. The full `just ci`
-# runs on push instead (see .githooks/pre-push).
+# Fast gate: formatting, and no report data in what is being committed, so
+# committing stays quick. The full `just ci` runs on push instead (see
+# .githooks/pre-push).
 #
 # Install: just hooks-install
 # Bypass:  git commit --no-verify   (use sparingly, and say why)
@@ -18,3 +19,8 @@ if ! just fmt-check; then
     echo "pre-commit: formatting check failed. Run 'just fmt' and stage the result." >&2
     exit 1
 fi
+
+# **Before the commit, not the push.** A pushed commit is public, and taking one back
+# out of the history meant recreating the repository (see `just leak-check`).
+echo "pre-commit: running 'just leak-check'..."
+just leak-check

@@ -333,8 +333,48 @@ bench:
 
 # Formatting + lint + a type check, no tests
 [group('test')]
-check: fmt-check lint lint-yaml
+check: fmt-check lint lint-yaml leak-check
     cargo check --all-targets --all-features
+
+# **No report data in the repository.** The repo is public and the library is not.
+#
+# Three scan logs listing 3,490 of the library's files were committed by accident in
+# September 2026, deleted a week later, and were still in the history when the
+# repository went public; so were a 66-line album list and a genre sample. Removing
+# them meant rewriting the history and recreating the repository. A tool's output goes
+# wherever its caller says (`library-api.md` §7), so the repository is where it must be
+# refused: `.gitignore` ignores the report formats, and this refuses whatever got past
+# it — a `git add -f`, a new format, a report pasted into a document.
+#
+# Reads the index, not the working tree, so as a pre-commit check it judges exactly
+# what is about to be committed.
+[group('test')]
+leak-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    status=0
+    # Report formats. A fixture that has to be one is listed here by name, with a reason.
+    allowed='^tests/transcripts/[^/]+\.ndjson$'
+    data=$(git ls-files | grep -E '\.(tsv|csv|jsonl|log|sqlite|db|postcard|zip|tar|tgz|gz|m3u8?|pls|xspf)$' \
+        | grep -vE "$allowed" || true)
+    if [ -n "$data" ]; then
+        echo "leak-check: report or data files are tracked:" >&2
+        sed 's/^/  /' <<<"$data" >&2
+        status=1
+    fi
+    # A file naming more than five library paths is a listing, not an example. The
+    # most any document needs today is four.
+    listings=$(git grep --cached -c -E 'MusicLibrary/[^ `"]|/Volumes/Media/[A-Z]' -- . ':!CHANGELOG.md' \
+        | awk -F: '$NF > 5' || true)
+    if [ -n "$listings" ]; then
+        echo "leak-check: files that list the library (path:count):" >&2
+        sed 's/^/  /' <<<"$listings" >&2
+        status=1
+    fi
+    if [ "$status" -ne 0 ]; then
+        echo "leak-check: reports belong in tools/out/ or outside the repository — see tools/README.md." >&2
+    fi
+    exit "$status"
 
 # The tools' own tests — #298.
 #

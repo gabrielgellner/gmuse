@@ -3265,7 +3265,7 @@ Append here as decisions are made. Format: date, decision, rationale.
   `filter_unconventional` drops a bad one silently and that risk moves from per-MR to per-commit. And the MR title stops
   being load-bearing, which removes one failure mode and adds a smaller one.
 
-  **What prompted it.** `ddd51bb` is titled _"every fact says how much of a projection it can change"_ and contains
+  **What prompted it.** `b5f9bdb` is titled _"every fact says how much of a projection it can change"_ and contains
   that, plus `shelf compact`, plus `durable::rewrite`, plus six design-doc commits — because three MRs were opened
   against one long-lived branch and the third squash took everything still on it. Not repairable: rewriting a merged
   commit is a force-push and `main` is protected. The branching was the proximate error and **one branch per issue, cut
@@ -4796,7 +4796,7 @@ Append here as decisions are made. Format: date, decision, rationale.
 - **2026-09-12** **A commit that does not parse is listed under `Other`, not dropped (!384).** `cliff.toml` set
   `filter_unconventional = true`, so a badly typed subject did not fail loudly — it vanished from `CHANGELOG.md` without
   a word. Measured: **44 of 383 commits** were invisible, dated 2026-09-03 to 09-07 and interleaved with well-formed
-  ones, so this was a live leak and not old pre-convention history. One of them is `8b84fd3`, which CLAUDE.md already
+  ones, so this was a live leak and not old pre-convention history. One of them is `18511bf`, which CLAUDE.md already
   names as an accepted cost.
 
   Every one of them is merged onto a protected `main`, where a subject cannot be corrected — rewriting one is a
@@ -4807,7 +4807,7 @@ Append here as decisions are made. Format: date, decision, rationale.
   commit it cannot type. The 44 stay untyped in the changelog, which is accurate, because they _were_ untyped. What
   changed is that the failure is visible instead of silent. The parser sits last in the list, so it can never shadow a
   typed rule above it: `Other` holds exactly the 43 unconventional non-initial commits and no well-formed one was
-  misrouted into it. The forty-fourth is `10ef69d`, `feat/a row carries its genres`, which reaches `Features` because
+  misrouted into it. The forty-fourth is `807eec3`, `feat/a row carries its genres`, which reaches `Features` because
   `^feat` matches a slash as happily as a colon.
 
   **The cause was a missing gate, and that is the part worth keeping.** `pre-commit` ran `just fmt-check` and `pre-push`
@@ -6142,7 +6142,7 @@ Append here as decisions are made. Format: date, decision, rationale.
   | engine + attached view     | 0.25% + 0.25% | **0.95% + 0.25% = 1.2%** | 161–215 MB + 14–22 MB |
   | `--no-attach`, one process | 0.50%         | **1.45–1.50%**           | 207 MB (peak 248)     |
 
-  **The view is not a second fold.** `828a033` made it read the snapshot (#261) and this is the first time the shape was
+  **The view is not a second fold.** `9dd0158` made it read the snapshot (#261) and this is the first time the shape was
   measured as a whole: a view is 14–22 MB, so attaching costs ~20 MB, not the ~120 MB a fold would have. The doubling
   #255 supposed never happened at the moment it was looked for; what `btop` showed was RSS, which counts the dyld shared
   cache in every process and follows the peak. `ps` RSS is not printed by anything here any more.
@@ -6192,7 +6192,7 @@ Append here as decisions are made. Format: date, decision, rationale.
   accident when the loser is what was thrown away. **Every other projection test stayed green both times**, which is
   what a net written after the fact would not have been able to say.
 
-  **Goal 5 — what it is worth, and to whom.** Not the view: an attached view is 14–22 MB since `828a033` and has no
+  **Goal 5 — what it is worth, and to whom.** Not the view: an attached view is 14–22 MB since `9dd0158` and has no
   records to lose. The engine: 118.5 MB live of which 83.5 is records, so ~80 MB; and a write at O(new) instead of the
   46 ms refold on 110,500 records that every rating and every half-track play pays today. That is the whole of the case,
   and it is enough — but the peak (162 MB) is set by the startup parse, which an incremental fold does not touch.

@@ -67,7 +67,7 @@ pub fn measurements_path() -> PathBuf {
 ///
 /// The second half is #309. A read is cached by a file's size and mtime, so a
 /// better measurement is never run on a file that has not changed: it is
-/// handed the answer the old code gave. `4f95d56` changed how `length_ms` is
+/// handed the answer the old code gave. `abaac38` changed how `length_ms` is
 /// measured and left the shape alone, and only an unrelated shape change two
 /// days later (the bump to 2) flushed the stale reads. That was luck.
 ///

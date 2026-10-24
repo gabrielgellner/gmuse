@@ -603,7 +603,7 @@ pub(crate) fn apply_one(cat: &mut Catalogue, stamp: &Stamp, fact: &Fact) {
             // 1,735.7s for a track that decodes to 287.4s. **The correct
             // length was already in the log for all 32.** Each was described
             // twice: on 2026-09-06 by the bitrate estimate, and on 2026-09-09
-            // at 13:20 UTC by the frame count `4f95d56` introduced. The fix had
+            // at 13:20 UTC by the frame count `abaac38` introduced. The fix had
             // reached every one of them, and the fold threw it away.
             //
             // That is why a re-import could not repair it, and rightly wrote
