@@ -141,6 +141,46 @@ impl Library {
         Ok(items.len())
     }
 
+    /// **The copy each group's rendering is made from** — #333.
+    ///
+    /// Each group is the encoding ids that compete for one place — for a
+    /// rendering, the copies of one recording that would land in one folder.
+    /// The best of them *this device holds*, by `canonical_key`, the order a
+    /// view uses (#325), so a rendering and the player rank copies alike.
+    ///
+    /// A dict per group, in the order given: `encoding`, its `locator`, the
+    /// `tied` copies only an id separated from it and `tied_at`, where those
+    /// are — or an empty dict where this device holds none of them.
+    fn choose(&self, py: Python<'_>, groups: Vec<Vec<String>>) -> PyResult<Py<PyList>> {
+        let mut library =
+            crate::model::seam::Librarian::from_catalogue(self.projection.catalogue());
+        library.here(self.device);
+        let out = PyList::empty(py);
+        for group in &groups {
+            let candidates = group
+                .iter()
+                .map(|raw| {
+                    raw.parse::<Id<crate::model::entity::Encoding>>()
+                        .map_err(|err| PyValueError::new_err(format!("encoding {raw}: {err}")))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let row = pyo3::types::PyDict::new(py);
+            if let Some(held) = library.encodings.best_held(&candidates, self.device) {
+                row.set_item("encoding", held.best.id.to_string())?;
+                row.set_item("locator", library.where_held(held.best.id))?;
+                let tied: Vec<String> = held.tied.iter().map(ToString::to_string).collect();
+                row.set_item("tied", tied)?;
+                // Where each one is, because a tie is reported to a person,
+                // and an encoding id is not something a person can open.
+                let tied_at: Vec<Option<String>> =
+                    held.tied.iter().map(|e| library.where_held(*e)).collect();
+                row.set_item("tied_at", tied_at)?;
+            }
+            out.append(row)?;
+        }
+        Ok(out.into())
+    }
+
     /// **Where each of these copies belongs in a rendered tree** — #332.
     ///
     /// `storage-layout.md` §2's path, relative, for each encoding id: a dict
@@ -177,6 +217,14 @@ impl Library {
                 row.set_item("path", at.to_string_lossy().into_owned())?;
             } else if let Some(why) = refused.get(copy) {
                 row.set_item("refused", why.to_string())?;
+                // **Contested says where**, because a rendering resolves some
+                // contests itself: two copies of one recording wanting one path
+                // are one appearance, and it keeps the better. Only the caller
+                // knows which copies are of one recording.
+                if let crate::operations::storage::Refused::Contested(at) = why {
+                    row.set_item("path", at.to_string_lossy().into_owned())?;
+                    row.set_item("contested", true)?;
+                }
             } else {
                 row.set_item("elsewhere", true)?;
             }

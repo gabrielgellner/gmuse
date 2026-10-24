@@ -374,6 +374,13 @@ pub fn quality_key(
     )
 }
 
+/// The copy [`Encodings::best_held`] chose, and the ones only an id kept from it.
+#[derive(Debug)]
+pub struct Held<'a> {
+    pub best: &'a Encoding,
+    pub tied: Vec<Id<Encoding>>,
+}
+
 /// The encodings and copies, held flat.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(bound = "")]
@@ -426,6 +433,50 @@ impl Encodings {
         self.of(recording)
             .into_iter()
             .max_by_key(|e| canonical_key(e))
+    }
+
+    /// **The best of these copies that one device holds**, by [`canonical_key`] — #333.
+    ///
+    /// What a rendering is made from. Not [`Self::canonical`], which is the
+    /// best copy *anywhere* and may be on a machine this one cannot read; and
+    /// not [`Self::for_playback`], which ranks by a device's format preference
+    /// rather than by what the bytes are. The order is `canonical_key`'s, so a
+    /// rendering and a view (#325) rank copies the same way.
+    ///
+    /// **The caller names the candidates**, because which copies compete is
+    /// not "every copy of the recording": one recording on an album and on a
+    /// compilation is two appearances, and a rendering wants both. A rendering
+    /// passes the copies that would land in one folder.
+    ///
+    /// `tied` is every other held copy that `canonical_key` separates from the
+    /// winner **only by its id** — a deterministic pick, but not a judgement,
+    /// so a caller can say so instead of presenting the hash order as one.
+    pub fn best_held(&self, candidates: &[Id<Encoding>], device: Id<Device>) -> Option<Held<'_>> {
+        let held = |e: &&Encoding| {
+            self.holdings
+                .iter()
+                .any(|h| h.encoding.id() == e.id && h.device.id() == device)
+        };
+        let mut candidates: Vec<_> = candidates
+            .iter()
+            .filter_map(|id| self.encodings.get(id))
+            .filter(held)
+            .collect();
+        candidates.sort_by_key(|e| std::cmp::Reverse(canonical_key(e)));
+        // After the sort, where one id named twice sits adjacent — a copy is
+        // not tied with itself.
+        candidates.dedup_by_key(|e| e.id);
+        let (best, rest) = candidates.split_first()?;
+        let worth = |e: &Encoding| {
+            let (h, f, b, c, v, _) = canonical_key(e);
+            (h, f, b, c, v)
+        };
+        let tied = rest
+            .iter()
+            .filter(|e| worth(e) == worth(best))
+            .map(|e| e.id)
+            .collect();
+        Some(Held { best, tied })
     }
 
     /// The best copy this machine can open right now.
@@ -783,6 +834,152 @@ mod tests {
             before,
             "canonical reads no holding, so having copies cannot promote one"
         );
+    }
+
+    fn ids_of(e: &Encodings, rec: Id<Recording>) -> Vec<Id<Encoding>> {
+        e.of(rec).iter().map(|x| x.id).collect()
+    }
+
+    fn hold(e: &mut Encodings, copy: Id<Encoding>, device: Id<Device>) {
+        e.holdings.push(Holding {
+            encoding: Ref::to(copy),
+            device: Ref::to(device),
+            locator: format!("/{copy}"),
+        });
+    }
+
+    /// Two encodings that `canonical_key` can only tell apart by id.
+    fn twins(rec: Id<Recording>) -> (Encoding, Encoding) {
+        let a = encoding(rec, Format::Mp3, 320, Some(19_800));
+        let mut b = a.clone();
+        b.audio = audio(7_777_777);
+        b.id = Id::of_audio(&b.audio);
+        assert_ne!(a.id, b.id, "instrument: the twins are two encodings");
+        (a, b)
+    }
+
+    /// **The best held, not the best anywhere** — #333. A rendering copies
+    /// from this machine, so a better copy on another one is no candidate.
+    #[test]
+    fn best_held_chooses_among_this_devices_copies_only() {
+        let rec = Id::<Recording>::derived(b"r");
+        let (here, there) = (
+            Id::<Device>::derived(b"laptop"),
+            Id::<Device>::derived(b"nas"),
+        );
+        let mut e = Encodings::default();
+        let flac = encoding(rec, Format::Flac, 900, Some(22_000));
+        let mp3 = encoding(rec, Format::Mp3, 320, Some(19_800));
+        let (flac_id, mp3_id) = (flac.id, mp3.id);
+        e.encodings.insert(flac.id, flac);
+        e.encodings.insert(mp3.id, mp3);
+        hold(&mut e, flac_id, there);
+        hold(&mut e, mp3_id, here);
+
+        assert_eq!(
+            e.canonical(rec).unwrap().id,
+            flac_id,
+            "instrument: the FLAC is the best anywhere"
+        );
+        let chosen = e
+            .best_held(&ids_of(&e, rec), here)
+            .expect("one copy is here");
+        assert_eq!(chosen.best.id, mp3_id);
+        assert!(e.best_held(&[], here).is_none());
+        assert!(
+            e.best_held(&[flac_id], here).is_none(),
+            "a copy held elsewhere is no candidate"
+        );
+    }
+
+    /// Lossless over lossy when both are held — the shape of the six albums
+    /// in `renderings.md` §7.
+    #[test]
+    fn best_held_prefers_the_flac_and_calls_it_no_tie() {
+        let rec = Id::<Recording>::derived(b"r");
+        let here = Id::<Device>::derived(b"laptop");
+        let mut e = Encodings::default();
+        let flac = encoding(rec, Format::Flac, 900, Some(22_000));
+        let mp3 = encoding(rec, Format::Mp3, 320, Some(19_800));
+        let (flac_id, mp3_id) = (flac.id, mp3.id);
+        e.encodings.insert(flac.id, flac);
+        e.encodings.insert(mp3.id, mp3);
+        hold(&mut e, flac_id, here);
+        hold(&mut e, mp3_id, here);
+
+        let chosen = e.best_held(&ids_of(&e, rec), here).unwrap();
+        assert_eq!(chosen.best.id, flac_id);
+        assert!(chosen.tied.is_empty(), "the format decided it, not the id");
+    }
+
+    /// **A tie is named as one** — the id picked, and the caller can say so.
+    #[test]
+    fn best_held_names_the_copies_only_an_id_separated() {
+        let rec = Id::<Recording>::derived(b"r");
+        let here = Id::<Device>::derived(b"laptop");
+        let mut e = Encodings::default();
+        let (a, b) = twins(rec);
+        let ids = [a.id, b.id];
+        e.encodings.insert(a.id, a);
+        e.encodings.insert(b.id, b);
+        for id in ids {
+            hold(&mut e, id, here);
+        }
+
+        let chosen = e.best_held(&ids_of(&e, rec), here).unwrap();
+        assert_eq!(
+            chosen.best.id,
+            *ids.iter().max().unwrap(),
+            "the id still decides, deterministically"
+        );
+        assert_eq!(chosen.tied, vec![*ids.iter().min().unwrap()]);
+    }
+
+    /// A copy named twice among the candidates is one copy, not a tie.
+    #[test]
+    fn best_held_does_not_tie_a_copy_with_itself() {
+        let rec = Id::<Recording>::derived(b"r");
+        let here = Id::<Device>::derived(b"laptop");
+        let mut e = Encodings::default();
+        let (a, b) = twins(rec);
+        let (a_id, b_id) = (a.id, b.id);
+        e.encodings.insert(a.id, a);
+        e.encodings.insert(b.id, b);
+        hold(&mut e, a_id, here);
+        hold(&mut e, b_id, here);
+
+        let twice = e.best_held(&[a_id, a_id], here).unwrap();
+        assert!(
+            twice.tied.is_empty(),
+            "the same copy twice: {:?}",
+            twice.tied
+        );
+        let both = e.best_held(&[a_id, a_id, b_id], here).unwrap();
+        assert_eq!(
+            both.tied.len(),
+            1,
+            "instrument: a real twin still ties, once"
+        );
+    }
+
+    /// A measurement that separates two otherwise-equal copies is a decision,
+    /// not a tie.
+    #[test]
+    fn best_held_is_no_tie_when_the_cutoff_decides() {
+        let rec = Id::<Recording>::derived(b"r");
+        let here = Id::<Device>::derived(b"laptop");
+        let mut e = Encodings::default();
+        let (a, mut b) = twins(rec);
+        b.cutoff_hz = Some(Measured::now(19_500));
+        let ids = [a.id, b.id];
+        e.encodings.insert(a.id, a);
+        e.encodings.insert(b.id, b);
+        for id in ids {
+            hold(&mut e, id, here);
+        }
+        let chosen = e.best_held(&ids_of(&e, rec), here).unwrap();
+        assert_eq!(chosen.best.cutoff_hz.map(|c| c.value), Some(19_800));
+        assert!(chosen.tied.is_empty());
     }
 
     /// A suspect file loses to an honest one even when it claims more.
