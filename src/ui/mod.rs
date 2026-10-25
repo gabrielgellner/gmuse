@@ -4966,6 +4966,19 @@ fn select_open_row(ui: &mut Ui) {
     }
 }
 
+/// **This machine's device**, as every writer here derives it — #349.
+///
+/// What a playlist's keeper is compared with: one adopted here is kept by this
+/// device and is ours to edit.
+fn this_device() -> crate::model::id::Id<crate::model::entity::Device> {
+    static DEVICE: std::sync::OnceLock<crate::model::id::Id<crate::model::entity::Device>> =
+        std::sync::OnceLock::new();
+    *DEVICE.get_or_init(|| {
+        let machine = crate::events::machine_id(&crate::config::default_state_dir());
+        crate::model::id::Id::derived(machine.as_bytes())
+    })
+}
+
 /// Write the open playlist back to its file.
 ///
 /// Called after every edit rather than at exit: the same rule ratings and
@@ -4983,6 +4996,23 @@ fn persist_open(ui: &mut Ui, ctx: &Context<'_>) {
         return;
     }
     let id = Id::<Collection>::of_name(&name);
+    // **Not ours to edit** — #349. A playlist another device keeps (a Plexamp one,
+    // mirrored here) is decided there, and an edit made here would be undone by the
+    // next mirror without a word. So the edit is refused and the screen goes back
+    // to what the log says, rather than showing a change that was never kept.
+    if ui
+        .listened
+        .collections_kept
+        .get(&id)
+        .is_some_and(|keeper| *keeper != this_device())
+    {
+        open_playlist(ui, ctx, &name);
+        ui.notify(format!(
+            "{name} is kept by another device (Plex) — edit it there, or adopt it: \
+             `gmuse-tools plex adopt {name:?}`"
+        ));
+        return;
+    }
     let rows: &dyn Listing = ctx.library;
     let desired: Vec<_> = ui
         .playlist
@@ -11462,6 +11492,59 @@ mod tests {
         ui.desk = crate::librarian::Desk::detached(crate::model::id::Id::derived(b"test"))
             .into_enquiries();
         (ui, dir)
+    }
+
+    /// **A playlist another device keeps is not edited here** — #349. The edit is
+    /// refused, the screen goes back to what the log says, and the way out is named.
+    /// The instrument is the same edit on a playlist this device keeps, which lands.
+    #[test]
+    fn a_playlist_kept_by_another_device_refuses_edits() {
+        use crate::model::entity::{Collection, Device};
+        use crate::model::id::Id;
+
+        let store = genre_fixture();
+        let ctx = ctx_of(&store);
+        let keep = |ui: &mut Ui, name: &str, by: Id<Device>| {
+            let collection = Id::<Collection>::of_name(name);
+            record(ui, 1, move |log| {
+                log.append_fact(1, crate::facts::Fact::CollectionKept { collection, by });
+            });
+        };
+        let save = |ui: &mut Ui, name: &str| {
+            let ids: Vec<_> = Listing::rows(lib_of(&store));
+            ui.playlist.clear();
+            ui.playlist.push(ids[2]);
+            ui.playlist.push(ids[0]);
+            press(ui, &ctx, ":");
+            type_line(ui, &ctx, &format!("playlist save {name}"));
+            assert_eq!(filed(ui, name), 2, "{}", ui.status);
+        };
+
+        let (mut ui, _dir) = ui_with_saved(&store, "kept-elsewhere");
+        save(&mut ui, "from plexamp");
+        keep(&mut ui, "from plexamp", Id::derived(b"plex:server"));
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open from plexamp");
+        execute(&mut ui, &ctx, Command::Remove);
+        assert_eq!(filed(&ui, "from plexamp"), 2, "the edit reached the log");
+        assert_eq!(
+            ui.playlist.len(),
+            2,
+            "the screen kept a change the log did not"
+        );
+        assert!(ui.status.contains("plex adopt"), "{}", ui.status);
+
+        let (mut ui, _dir) = ui_with_saved(&store, "kept-here");
+        save(&mut ui, "adopted");
+        keep(&mut ui, "adopted", this_device());
+        press(&mut ui, &ctx, ":");
+        type_line(&mut ui, &ctx, "playlist open adopted");
+        execute(&mut ui, &ctx, Command::Remove);
+        assert_eq!(
+            filed(&ui, "adopted"),
+            1,
+            "instrument: a playlist kept here is edited"
+        );
     }
 
     #[test]

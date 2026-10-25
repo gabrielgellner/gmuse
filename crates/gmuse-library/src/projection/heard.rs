@@ -113,6 +113,10 @@ pub struct Heard {
     pub collections: BTreeMap<Id<Collection>, crate::projection::catalogue::Collected>,
     pub entries: BTreeSet<(Id<Collection>, crate::model::ord::OrdKey, Id<Recording>)>,
     pub entries_retracted: BTreeSet<(Id<Collection>, crate::model::ord::OrdKey, Id<Recording>)>,
+    /// **Which device keeps each collection** — #349, so the player can refuse
+    /// to edit a playlist another device decides.
+    #[serde(default)]
+    pub collections_kept: BTreeMap<Id<Collection>, Id<crate::model::entity::Device>>,
 }
 
 impl Heard {
@@ -139,6 +143,7 @@ impl Heard {
             collections: c.collections.clone(),
             entries: c.entries.clone(),
             entries_retracted: c.entries_retracted.clone(),
+            collections_kept: c.collections_kept.clone(),
         }
     }
 

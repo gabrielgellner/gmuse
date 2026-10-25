@@ -183,6 +183,10 @@ pub struct Catalogue {
     /// reason every other retraction is: an absence cannot tell "removed" from
     /// "never added", and a merge has to be able to.
     pub entries_retracted: BTreeSet<(Id<Collection>, OrdKey, Id<Recording>)>,
+    /// **Which device keeps each collection** — #349, the latest
+    /// `CollectionKept`. A collection absent here is this library's own.
+    #[serde(default)]
+    pub collections_kept: BTreeMap<Id<Collection>, Id<crate::model::entity::Device>>,
     /// Every other name anything is known by. Row existence, so curation
     /// unions across devices the way `narrows` does.
     pub aliases: BTreeSet<(Cataloguable, String, AliasKind)>,
@@ -687,6 +691,13 @@ pub(crate) fn apply_one(cat: &mut Catalogue, stamp: &Stamp, fact: &Fact) {
             if let Some(c) = cat.collections.get_mut(collection) {
                 c.from = Some(source.clone());
             }
+        }
+        // **Kept apart from the collection's own record**, because the two
+        // arrive in either order: a Plex playlist's "kept by Plex" carries when
+        // it was made, its entries when it was last edited, so the keeper can
+        // fold first — and a field on a record that does not exist yet is lost.
+        Fact::CollectionKept { collection, by } => {
+            cat.collections_kept.insert(*collection, *by);
         }
         Fact::CollectionEntryAdded {
             collection,

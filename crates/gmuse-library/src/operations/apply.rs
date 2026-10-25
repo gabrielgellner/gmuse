@@ -1104,4 +1104,120 @@ mod tests {
             landed(super::run(&file, &dir, &[], device, 2_000, true), &dir).expect("applies");
         assert_eq!(again.fresh, 0, "applying it again is the same entries");
     }
+
+    // --- Who keeps a playlist, and a mirrored one — #349 ---------------------
+
+    /// **A mirrored playlist is Plex's: kept by it, its entries in its log — and the
+    /// keeper holds though it was said before the entries were.**
+    #[test]
+    fn a_mirrored_playlist_is_kept_by_plex_whatever_order_its_facts_fold_in() {
+        let (dir, device, [a, b]) = two_recordings("mirror");
+        let plex = Id::<Device>::derived(PLEX.as_bytes());
+        let list = Id::<crate::model::entity::Collection>::of_name("made in plexamp");
+        let at = |ms: i64, seq: u32| format!(r#"{{"device":"{PLEX}","at_ms":{ms},"seq":{seq}}}"#);
+        let lines = [
+            // Kept since the playlist was made (1000), filled when last edited (5000).
+            format!(
+                r#"{{"fact":"kept","collection":"made in plexamp","device":"{PLEX}","elsewhere":{}}}"#,
+                at(1000, 77)
+            ),
+            format!(
+                r#"{{"fact":"collected_into","recording":"{a}","collection":"made in plexamp","ordered":true,"position":0,"elsewhere":{}}}"#,
+                at(5000, 1)
+            ),
+            format!(
+                r#"{{"fact":"collected_into","recording":"{b}","collection":"made in plexamp","ordered":true,"position":1,"elsewhere":{}}}"#,
+                at(5000, 2)
+            ),
+        ];
+        let file = dir.join("mirror.jsonl");
+        std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+        let outcome =
+            landed(super::run(&file, &dir, &[], device, 9_000, true), &dir).expect("applies");
+        assert_eq!(
+            outcome.elsewhere, 3,
+            "the keeper and both entries are Plex's records"
+        );
+
+        let (log, _) = Instance::open(&dir, device, 0);
+        let cat = log.catalogue();
+        assert_eq!(cat.collections_kept.get(&list), Some(&plex));
+        let order: Vec<_> = cat
+            .entries
+            .iter()
+            .filter(|(c, _, _)| *c == list)
+            .map(|(_, _, r)| *r)
+            .collect();
+        assert_eq!(order, vec![a, b]);
+        assert!(
+            cat.collections.contains_key(&list),
+            "the name is declared, by this device"
+        );
+
+        // Plexamp drops the second track; the mirror says so, as Plex. The second,
+        // because position 0's key is `OrdKey::first()` and could not tell a
+        // removal at the right position from one at the start.
+        let drop = format!(
+            r#"{{"fact":"uncollected","recording":"{b}","collection":"made in plexamp","position":1,"elsewhere":{}}}"#,
+            at(8000, 3)
+        );
+        std::fs::write(&file, drop + "\n").unwrap();
+        landed(super::run(&file, &dir, &[], device, 10_000, true), &dir).expect("applies");
+        let (log, _) = Instance::open(&dir, device, 0);
+        let left: Vec<_> = log
+            .catalogue()
+            .entries
+            .iter()
+            .filter(|(c, _, _)| *c == list)
+            .map(|(_, _, r)| *r)
+            .collect();
+        assert_eq!(
+            left,
+            vec![a],
+            "the removal is the same entry, at the same position"
+        );
+    }
+
+    /// **Adopting is `kept` with no device: this one**, in this device's log.
+    #[test]
+    fn adopting_a_playlist_keeps_it_here() {
+        let (dir, device, [a, _]) = two_recordings("adopt");
+        let list = Id::<crate::model::entity::Collection>::of_name("made in plexamp");
+        let file = dir.join("adopt.jsonl");
+        let lines = [
+            format!(
+                r#"{{"fact":"kept","collection":"made in plexamp","device":"{PLEX}","elsewhere":{{"device":"{PLEX}","at_ms":1000,"seq":77}}}}"#
+            ),
+            format!(
+                r#"{{"fact":"collected_into","recording":"{a}","collection":"made in plexamp","ordered":true,"position":0}}"#
+            ),
+        ];
+        std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+        landed(super::run(&file, &dir, &[], device, 2_000, true), &dir).expect("applies");
+        let kept = |dir: &std::path::Path| {
+            Instance::open(dir, device, 0)
+                .0
+                .catalogue()
+                .collections_kept
+                .get(&list)
+                .copied()
+        };
+        assert_eq!(
+            kept(&dir),
+            Some(Id::<Device>::derived(PLEX.as_bytes())),
+            "instrument: Plex kept it first"
+        );
+
+        std::fs::write(
+            &file,
+            r#"{"fact":"kept","collection":"made in plexamp"}"#.to_string() + "\n",
+        )
+        .unwrap();
+        landed(super::run(&file, &dir, &[], device, 3_000, true), &dir).expect("applies");
+        assert_eq!(
+            kept(&dir),
+            Some(device),
+            "the later keeper, this device, wins"
+        );
+    }
 }

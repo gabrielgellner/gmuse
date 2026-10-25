@@ -191,6 +191,36 @@ pub enum Proposal {
         /// play a track twice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<u32>,
+        /// **Said on another device** — #349, for a playlist mirrored from Plex,
+        /// whose entries are the Plex server's to say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elsewhere: Option<Elsewhere>,
+    },
+    /// **An entry taken out of an ordered collection, at its position** — #349.
+    ///
+    /// What a mirror says when a Plexamp playlist loses a track. The position
+    /// is the one `CollectedInto` put it at, so the entry is the same triple.
+    Uncollected {
+        recording: Id<Recording>,
+        collection: String,
+        /// Where `CollectedInto` put it — or, where the entry was made some
+        /// other way and its key is not a position, the key itself in `ord`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ord: Option<OrdKey>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elsewhere: Option<Elsewhere>,
+    },
+    /// **Which device keeps a collection** — #349. `device` names another, as
+    /// an `Elsewhere` does (`plex:<machineIdentifier>`); absent, it is the
+    /// device applying the file, which is what adopting a playlist is.
+    Kept {
+        collection: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elsewhere: Option<Elsewhere>,
     },
     /// **One genre is narrower than another** — the hierarchy #79 can group by
     /// and #93 can close over, but that nothing produced.
@@ -1103,7 +1133,10 @@ impl Proposal {
     pub fn elsewhere(&self) -> Option<&Elsewhere> {
         match self {
             Proposal::Played { elsewhere, .. } => Some(elsewhere),
-            Proposal::Rated { elsewhere, .. } => elsewhere.as_ref(),
+            Proposal::Rated { elsewhere, .. }
+            | Proposal::CollectedInto { elsewhere, .. }
+            | Proposal::Uncollected { elsewhere, .. }
+            | Proposal::Kept { elsewhere, .. } => elsewhere.as_ref(),
             _ => None,
         }
     }
@@ -1117,7 +1150,11 @@ impl Proposal {
             | Proposal::QualifierAssigned { recording, .. }
             | Proposal::Rated { recording, .. }
             | Proposal::Played { recording, .. }
-            | Proposal::CollectedInto { recording, .. } => Subject::Recording(*recording),
+            | Proposal::CollectedInto { recording, .. }
+            | Proposal::Uncollected { recording, .. } => Subject::Recording(*recording),
+            // A collection is not a row: keeping one is curation, like the
+            // vocabulary, and is always answerable.
+            Proposal::Kept { .. } => Subject::Vocabulary,
             // **Whichever level the credit names**, so an album credit is
             // checked against the album that has to exist for it.
             Proposal::Credited { on, .. } | Proposal::Contributed { on, .. } => match on {
@@ -1292,7 +1329,7 @@ pub fn parse(
             ));
             continue;
         }
-        let facts = match into_facts(proposal, library) {
+        let facts = match into_facts(proposal, library, device) {
             Ok(facts) => facts,
             Err(why) => {
                 report.refused.push((n + 1, why));
@@ -1325,10 +1362,15 @@ pub fn parse(
             if declares_a_concept(&fact) && !declared.insert(format!("{fact:?}")) {
                 continue;
             }
-            out.insert(Record {
-                stamp: foreign.unwrap_or_else(|| clock.stamp(now)),
-                fact,
-            });
+            // **A declaration is ours, whoever's the claim is** — #349. A
+            // mirrored entry brings its collection's name with it, and two facts
+            // under one foreign stamp collide; the name only says what an id is
+            // called, so the applying device's clock stamps it, as it would any.
+            let stamp = match foreign {
+                Some(theirs) if !declares_a_concept(&fact) => theirs,
+                _ => clock.stamp(now),
+            };
+            out.insert(Record { stamp, fact });
         }
         report.applied += 1;
     }
@@ -1359,7 +1401,11 @@ fn declares_a_concept(fact: &Fact) -> bool {
 /// proposal for a term the vocabulary had never seen wrote an assignment whose
 /// id nothing named — an id no fact resolves is an id nobody can render.
 /// `Instance::assign_genre` got this right; the apply path bypassed it.
-fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, String> {
+fn into_facts(
+    proposal: Proposal,
+    library: &impl Holdings,
+    here: Id<Device>,
+) -> Result<Vec<Fact>, String> {
     Ok(match proposal {
         Proposal::Measured {
             encoding,
@@ -1566,6 +1612,7 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             collection,
             ordered,
             position,
+            ..
         } => {
             let name = collection.trim();
             if name.is_empty() {
@@ -2185,6 +2232,46 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 artist,
                 role: Id::<Role>::of_name(canonical),
                 basis,
+            }]
+        }
+        Proposal::Uncollected {
+            recording,
+            collection,
+            position,
+            ord,
+            ..
+        } => {
+            let name = collection.trim();
+            if name.is_empty() {
+                return Err("a collection needs a name".to_string());
+            }
+            let ord = match (ord, position) {
+                (Some(key), None) => key,
+                (None, Some(at)) => OrdKey::nth(at),
+                _ => {
+                    return Err(
+                        "an entry is named by its position or its key, one of them".to_string()
+                    );
+                }
+            };
+            vec![Fact::CollectionEntryRemoved {
+                collection: Id::<Collection>::of_name(name),
+                recording,
+                ord,
+            }]
+        }
+        Proposal::Kept {
+            collection, device, ..
+        } => {
+            let name = collection.trim();
+            if name.is_empty() {
+                return Err("a collection needs a name".to_string());
+            }
+            vec![Fact::CollectionKept {
+                collection: Id::<Collection>::of_name(name),
+                by: device
+                    .as_deref()
+                    .map_or(here, |d| Id::<Device>::derived(d.as_bytes())),
             }]
         }
         Proposal::Played {

@@ -125,6 +125,12 @@ impl OrdKey {
         key
     }
 
+    /// The key as text — what a mirror hands a tool, and what an `uncollected`
+    /// proposal names an entry by when its key is not a position (#349).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// A key strictly between `before` and `after`.
     ///
     /// `None` on either side means no neighbour that way — the start or the
