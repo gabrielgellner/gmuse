@@ -6570,6 +6570,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   Four targeted sabotages each fail a test: restoring the exemption, charging the cutoff alone, treating a missing cliff
   as a wall, and raising the floor.
 
+- **2026-10-24** **Plex is one of your devices (#337).** A play or a rating read from Plex needed somewhere to stand,
+  and #337 asked which `Source` rung. None: `RecordingPlayed` and `RecordingRated` carry no `Source`, because neither is
+  a claim about a name. Who said it and when is the stamp's, `(wall, counter, device)`.
+
+  **So Plex's plays and ratings are recorded as the Plex server's own.** They go in a log of their own,
+  `events-plex-<server>.log`, stamped with Plex's time for each (`viewedAt`, `lastRatedAt`) and the server as the
+  device. `DeviceKind::PlexServer` has been in the model since #75 for this. Provenance is the stamp's device, a play
+  from last week sorts last week, and a rating made in Plexamp resolves against one made at the laptop by the rule any
+  two devices already follow: the later stamp wins, and both stay in the log. Because the records are a set and a stamp
+  built from Plex's time and device is the same on every read, reading Plex twice cannot count a play twice.
+
+  **Two rules follow.** Only the machine that renders reads Plex, because the Plex log has one appender like every other
+  (#218). A Plex rating is recorded only where it differs from the library's, so a rating gmuse pushes to Plex does not
+  come back as a new one when Plex re-stamps it.
+
+  **Two alternatives were set aside.** Recording them in this machine's log with a "via Plex" field stamps every play
+  and rating at import time, so a rating from last week would beat one from yesterday because it was read later.
+  Treating a Plex rating as a claim gmuse decides on, which `renderings.md` §6 said until now, makes the phone a
+  second-class device and needs machinery to settle claims nobody disputes. That paragraph is replaced.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no
