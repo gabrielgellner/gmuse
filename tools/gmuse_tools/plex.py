@@ -380,6 +380,11 @@ def register(app: typer.Typer) -> None:
     plex_app = typer.Typer(no_args_is_help=True, help=__doc__)
     app.add_typer(plex_app, name="plex")
 
+    # `verify` and `push` are #340's, and that module imports this one.
+    from gmuse_tools import plex_push  # noqa: PLC0415
+
+    plex_push.register(plex_app)
+
     @plex_app.command("playlists")
     def playlists_cmd(
         server: str = typer.Option(SERVER, help="the Plex server, as this machine reaches it"),

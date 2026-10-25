@@ -84,6 +84,15 @@ class Library:
         """
         ...
 
+    def playlists(self) -> dict[str, list[str]]:
+        """The library's ordered collections — its playlists — #340.
+
+        `{name: [recording ids, in order]}`. A recording listed twice appears
+        twice; a retracted entry does not appear. Unordered collections are
+        curated sets and are left out.
+        """
+        ...
+
     def layout(self, encodings: list[str]) -> list[dict[str, Any]]:
         """Where each copy belongs in a rendered tree, relative — #332.
 
