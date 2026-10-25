@@ -203,6 +203,21 @@ API is reported, never unlocked on its own (`CLAUDE.md`, _reported, never decide
 metadata over Plex's online match, which is known to merge and split artists; do not empty the trash automatically after
 a scan, so a half-pushed rendering cannot drop items; scan after a push rather than on every change.
 
+**Built (#340).** Plex reads the rendering as its own library, `Music (gmuse)`, with _Prefer local metadata_ on and
+genres from the tags rather than Plex's own — which would otherwise replace the library's curated ones. Album art stays
+_Both_, so the `cover.jpg` beside an album is used and Plex fills the 56 that have none.
+
+- **Not read-only, and it does not need to be.** Plex runs as root on this NAS, so no permission keeps it out; but
+  everything in the rendering is made again by the next `just plex write`, so a file Plex deleted is a file put back.
+  The server's settings were left as they were.
+- **`plex verify`** compares every track's title with the library's, through the manifest, and lists every field Plex
+  has locked. Measured, 2026-10-25: 8,440 of 8,440 tracks titled as the library says, 0 locked.
+- **`plex push`** gives Plex the library's ratings where they differ (78) and its playlists: created from the
+  rendering's items, marked as gmuse's in their summary, and re-synced when they drift — a playlist of the same name
+  without the mark is somebody's Plexamp playlist and is left.
+- **`just plex write` ends by asking Plex to rescan.** Its watcher does not see files rsync writes over ssh: after a
+  push renamed 75 files, Plex sat idle on the old paths until asked.
+
 ### Reading Plex back: Plex is one of your devices
 
 **Settled in #337.** A play is `RecordingPlayed` and a rating `RecordingRated`; neither carries a `Source`, because
