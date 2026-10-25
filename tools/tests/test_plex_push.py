@@ -21,6 +21,7 @@ from gmuse_tools.plex_push import (
     Writer,
     keys_by_recording,
     locked,
+    placed_of,
     ratings_to_push,
     section_of,
     tracks_of,
@@ -161,3 +162,22 @@ def test_a_refused_write_never_names_the_token(monkeypatch: pytest.MonkeyPatch) 
         Writer("http://plex", "secret-token").rate("7", 4)
     assert "/:/rate" in str(e.value), "instrument: the error names the request"
     assert "secret-token" not in str(e.value)
+
+
+class Lib:
+    """What `placed_of` asks of the library: every copy, and what it says of each."""
+
+    def query(self, _spec: str | None, *, every_copy: bool) -> list[dict[str, Any]]:
+        """Two copies: one named, one nothing has identified (#160)."""
+        assert every_copy
+        return [{"encoding": "e1", "recording": "r1"}, {"encoding": "e2"}]
+
+    def statement(self, encodings: list[str]) -> list[dict[str, Any]]:
+        """Stars for each."""
+        return [{"stars": 4} for _ in encodings]
+
+
+def test_a_copy_nothing_has_named_is_left_out_not_a_crash() -> None:
+    """The library lists unidentified copies on purpose; none is something to rate."""
+    manifest = {"a.mp3": {"encoding": "e1"}, "b.mp3": {"encoding": "e2"}, "Album/cover.jpg": {"cover": "1-2"}}
+    assert placed_of(Lib(), manifest) == {"a.mp3": Placed("r1", 4, compilation=False)}  # type: ignore[arg-type]

@@ -176,7 +176,10 @@ def keys_by_recording(tracks: Iterable[Track], placed: Mapping[str, Placed]) -> 
 def placed_of(lib: gmuse_core.Library, manifest: Mapping[str, Mapping[str, str]]) -> dict[str, Placed]:
     """`rendered path → what the library says of it`, for every track in the manifest."""
     tracks = {p: row["encoding"] for p, row in manifest.items() if "cover" not in row}
-    recording = {r["encoding"]: r["recording"] for r in lib.query(None, every_copy=True) if r.get("encoding")}
+    # **A copy nothing has named has no recording** (#160): listed, and not one
+    # a rating or a playlist entry can be about.
+    rows = lib.query(None, every_copy=True)
+    recording = {r["encoding"]: r["recording"] for r in rows if r.get("encoding") and r.get("recording")}
     paths = [p for p, e in tracks.items() if e in recording]
     said = lib.statement([tracks[p] for p in paths])
     return {
