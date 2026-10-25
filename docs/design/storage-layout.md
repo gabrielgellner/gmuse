@@ -130,8 +130,16 @@ These were a rendered tree's problem all along; they are now the only tree's pro
   Three limits, and each one is the rule's edge rather than an exception to it. **Accents are spelling**, so `Sinéad`
   and `Björk` keep every mark — `’` and `'` are two renderings of one apostrophe, where `é` and `e` are two letters.
   **Nothing folds into a forbidden character**: `"` is refused here, so `“ ” ″` stay curly rather than land four real
-  titles on `_`. And **`…` is not folded**, because the harm is impersonation and an ellipsis impersonates nothing —
-  folding it would meet the trailing-dot rule above and delete it outright from `When the Pawn…`.
+  titles on `_`.
+
+- **An ellipsis is dropped, and no name starts with a dot** — 2026-10-25, **reversing** #167's "`…` is not folded". That
+  kept the ellipsis because folding it would meet the trailing-dot rule and delete it, and deleting it is now the point:
+  `…`, `...` and `. . .` are typesetting, annoying to type, and a leading one **hides the folder** — Britney Spears'
+  `...Baby One More Time` was the one album the Plex rendering held that Plex never showed, because Plex does not scan a
+  hidden folder. So an ellipsis goes wherever it stands and the space around it closes to one (`I Am Sasha Fierce`,
+  `Oops! I Did It Again`), and a name loses a leading dot or space as it already lost a trailing one. Three dots or
+  more: `Vol. 2` and `Jr.` are not ellipses. The `…` that `fit` writes on a name it shortened is not this — it is added
+  after, and means "this was cut". Measured: 5 names, 35 paths.
 
   The library keeps the sleeve's own text either way. This is how a filename is written, at the same standing as
   replacing a colon — and it is what stops the tree churning every time a better catalogue arrives with better

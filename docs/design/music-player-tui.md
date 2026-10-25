@@ -6591,6 +6591,21 @@ Append here as decisions are made. Format: date, decision, rationale.
   Treating a Plex rating as a claim gmuse decides on, which `renderings.md` §6 said until now, makes the phone a
   second-class device and needs machinery to settle claims nobody disputes. That paragraph is replaced.
 
+- **2026-10-25** **An ellipsis is dropped from a filename, and no name starts with a dot.** This reverses #167's "`…` is
+  not folded". That rule kept the ellipsis because folding it to `...` would meet the trailing-dot rule and delete it.
+  The trouble came from the other end: a title that _starts_ with one became a folder that starts with a dot, which
+  every filesystem here hides. Plex does not scan a hidden folder, so Britney Spears' `...Baby One More Time` was the
+  one album in the rendering that Plex never showed. Asked to choose between `…` and `...`, the owner chose neither:
+  both are typesetting, and both are annoying to type.
+
+  So `storage::component` drops an ellipsis (`…`, `...` or `. . .`, three dots or more) wherever it stands, closes the
+  space around it to one, and strips a leading dot or space as it already stripped a trailing one for Windows.
+  `I Am... Sasha Fierce` is `I Am Sasha Fierce` on disk and `Oops!...I Did It Again` is `Oops! I Did It Again`. `Vol. 2`
+  and `Jr.` stand. The library, the tags and Plex keep the real titles; only the name on disk changes. The `…` that
+  `fit` writes on a shortened name is untouched, because it is added after and means "this was cut". Measured: 5 names,
+  35 paths. One function names the masters and every rendering, so the change is consistent by construction. Three
+  targeted sabotages each fail the new test: two dots counted, spaced dots missed, the leading trim removed.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no
