@@ -289,6 +289,21 @@ pub enum Fact {
         source: String,
     },
 
+    /// **Which device keeps a collection** — #349: where its contents are
+    /// decided, and so where an edit to it belongs.
+    ///
+    /// A playlist made in Plexamp is kept by the Plex server: gmuse mirrors
+    /// it, and does not edit it, because an edit here would be overwritten
+    /// by the next mirror. Adopting one is this fact again, naming this
+    /// device. A collection nothing has said this about is kept here.
+    ///
+    /// **A separate fact, as `CollectionFrozen` is**, and last-writer-wins on
+    /// the collection: keeping is one answer that changes hands, not a set.
+    CollectionKept {
+        collection: Id<Collection>,
+        by: Id<Device>,
+    },
+
     /// One recording sits in one collection, at one position.
     ///
     /// **Membership is row existence**, so two devices adding the same track
@@ -1313,7 +1328,8 @@ impl Fact {
                 vec![Touched::Encoding(*from), Touched::Encoding(*to)]
             }
             Fact::CollectionNamed { collection, .. }
-            | Fact::CollectionFrozen { collection, .. } => vec![Touched::Collection(*collection)],
+            | Fact::CollectionFrozen { collection, .. }
+            | Fact::CollectionKept { collection, .. } => vec![Touched::Collection(*collection)],
             Fact::CollectionEntryAdded {
                 collection,
                 recording,
@@ -1507,6 +1523,12 @@ impl Fact {
             | Fact::EncodingRestored { .. }
             | Fact::RecordingAcquired { .. } => false,
 
+            // **Who keeps a collection** — #349. Adopting a playlist is a named
+            // act through `shelf apply`, never a gesture: a view that could send
+            // this could take a playlist from the device that keeps it, which is
+            // the very edit the player refuses for one it does not.
+            Fact::CollectionKept { .. } => false,
+
             // The *shape* of the vocabulary, which `tools/` curates as a whole
             // rather than a row at a time (`genre-hierarchy-is-curated`) — and the
             // facets, which are the axes themselves and not terms on one.
@@ -1615,6 +1637,7 @@ impl Fact {
             // a view is not a row at all.
             Fact::CollectionNamed { .. }
             | Fact::CollectionFrozen { .. }
+            | Fact::CollectionKept { .. }
             | Fact::CollectionEntryAdded { .. }
             | Fact::CollectionEntryRemoved { .. }
             | Fact::ViewSaved { .. }

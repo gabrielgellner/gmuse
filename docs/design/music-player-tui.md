@@ -6606,6 +6606,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   35 paths. One function names the masters and every rendering, so the change is consistent by construction. Three
   targeted sabotages each fail the new test: two dots counted, spaced dots missed, the leading trim removed.
 
+- **2026-10-25** **A collection is kept by one device, and a playlist made in Plexamp is kept by Plex (#349).** "Each
+  playlist has one home" needed the model to say whose a playlist is. Inferring it from whoever first stamped its name
+  was set aside: `library-api.md` says nothing is implicit, and a playlist the player touched once would blur it. So
+  `Fact::CollectionKept { collection, by: Id<Device> }`, a separate fact as `CollectionFrozen` is and last-writer-wins
+  on the collection. A collection with none is the library's own, which is every collection there was before.
+
+  **A Plexamp playlist is mirrored, not imported.** `plex playlists` records it as the Plex server's. Its keeper is
+  stamped with when it was made, and each entry added or removed with its last edit and an id naming the entry, so an
+  unchanged playlist re-read proposes nothing. The player refuses to edit a playlist another device keeps, and reopens
+  it from the log so the screen never shows an edit that was not kept. **Adopting** is the same fact naming this device,
+  through `plex adopt` and `shelf apply`. It is never a view's gesture: `is_an_edit` refuses `CollectionKept`, because a
+  view that could send it could take a playlist the player refuses to edit.
+
+  **Two traps the tests now hold.** The keeper folds into a map of its own, not onto the collection's record, because a
+  Plex playlist's keeper can fold before the entries that create the record. And a mirrored entry brings its
+  collection's name with it: the name is a declaration and is stamped by the applying device, not under the foreign
+  stamp, where it would collide with the entry. Fourteen targeted sabotages across the fold, the proposals, the player
+  and the mirror each fail a test. One, a removal at the wrong position, passed until the test removed an entry at
+  position 1, because `OrdKey::nth(0)` is `first()`.
+
 - **2026-10-19** **An attached view says which device left (#319).** #318 paused on a departing output, and a
   `--no-attach` view said `paused: <device> disconnected`. The default view, attached to the engine, showed the pause
   and nothing else, so it read like a key nobody pressed. The engine already published the reason on `engine`, and no
