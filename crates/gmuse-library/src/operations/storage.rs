@@ -53,6 +53,12 @@
 //! **Marks only.** Accents are spelling and are kept whole. The library keeps
 //! the sleeve's own text either way; this is how a filename is written, which
 //! is the same standing as replacing a colon.
+//!
+//! ## No ellipsis, and no leading dot — 2026-10-25
+//!
+//! An ellipsis is dropped from a name and the space around it closes up; a
+//! name never starts with a dot, which would hide it. `storage-layout.md` §5
+//! has the measurement and what it reverses.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -183,7 +189,71 @@ fn component(text: &str) -> String {
     // **Composed, and before `fit` measures it** — NFD spends extra bytes on
     // the combining marks, so an accented name would be shortened against a
     // budget it does not really exceed.
-    cleaned.trim().trim_end_matches(['.', ' ']).nfc().collect()
+    //
+    // **And no name starts with a dot** (2026-10-25): a leading `.` hides a
+    // folder on every filesystem here, and Plex does not scan a hidden one —
+    // Britney Spears' `...Baby One More Time` was the one album the rendering
+    // held that Plex never showed.
+    without_ellipses(&cleaned)
+        .trim()
+        .trim_start_matches(['.', ' '])
+        .trim_end_matches(['.', ' '])
+        .nfc()
+        .collect()
+}
+
+/// **An ellipsis is dropped from a name**, and the space around it closes up
+/// to one — 2026-10-25.
+///
+/// `…`, `...` and `. . .` are typesetting, like #167's curly quotes, and a
+/// path is typed rather than printed: `I Am... Sasha Fierce` is `I Am Sasha
+/// Fierce` on disk, `Oops!...I Did It Again` is `Oops! I Did It Again`, and a
+/// leading one goes entirely. The library keeps the sleeve's spelling; this is
+/// only how a file is named. Three or more dots, so `Vol. 2` and `Jr.` stand.
+///
+/// Not the `…` [`fit`] writes on a name it shortened: that one is added after,
+/// and means "this was cut".
+fn without_ellipses(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let end = ellipsis_at(&chars, i);
+        if end == i {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let mut next = end;
+        while chars.get(next) == Some(&' ') {
+            next += 1;
+        }
+        let kept = out.trim_end_matches(' ').len();
+        out.truncate(kept);
+        if !out.is_empty() && next < chars.len() {
+            out.push(' ');
+        }
+        i = next;
+    }
+    out
+}
+
+/// Where an ellipsis starting at `at` ends, or `at` itself if none starts there.
+fn ellipsis_at(chars: &[char], at: usize) -> usize {
+    if chars[at] == '\u{2026}' {
+        return at + 1;
+    }
+    let mut dots = 0;
+    let mut end = at;
+    while chars.get(end) == Some(&'.') {
+        dots += 1;
+        end += 1;
+        // `. . .` counts too: a single space between dots.
+        if chars.get(end) == Some(&' ') && chars.get(end + 1) == Some(&'.') {
+            end += 1;
+        }
+    }
+    if dots >= 3 { end } else { at }
 }
 
 /// Shorten a component to fit, at a word boundary, and say so — #150.
@@ -785,6 +855,42 @@ mod tests {
         );
     }
 
+    /// **An ellipsis is dropped from a name, and none starts with a dot** —
+    /// 2026-10-25. The cases are the library's own.
+    #[test]
+    fn an_ellipsis_is_dropped_and_no_name_starts_with_a_dot() {
+        let cases = [
+            ("I Am... Sasha Fierce", "I Am Sasha Fierce"),
+            ("...Baby One More Time", "Baby One More Time"),
+            ("\u{2026}Baby One More Time", "Baby One More Time"),
+            ("Oops!...I Did It Again", "Oops! I Did It Again"),
+            ("Wait . . . What", "Wait What"),
+            ("When the Pawn\u{2026}", "When the Pawn"),
+            (".38 Special", "38 Special"),
+        ];
+        for (title, on_disk) in cases {
+            assert_eq!(component(title), on_disk, "{title:?}");
+        }
+        // What must stand: two dots are not an ellipsis, and a name's own dot is
+        // meaning — only a trailing one goes, as it always has, for Windows.
+        assert_eq!(component("Vol. 2"), "Vol. 2");
+        assert_eq!(component("Live.. Again"), "Live.. Again");
+        assert_eq!(
+            component("Manhattan Research, Inc."),
+            "Manhattan Research, Inc"
+        );
+        assert!(
+            cases.iter().all(|(title, _)| title.contains("...")
+                || title.contains('\u{2026}')
+                || title.contains(". .")
+                || title.starts_with('.')),
+            "instrument: every case has something to drop"
+        );
+        // `fit`'s own `…` means "this was cut", and is added after.
+        let long = "word ".repeat(80);
+        assert!(fit(&component(&long), 40).ends_with(ELLIPSIS));
+    }
+
     #[test]
     fn composing_happens_before_the_length_budget() {
         // NFD spends two extra bytes per accent. A name that fits composed
@@ -1218,12 +1324,11 @@ mod tests {
         );
         assert_eq!(component("Live 1975–85"), "Live 1975-85");
         assert_eq!(component("40′"), "40'");
-        assert_eq!(
-            component("When the Pawn…"),
-            "When the Pawn…",
-            "an ellipsis impersonates nothing, and folding it would meet the \
-             trailing-dot rule and be stripped away entirely"
-        );
+        // **Reversed 2026-10-25.** This kept `…`, because folding it to `...`
+        // would meet the trailing-dot rule and vanish. It now vanishes on
+        // purpose: an ellipsis is dropped from a name, leading or trailing or
+        // between words (`an_ellipsis_is_dropped_and_no_name_starts_with_a_dot`).
+        assert_eq!(component("When the Pawn…"), "When the Pawn");
         assert_eq!(
             component("Hard\u{a0}Times"),
             "Hard Times",
