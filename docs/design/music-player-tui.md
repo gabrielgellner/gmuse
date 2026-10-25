@@ -6575,11 +6575,12 @@ Append here as decisions are made. Format: date, decision, rationale.
   a claim about a name. Who said it and when is the stamp's, `(wall, counter, device)`.
 
   **So Plex's plays and ratings are recorded as the Plex server's own.** They go in a log of their own,
-  `events-plex-<server>.log`, stamped with Plex's time for each (`viewedAt`, `lastRatedAt`) and the server as the
-  device. `DeviceKind::PlexServer` has been in the model since #75 for this. Provenance is the stamp's device, a play
-  from last week sorts last week, and a rating made in Plexamp resolves against one made at the laptop by the rule any
-  two devices already follow: the later stamp wins, and both stay in the log. Because the records are a set and a stamp
-  built from Plex's time and device is the same on every read, reading Plex twice cannot count a play twice.
+  `log-<device>.jsonl` like every device's, the id derived from `plex:<machineIdentifier>`, stamped with Plex's time for
+  each (`viewedAt`, `lastRatedAt`) and the server as the device. `DeviceKind::PlexServer` has been in the model since
+  #75 for this. Provenance is the stamp's device, a play from last week sorts last week, and a rating made in Plexamp
+  resolves against one made at the laptop by the rule any two devices already follow: the later stamp wins, and both
+  stay in the log. Because the records are a set and a stamp built from Plex's time and device is the same on every
+  read, reading Plex twice cannot count a play twice.
 
   **Two rules follow.** Only the machine that renders reads Plex, because the Plex log has one appender like every other
   (#218). A Plex rating is recorded only where it differs from the library's, so a rating gmuse pushes to Plex does not

@@ -251,6 +251,12 @@ impl Library {
                     .encoding(copy)
                     .and_then(|e| e.recording)
                     .map(|r| r.id());
+                // **The rating the library holds now** — #338's echo rule: a rating
+                // read back from Plex is recorded only where it differs from this.
+                // Not a tag: the writer knows its fields, and this is not one.
+                if let Some(stars) = recording.and_then(|r| catalogue.ratings.get(&r)) {
+                    row.set_item("stars", *stars)?;
+                }
                 if let Some(crate::model::basis::Basis::MusicBrainz(id)) =
                     recording.and_then(|r| catalogue.identified.get(&r))
                 {

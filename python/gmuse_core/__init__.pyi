@@ -76,8 +76,9 @@ class Library:
 
         One dict per encoding id, in order: `title`, `artist`, `album`,
         `album_artist`, `label`, `track`, `disc`, `discs`, `year`, `genres`,
-        `compilation`, `musicbrainz_recording`, `musicbrainz_release`, and the
-        source's `track_gain_db`, `track_peak`, `album_gain_db`, `album_peak`.
+        `compilation`, `musicbrainz_recording`, `musicbrainz_release`, the
+        source's `track_gain_db`, `track_peak`, `album_gain_db`, `album_peak`,
+        and the recording's `stars` (#338) — which is not a tag.
         A field the library has no value for is absent, not empty; `{}` for a
         copy with no row. Read from the projection, never from the file.
         """
