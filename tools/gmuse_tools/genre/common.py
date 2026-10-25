@@ -46,6 +46,8 @@ CASE: Final[dict[str, str]] = {
 KEYCHAIN: Final[dict[str, str]] = {
     "DISCOGS_TOKEN": "gmuse-discogs",
     "ACOUSTID_KEY": "gmuse-acoustid",
+    # Your own Plex server's token (#338): only ever sent to that server.
+    "PLEX_TOKEN": "gmuse-plex",
 }
 
 

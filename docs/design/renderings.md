@@ -207,10 +207,10 @@ a scan, so a half-pushed rendering cannot drop items; scan after a push rather t
 
 **Settled in #337.** A play is `RecordingPlayed` and a rating `RecordingRated`; neither carries a `Source`, because
 neither is a claim about a name — who said it and when is the record's **stamp**, `(wall, counter, device)`. So a play
-or a rating read from Plex is recorded **as the Plex server's own**: in a log of its own, `events-plex-<server>.log`,
-stamped with Plex's time for it (`viewedAt`, `lastRatedAt`) and with the server as the device —
-`DeviceKind::PlexServer`, which the model has carried since #75 for this. Each item is found through the manifest (§4),
-by audio, never by name.
+or a rating read from Plex is recorded **as the Plex server's own**: in a log of its own, `log-<device>.jsonl` like
+every device's, the id derived from `plex:<machineIdentifier>`, stamped with Plex's time for it (`viewedAt`,
+`lastRatedAt`) and with the server as the device — `DeviceKind::PlexServer`, which the model has carried since #75 for
+this. Each item is found through the manifest (§4), by audio, never by name.
 
 - **Provenance is the stamp.** "This came from Plex" is the device; no fact grows a field to say it.
 - **Times are true.** A play on the phone last Tuesday sorts last Tuesday, and "last played" is right whichever device
@@ -230,6 +230,17 @@ by audio, never by name.
 - **No echo.** A rating gmuse pushes to Plex comes back with a new `lastRatedAt`. The reader records a Plex rating only
   where it **differs** from what the library already says, so a push never returns as a new rating; a re-rate to the
   same stars is nothing to record.
+
+**Built (#338).** `gmuse-tools plex read` asks the server for every play and rating in its music libraries, resolves
+each item's file through the rendering's manifest, and writes proposals carrying Plex's stamps; `gmuse shelf apply`
+records them in the Plex device's log — `Proposal::Played` and a `Rated` with an `elsewhere` stamp, judged as records
+rather than by whether the fact was ever said, because two plays of one track are one fact told apart by when. While an
+engine holds the log they are refused rather than handed over, since an engine stamps with its own clock. A half star
+(Plex counts to ten) is reported, not rounded.
+
+Measured against the server, 2026-10-24: 14,122 plays and 63 ratings, all of files in the old libraries and none in the
+rendering, which Plex does not read yet — so the first read proposes nothing, and #339 is how those come in. A read
+takes 7 s.
 
 **Read before every push.** A push that renames a path makes Plex start that track over, and the plays it held for the
 old path go with it. Reading first means they are already in the log.
