@@ -735,7 +735,52 @@ pub enum Proposal {
     Rated {
         recording: Id<Recording>,
         stars: Option<u8>,
+        /// **Said on another device, at its own time** — #338. Absent for a
+        /// rating made here, which the applying device stamps as ever.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elsewhere: Option<Elsewhere>,
     },
+    /// **A play on another device**, at its own time — #338.
+    ///
+    /// Only ever elsewhere, by its shape: a play here is recorded by the player,
+    /// never proposed. The stamp is the play's identity — two plays of one track
+    /// are one fact told apart by when — so it is carried rather than minted, and
+    /// a file proposing one play twice proposes one record.
+    Played {
+        recording: Id<Recording>,
+        #[serde(default)]
+        encoding: Option<Id<Encoding>>,
+        elsewhere: Elsewhere,
+    },
+}
+
+/// **Who said it and when, for something said on another device** — #337, #338.
+///
+/// A Plex server is one of the user's devices: its plays and ratings are recorded
+/// as its own, in its own log, under its own times. This is the stamp they carry,
+/// built from Plex's data so that reading the same history twice builds the same
+/// stamp — which is what makes it harmless.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct Elsewhere {
+    /// What the device's id is derived from, as a local device's is from its
+    /// machine id: `plex:<machineIdentifier>` for a Plex server.
+    pub device: String,
+    /// When, by that device's clock, in milliseconds since the epoch.
+    pub at_ms: i64,
+    /// What tells two things said in one millisecond apart — the history entry's
+    /// id for a play, the item's for a rating — so no two share a stamp.
+    pub seq: u32,
+}
+
+impl Elsewhere {
+    /// The stamp this carries, on the device it names.
+    pub fn stamp(&self) -> crate::model::clock::Stamp {
+        crate::model::clock::Stamp {
+            wall: self.at_ms,
+            counter: self.seq,
+            device: Id::<Device>::derived(self.device.as_bytes()),
+        }
+    }
 }
 
 /// One slot in a [`Proposal::Tracklisted`] — a track on the record, held or
@@ -1047,6 +1092,15 @@ pub enum Subject {
 }
 
 impl Proposal {
+    /// The other device's stamp a proposal carries, if it carries one — #338.
+    pub fn elsewhere(&self) -> Option<&Elsewhere> {
+        match self {
+            Proposal::Played { elsewhere, .. } => Some(elsewhere),
+            Proposal::Rated { elsewhere, .. } => elsewhere.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn subject(&self) -> Subject {
         match self {
             Proposal::Measured { encoding, .. }
@@ -1055,6 +1109,7 @@ impl Proposal {
             Proposal::GenreAssigned { recording, .. }
             | Proposal::QualifierAssigned { recording, .. }
             | Proposal::Rated { recording, .. }
+            | Proposal::Played { recording, .. }
             | Proposal::CollectedInto { recording, .. } => Subject::Recording(*recording),
             // **Whichever level the credit names**, so an album credit is
             // checked against the album that has to exist for it.
@@ -1220,6 +1275,16 @@ pub fn parse(
             report.unknown.push(proposal.subject());
             continue;
         }
+        // **Another device's stamp, carried, not minted** — #338. Refused where it
+        // names this device: a stamp of ours must come from our own clock.
+        let foreign = proposal.elsewhere().map(Elsewhere::stamp);
+        if foreign.is_some_and(|s| s.device == device) {
+            report.refused.push((
+                n + 1,
+                "a stamp naming this device must come from its own clock, not a file".into(),
+            ));
+            continue;
+        }
         let facts = match into_facts(proposal, library) {
             Ok(facts) => facts,
             Err(why) => {
@@ -1254,7 +1319,7 @@ pub fn parse(
                 continue;
             }
             out.insert(Record {
-                stamp: clock.stamp(now),
+                stamp: foreign.unwrap_or_else(|| clock.stamp(now)),
                 fact,
             });
         }
@@ -2114,7 +2179,17 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                 basis,
             }]
         }
-        Proposal::Rated { recording, stars } => {
+        Proposal::Played {
+            recording,
+            encoding,
+            ..
+        } => vec![Fact::RecordingPlayed {
+            recording,
+            encoding,
+        }],
+        Proposal::Rated {
+            recording, stars, ..
+        } => {
             vec![Fact::RecordingRated { recording, stars }]
         }
     })

@@ -189,6 +189,15 @@ pub struct Instance {
     /// — which is precisely why it has to be counted. A condition that used to announce
     /// itself by data going missing now announces itself here or not at all.
     pub collisions: usize,
+    /// **Records another device said, taken in this session and not yet on disk** —
+    /// #338.
+    ///
+    /// A Plex server's plays and ratings carry its own stamps (#337), so they go to
+    /// *its* log and not this device's: [`Instance::flush`] writes these to each
+    /// one's own file. Kept apart from [`Instance::merge`], which takes in records
+    /// already on disk from a sync, because writing those again would duplicate
+    /// every line of another machine's log.
+    elsewhere: BTreeSet<Record>,
 }
 
 impl Instance {
@@ -199,6 +208,7 @@ impl Instance {
             drifts: Vec::new(),
             collisions: 0,
             flushed: None,
+            elsewhere: BTreeSet::new(),
         }
     }
 
@@ -1569,6 +1579,7 @@ impl Instance {
                 drifts,
                 collisions,
                 flushed,
+                elsewhere: BTreeSet::new(),
             },
             damage,
         )
@@ -1603,6 +1614,7 @@ impl Instance {
             drifts,
             collisions: 0,
             flushed: at.of_device(device),
+            elsewhere: BTreeSet::new(),
         }
     }
 
@@ -1669,11 +1681,66 @@ impl Instance {
             .filter(|r| self.flushed.is_none_or(|mark| r.stamp > mark))
             .cloned()
             .collect();
-        let written = durable::append(&durable::log_path(data_dir, device), &pending)?;
+        let mut written = durable::append(&durable::log_path(data_dir, device), &pending)?;
         if let Some(highest) = pending.iter().next_back() {
             self.flushed = Some(highest.stamp);
         }
+        // **Each to its own device's log** — #338. Grouped, so a file is opened once
+        // per device; cleared only once written, so a failure leaves them pending.
+        let mut by_device: std::collections::BTreeMap<Id<Device>, BTreeSet<Record>> =
+            Default::default();
+        for record in &self.elsewhere {
+            by_device
+                .entry(record.stamp.device)
+                .or_default()
+                .insert(record.clone());
+        }
+        for (other, records) in by_device {
+            written += durable::append(&durable::log_path(data_dir, other), &records)?;
+        }
+        self.elsewhere.clear();
         Ok(written)
+    }
+
+    /// **Take in records another device said**, to be written to its own log — #338.
+    ///
+    /// For a record whose stamp is not ours and which no sync delivered: a Plex
+    /// server's play, read from its history and stamped with its own time (#337).
+    /// One already held is not taken again, which is what makes reading Plex twice
+    /// harmless: the stamp is built from Plex's data, so it is the same record.
+    /// Returns how many were new.
+    ///
+    /// **Never one of ours.** A stamp naming this device must come from this
+    /// device's clock, or one machine's log holds a second writer's records — the
+    /// contradiction the append lock exists to prevent — and it panics rather than
+    /// write one, because a caller handing one here is a bug, not an input.
+    pub fn record_elsewhere(&mut self, now: i64, records: &BTreeSet<Record>) -> usize {
+        let mine = self.clock.device();
+        let mut taken = 0;
+        for record in records {
+            assert_ne!(
+                record.stamp.device, mine,
+                "a record of ours must be stamped by our clock"
+            );
+            if self.records.contains(record) {
+                continue;
+            }
+            if let Drift::Implausible { ahead_ms } = self.clock.observe(&record.stamp, now) {
+                self.drifts.push(Drift::Implausible { ahead_ms });
+            }
+            self.records.insert(record.clone());
+            self.elsewhere.insert(record.clone());
+            taken += 1;
+        }
+        taken
+    }
+
+    /// How many records of other devices are waiting for [`Instance::flush`].
+    ///
+    /// For [`Instance::pending`]'s caller: those are *facts* to hand an engine to
+    /// stamp, and these carry their own stamps, which an engine would replace.
+    pub fn elsewhere_pending(&self) -> usize {
+        self.elsewhere.len()
     }
 
     pub fn merge(&mut self, now: i64, incoming: &BTreeSet<Record>) {
