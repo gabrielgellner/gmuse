@@ -93,6 +93,27 @@ class Library:
         """
         ...
 
+    def keepers(self) -> dict[str, str]:
+        """Who keeps each collection another device does — #349. `{name: device id}`."""
+        ...
+
+    @property
+    def device(self) -> str:
+        """This library's device id, as every writer here derives it."""
+        ...
+
+    @staticmethod
+    def device_of(name: str) -> str:
+        """A device's id from the name it is derived from: `plex:<machineIdentifier>`."""
+        ...
+
+    def mirror_diff(
+        self, name: str, desired: list[tuple[int, str]]
+    ) -> tuple[list[tuple[int, str]], list[tuple[str, str]]]:
+        """What a mirror changes: given `(position, recording)` as another device has
+        them, the entries to add `(position, recording)` and to take out `(ord, recording)`."""
+        ...
+
     def layout(self, encodings: list[str]) -> list[dict[str, Any]]:
         """Where each copy belongs in a rendered tree, relative — #332.
 

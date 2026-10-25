@@ -40,15 +40,16 @@ import typer
 from gmuse_tools.destination import parse as parse_target
 from gmuse_tools.genre.common import secret
 from gmuse_tools.library import open_library
-from gmuse_tools.plex import PLEX_ROOT, PLEX_SCALE, SERVER, TARGET, Server, device_of, every
+from gmuse_tools.plex import GMUSE_SUMMARY, PLEX_ROOT, PLEX_SCALE, SERVER, TARGET, Server, device_of, every
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
 
     import gmuse_core
 
-#: What a pushed playlist's summary says, so a mirror knows whose it is.
-SUMMARY: Final = "Kept by gmuse: edits here are not read back."
+#: What a pushed playlist's summary says, so a mirror knows whose it is — one
+#: definition, the mirror's (`plex.GMUSE_SUMMARY`), so the two cannot drift.
+SUMMARY: Final = GMUSE_SUMMARY
 
 #: Plex's item types: an artist, an album, a track.
 TYPES: Final = {"8": "artist", "9": "album", "10": "track"}
@@ -251,6 +252,8 @@ class Writer:
         self._send("DELETE", f"/playlists/{key}/items", {})
         uri = f"server://{machine}/com.plexapp.plugins.library/library/metadata/{','.join(keys)}"
         self._send("PUT", f"/playlists/{key}/items", {"uri": uri})
+        # An adopted playlist had no mark; it is gmuse's now, and says so.
+        self._send("PUT", f"/playlists/{key}", {"summary": SUMMARY})
 
     def _send(self, method: str, path: str, params: Mapping[str, str]) -> str:
         headers = {"X-Plex-Token": self.token, "Accept": "application/xml"}
@@ -305,16 +308,19 @@ def run_push(*, write: bool) -> None:
     tracks = tracks_of(server.get, section, PLEX_ROOT)
     ratings = ratings_to_push(tracks, placed)
     keys = keys_by_recording(tracks, placed)
+    keepers = lib.keepers()
     held = {
         p.get("title", ""): Held(
             p.get("ratingKey", ""),
-            p.get("summary") == SUMMARY,
+            # **gmuse's**: one `push` made, or one the library adopted (#349).
+            p.get("summary") == SUMMARY or keepers.get(p.get("title", "")) == lib.device,
             [i.get("ratingKey", "") for i in every(server.get, f"/playlists/{p.get('ratingKey')}/items")],
         )
         for p in server.get("/playlists", {"playlistType": "audio"})
         if p.get("smart") == "0"
     }
-    wanted = lib.playlists()
+    # **Never one Plex keeps**: that is the mirror's, read from Plex, not pushed to it.
+    wanted = {n: recs for n, recs in lib.playlists().items() if keepers.get(n, lib.device) == lib.device}
     lists = {name: [keys[r] for r in recs if r in keys] for name, recs in wanted.items()}
     plan = plan_playlists(lists, held)
     said = {
