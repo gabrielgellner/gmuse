@@ -25,6 +25,11 @@ use pyo3::types::PyList;
 use crate::model::entity::Device;
 use crate::model::id::Id;
 
+/// Entries a mirror adds, `(position, recording)` — #349.
+type MirrorAdds = Vec<(u32, String)>;
+/// Entries a mirror takes out, `(ord, recording)` — #349.
+type MirrorDrops = Vec<(String, String)>;
+
 /// A read handle on the library. **Opens no music file.**
 ///
 /// It folds the log — or loads the snapshot and stats the logs to find it is
@@ -310,6 +315,72 @@ impl Library {
             out.set_item(&collected.name, entries)?;
         }
         Ok(out.into())
+    }
+
+    /// **Who keeps each collection that another device does** — #349.
+    ///
+    /// `{name: device id}`. A collection absent here is this library's own.
+    fn keepers(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let catalogue = self.projection.catalogue();
+        let out = pyo3::types::PyDict::new(py);
+        for (id, by) in &catalogue.collections_kept {
+            if let Some(c) = catalogue.collections.get(id) {
+                out.set_item(&c.name, by.to_string())?;
+            }
+        }
+        Ok(out.into())
+    }
+
+    /// This library's device, as every writer here derives it.
+    #[getter]
+    fn device(&self) -> String {
+        self.device.to_string()
+    }
+
+    /// **A device's id from the name it is derived from** — `plex:<machineIdentifier>`.
+    #[staticmethod]
+    fn device_of(name: &str) -> String {
+        Id::<Device>::derived(name.as_bytes()).to_string()
+    }
+
+    /// **What a mirror changes** — #349: given a playlist's entries as another
+    /// device has them, `(position, recording)` in order, the entries to add
+    /// (`[(position, recording)]`) and to take out (`[(ord, recording)]`), so the
+    /// library's copy becomes exactly that list. Computed here, because a
+    /// position's key is `OrdKey::nth` and the diff is over keys.
+    fn mirror_diff(
+        &self,
+        name: &str,
+        desired: Vec<(u32, String)>,
+    ) -> PyResult<(MirrorAdds, MirrorDrops)> {
+        let catalogue = self.projection.catalogue();
+        let id = Id::<crate::model::entity::Collection>::of_name(name.trim());
+        let held: std::collections::BTreeSet<(String, String)> = catalogue
+            .entries
+            .iter()
+            .filter(|(c, _, _)| *c == id)
+            .filter(|e| !catalogue.entries_retracted.contains(e))
+            .map(|(_, ord, r)| (ord.as_str().to_string(), r.to_string()))
+            .collect();
+        let wanted: std::collections::BTreeMap<(String, String), u32> = desired
+            .into_iter()
+            .map(|(at, r)| {
+                (
+                    (crate::model::ord::OrdKey::nth(at).as_str().to_string(), r),
+                    at,
+                )
+            })
+            .collect();
+        let adds = wanted
+            .iter()
+            .filter(|(k, _)| !held.contains(*k))
+            .map(|((_, r), at)| (*at, r.clone()))
+            .collect();
+        let drops = held
+            .into_iter()
+            .filter(|k| !wanted.contains_key(k))
+            .collect();
+        Ok((adds, drops))
     }
 
     /// **Where each of these copies belongs in a rendered tree** — #332.

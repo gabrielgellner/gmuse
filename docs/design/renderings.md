@@ -282,6 +282,16 @@ here, home in Plex — is still #349's to build.
 Measured, 2026-10-25: two hand-made playlists, 159 of 170 entries placed (_Did someone say Pop?_ 144 of 153, _Some dance
 favs_ 15 of 17); the eleven left are audio the library does not hold or cannot read. Five smart playlists left as rules.
 
+**Who keeps a playlist (#349).** `Fact::CollectionKept { collection, by }` says which device decides a collection,
+latest wins, and one nothing has said this about is the library's own. A playlist made in Plexamp is **kept by the Plex
+server**: `plex playlists` mirrors it — its entries added where Plex has them and taken out where it does not, each
+stamped with the playlist's last edit and an id naming the entry, so an unchanged playlist re-read proposes nothing —
+and the player refuses to edit it, because the next mirror would undo the edit without a word. `plex adopt NAME` is
+`CollectionKept` naming this device: the mirror leaves it, the player edits it, and `plex push` re-syncs it to Plex and
+marks it gmuse's. A view cannot send `CollectionKept`; adopting is a named act. The keeper folds into a map of its own,
+apart from the collection's record, because the two arrive in either order: a Plex playlist's keeper carries when it was
+made and its entries when it was last edited.
+
 **Read before every push.** A push that renames a path makes Plex start that track over, and the plays it held for the
 old path go with it. Reading first means they are already in the log.
 

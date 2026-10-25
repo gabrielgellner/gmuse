@@ -46,6 +46,7 @@ import collections
 import json
 import re
 import xml.etree.ElementTree as ET
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -330,42 +331,143 @@ def rate(track: ET.Element, device: str, copy: Copy, out: Read) -> None:
         out.ratings += 1
 
 
-def playlists(get: Callable[..., ET.Element], resolve: Callable[[str], Copy | Why]) -> Read:
-    """The server's hand-made audio playlists as ordered collections — #349.
+#: What a pushed playlist's summary says — `plex_push.SUMMARY`, the mark of one
+#: gmuse made. Named here too because the mirror must skip it, and this module
+#: is the one `plex_push` imports from.
+GMUSE_SUMMARY: Final = "Kept by gmuse: edits here are not read back."
+
+
+@dataclass(frozen=True)
+class Keeping:
+    """What the mirror needs from the library: which playlists it keeps, and how to diff one."""
+
+    #: The names of the ordered collections this library keeps — its own, and any adopted.
+    ours: frozenset[str]
+    #: `(name, [(position, recording)]) → (adds, drops)`, `gmuse_core.Library.mirror_diff`.
+    diff: Callable[[str, list[tuple[int, str]]], tuple[list[tuple[int, str]], list[tuple[str, str]]]]
+
+
+def playlists(get: Callable[..., ET.Element], resolve: Callable[[str], Copy | Why], keeping: Keeping) -> Read:
+    """Mirror the server's hand-made audio playlists that are Plex's — #349.
 
     **Hand-made only.** A smart playlist is a rule Plex re-evaluates — `❤️
     Tracks` is "rated tracks" — so it refills from whatever Plex serves and is
-    not a list to keep. A hand-made one is something a person put together,
-    and it points at items a switch to the rendering (#340) removes.
+    not a list to keep.
 
-    **The position is the item's index in Plex's list**, not its index among
-    the ones placed, so a track that cannot be placed leaves a gap rather than
-    shifting the rest — and a later read, once it can be, lands it where it was.
+    **Plex's only.** A playlist carrying gmuse's mark is one `plex push` made,
+    and one of a name the library keeps — its own, or adopted — is the
+    library's to decide; both are left. Every other is **kept by the Plex
+    server**: mirrored here, entries added where Plex has them and taken out
+    where it does not, all as Plex's records, so the player refuses to edit it.
+
+    **The position is the item's index in Plex's list**, so a track that cannot
+    be placed leaves a gap rather than shifting the rest. **Each change is
+    stamped with the playlist's last edit** and an id that names the entry, so a
+    playlist re-read unchanged proposes nothing and a re-add after a removal
+    folds after it.
     """
     out = Read()
+    side = Side(get, resolve, keeping, device_of(get))
     for playlist in get("/playlists", {"playlistType": "audio"}):
+        title = (playlist.get("title") or "").strip()
         if playlist.get("smart") == "1":
             continue
-        title = (playlist.get("title") or "").strip()
-        for n, item in enumerate(every(get, f"/playlists/{playlist.get('ratingKey')}/items")):
-            part = item.find("./Media/Part")
-            file = part.get("file", "") if part is not None else ""
-            copy = resolve(file)
-            if isinstance(copy, str):
-                out.left[f"an entry of {title!r}: {copy}"] += 1
-                out.leave(file, f"{title} #{n + 1}: {copy}")
-                continue
-            out.proposals.append(
-                {
-                    "fact": "collected_into",
-                    "recording": copy.recording,
-                    "collection": title,
-                    "ordered": True,
-                    "position": n,
-                }
-            )
-            out.plays += 1
+        if playlist.get("summary") == GMUSE_SUMMARY or title in keeping.ours:
+            out.left[f"{title!r}: gmuse's own"] += 1
+            continue
+        mirror(playlist, title, side, out)
     return out
+
+
+@dataclass(frozen=True)
+class Side:
+    """The Plex side of a mirror: the server, how a file is placed, what the library keeps, who Plex is."""
+
+    get: Callable[..., ET.Element]
+    resolve: Callable[[str], Copy | Why]
+    keeping: Keeping
+    device: str
+
+
+def mirror(playlist: ET.Element, title: str, side: Side, out: Read) -> None:
+    """One Plex playlist made into proposals: kept by Plex, its entries as Plex has them."""
+    get, resolve, keeping, device = side.get, side.resolve, side.keeping, side.device
+    edited = playlist.get("updatedAt") or playlist.get("addedAt")
+    desired: list[tuple[int, str]] = []
+    item_ids: dict[tuple[int, str], str] = {}
+    for n, item in enumerate(every(get, f"/playlists/{playlist.get('ratingKey')}/items")):
+        part = item.find("./Media/Part")
+        file = part.get("file", "") if part is not None else ""
+        copy = resolve(file)
+        if isinstance(copy, str):
+            out.left[f"an entry of {title!r}: {copy}"] += 1
+            out.leave(file, f"{title} #{n + 1}: {copy}")
+            continue
+        desired.append((n, copy.recording))
+        item_ids[(n, copy.recording)] = item.get("playlistItemID", "")
+    kept = stamp(device, playlist.get("addedAt"), playlist.get("ratingKey"))
+    if kept is not None:
+        out.proposals.append({"fact": "kept", "collection": title, "device": device, "elsewhere": kept})
+    adds, drops = keeping.diff(title, desired)
+    for position, recording in adds:
+        at = stamp(device, edited, item_ids.get((position, recording)))
+        if at is None:
+            out.left[f"an entry of {title!r}: Plex gave no id for it"] += 1
+            continue
+        out.proposals.append(
+            {
+                "fact": "collected_into",
+                "recording": recording,
+                "collection": title,
+                "ordered": True,
+                "position": position,
+                "elsewhere": at,
+            }
+        )
+        out.plays += 1
+    for ord_key, recording in drops:
+        seq = str(zlib.crc32(f"{title}\0{ord_key}\0{recording}".encode()))
+        at = stamp(device, edited, seq)
+        if at is not None:
+            out.proposals.append(
+                {"fact": "uncollected", "recording": recording, "collection": title, "ord": ord_key, "elsewhere": at}
+            )
+
+
+def run_playlists(server: str, target: str, plex_root: str, mount: str) -> None:
+    """`plex playlists`: the mirror's proposals, and what it left."""
+    token = secret("PLEX_TOKEN")
+    if not token:
+        print('no Plex token: security add-generic-password -a "$USER" -s gmuse-plex -w')
+        raise typer.Exit(1)
+    lib = open_library()
+    text = parse_target(target).read_manifest()
+    manifest = json.loads(text)["files"] if text else {}
+    audio = Audio(lib, mount, cache_dir() / "plex-audio.json")
+    try:
+        plex_device = gmuse_core_device(device_of(Server(server, token).get))
+        keepers = lib.keepers()
+        ours = frozenset(n for n in lib.playlists() if keepers.get(n) != plex_device)
+        found = playlists(
+            Server(server, token).get,
+            resolver(manifest, copies_of(lib), plex_root, audio),
+            Keeping(ours, lib.mirror_diff),
+        )
+    finally:
+        audio.save()
+    out = out_path("plex-playlists.jsonl")
+    lib.propose([json.dumps(p) for p in found.proposals], out)
+    print(f"  {found.plays} playlist entr{'y' if found.plays == 1 else 'ies'} proposed")
+    for why, n in sorted(found.left.items()):
+        print(f"  {n:6d}  left: {why}")
+    print(f"\n-> {out}\n   gmuse shelf apply {out} --write")
+
+
+def gmuse_core_device(name: str) -> str:
+    """A device's id from its name, as the library derives it."""
+    import gmuse_core  # noqa: PLC0415 — imported where needed, as `library.py` does
+
+    return gmuse_core.Library.device_of(name)
 
 
 def copies_of(lib: gmuse_core.Library) -> dict[str, Copy]:
@@ -385,6 +487,19 @@ def register(app: typer.Typer) -> None:
 
     plex_push.register(plex_app)
 
+    @plex_app.command("adopt")
+    def adopt_cmd(name: str = typer.Argument(..., help="the playlist, as Plex names it")) -> None:
+        """Make a playlist Plex keeps the library's: edited here, pushed to Plex, no longer mirrored."""
+        lib = open_library()
+        keeper = lib.keepers().get(name)
+        if keeper is None or keeper == lib.device:
+            print(f"{name!r} is not a playlist another device keeps — nothing to adopt")
+            raise typer.Exit(1)
+        out = out_path("plex-adopt.jsonl")
+        lib.propose([json.dumps({"fact": "kept", "collection": name})], out)
+        print(f"-> {out}\n   gmuse shelf apply {out} --write")
+        print("   then `gmuse-tools plex push --write` marks it gmuse's in Plex")
+
     @plex_app.command("playlists")
     def playlists_cmd(
         server: str = typer.Option(SERVER, help="the Plex server, as this machine reaches it"),
@@ -392,25 +507,8 @@ def register(app: typer.Typer) -> None:
         plex_root: str = typer.Option(PLEX_ROOT, help="where Plex sees that rendering"),
         mount: str = typer.Option(MOUNT, help="where this machine mounts the NAS's Media share"),
     ) -> None:
-        """Read Plex's hand-made playlists into ordered collections, for `gmuse shelf apply`."""
-        token = secret("PLEX_TOKEN")
-        if not token:
-            print('no Plex token: security add-generic-password -a "$USER" -s gmuse-plex -w')
-            raise typer.Exit(1)
-        lib = open_library()
-        text = parse_target(target).read_manifest()
-        manifest = json.loads(text)["files"] if text else {}
-        audio = Audio(lib, mount, cache_dir() / "plex-audio.json")
-        try:
-            found = playlists(Server(server, token).get, resolver(manifest, copies_of(lib), plex_root, audio))
-        finally:
-            audio.save()
-        out = out_path("plex-playlists.jsonl")
-        lib.propose([json.dumps(p) for p in found.proposals], out)
-        print(f"  {found.plays} playlist entr{'y' if found.plays == 1 else 'ies'} proposed")
-        for why, n in sorted(found.left.items()):
-            print(f"  {n:6d}  left: {why}")
-        print(f"\n-> {out}\n   gmuse shelf apply {out} --write")
+        """Mirror Plex's own hand-made playlists into the library, for `gmuse shelf apply`."""
+        run_playlists(server, target, plex_root, mount)
 
     @plex_app.command("read")
     def read_cmd(

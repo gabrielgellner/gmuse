@@ -211,5 +211,7 @@ def test_a_resync_clears_then_adds_in_order(monkeypatch: pytest.MonkeyPatch) -> 
     assert [(m, u.rsplit("plex", 1)[-1]) for m, u, _ in sent.calls] == [
         ("DELETE", "/playlists/11/items"),
         ("PUT", "/playlists/11/items"),
+        ("PUT", "/playlists/11"),
     ]
+    assert sent.calls[2][2] == {"summary": plex_push.SUMMARY}, "an adopted playlist is marked gmuse's"
     assert sent.calls[1][2]["uri"].endswith("/library/metadata/3,1,2")

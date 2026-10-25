@@ -11,9 +11,9 @@ from __future__ import annotations
 import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from gmuse_tools.plex import PAGE, Audio, Copy, every, playlists, read, resolver, stamp
+from gmuse_tools.plex import GMUSE_SUMMARY, PAGE, Audio, Copy, Keeping, every, playlists, read, resolver, stamp
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -40,8 +40,8 @@ class FakeServer:
         self.rated: list[dict[str, str]] = []
         self.files: dict[str, str] = {}
         self.asked: list[str] = []
-        #: `(ratingKey, title, smart, [file per entry])`
-        self.lists: list[tuple[str, str, bool, list[str]]] = []
+        #: Each a playlist's attributes plus `files`, one per entry.
+        self.lists: list[dict[str, Any]] = []
 
     def get(self, path: str, _params: Mapping[str, str] | None = None, *, start: int = 0) -> ET.Element:
         """One page of the answer to one endpoint."""
@@ -68,20 +68,17 @@ class FakeServer:
         raise AssertionError(path)
 
     def playlist(self, path: str, start: int) -> ET.Element:
-        """The playlists, or one playlist's entries."""
+        """The playlists, or one playlist's entries, each with a `playlistItemID`."""
         if path == "/playlists":
-            return element(
-                "MediaContainer",
-                [
-                    {"tag": "Playlist", "ratingKey": k, "title": t, "smart": "1" if sm else "0"}
-                    for k, t, sm, _ in self.lists
-                ],
-            )
+            out = ET.Element("MediaContainer")
+            for p in self.lists:
+                ET.SubElement(out, "Playlist", {k: str(v) for k, v in p.items() if k != "files"})
+            return out
         key = path.split("/")[2]
-        files = next(f for k, _, _, f in self.lists if k == key)
+        files = next(p["files"] for p in self.lists if p["ratingKey"] == key)
         out = ET.Element("MediaContainer", {"totalSize": str(len(files))})
-        for file in files[start : start + PAGE]:
-            track = ET.SubElement(out, "Track")
+        for n, file in enumerate(files[start : start + PAGE], start):
+            track = ET.SubElement(out, "Track", {"playlistItemID": str(1000 + n)})
             ET.SubElement(ET.SubElement(track, "Media"), "Part", {"file": file})
         return out
 
@@ -306,30 +303,87 @@ def test_a_file_the_share_will_not_open_is_not_gone(tmp_path: Path) -> None:
     )
 
 
-# --- Playlists — #349 -----------------------------------------------------------
+# --- Playlists: the mirror — #349 -------------------------------------------
 
 RENDERED = f"{ROOT}/Orbital/Diversions/05 Lush.mp3"
 
 
-def test_a_hand_made_playlist_comes_in_order_and_a_smart_one_does_not() -> None:
-    """Positions are Plex's indices: a gap for what cannot be placed, two entries for a track listed twice."""
+def plexamp(key: str, title: str, files: list[str], **attrs: str) -> dict[str, Any]:
+    """A hand-made Plex playlist, made at 1000 and last edited at 2000."""
+    return {
+        "ratingKey": key,
+        "title": title,
+        "smart": "0",
+        "addedAt": "1000",
+        "updatedAt": "2000",
+        "files": files,
+        **attrs,
+    }
+
+
+def nothing_held(_name: str, desired: list[tuple[int, str]]) -> tuple[list[tuple[int, str]], list[tuple[str, str]]]:
+    """A library holding none of a playlist yet: everything is an add."""
+    return desired, []
+
+
+def test_a_plexamp_playlist_is_mirrored_as_plexs() -> None:
+    """Kept by Plex, its entries at Plex's positions — a gap where one cannot be placed — and Plex's stamps."""
+    server = FakeServer()
+    server.lists = [plexamp("5", "made in plexamp", [RENDERED, "/share/Media/Music/elsewhere.mp3", RENDERED])]
+    found = playlists(server.get, library(), Keeping(frozenset(), nothing_held))
+    kept, *entries = found.proposals
+    assert kept == {
+        "fact": "kept",
+        "collection": "made in plexamp",
+        "device": DEVICE,
+        "elsewhere": {"device": DEVICE, "at_ms": 1_000_000, "seq": 5},
+    }
+    assert [(e["position"], e["elsewhere"]["seq"]) for e in entries] == [(0, 1000), (2, 1002)], "a gap at 1"
+    assert all(e["elsewhere"]["at_ms"] == 2_000_000 for e in entries), "stamped with the playlist's last edit"
+    assert found.left["an entry of 'made in plexamp': a file no rendering made"] == 1
+
+
+def test_a_playlist_gmuse_keeps_or_made_is_not_mirrored() -> None:
+    """Smart ones are rules; marked ones `push` made; a name the library keeps is its own."""
     server = FakeServer()
     server.lists = [
-        ("1", "\u2764\ufe0f Tracks", True, [RENDERED]),
-        ("2", "Some dance favs", False, [RENDERED, "/share/Media/Music/elsewhere.mp3", RENDERED]),
+        plexamp("1", "\u2764\ufe0f Tracks", [RENDERED], smart="1"),
+        plexamp("2", "Did someone say Pop?", [RENDERED], summary=GMUSE_SUMMARY),
+        plexamp("3", "adopted", [RENDERED]),
+        plexamp("4", "theirs", [RENDERED]),
     ]
-    found = playlists(server.get, library())
-    assert [p["collection"] for p in found.proposals] == ["Some dance favs"] * 2, "the smart playlist is a rule, left"
-    assert [p["position"] for p in found.proposals] == [0, 2], "the unplaced entry leaves a gap at 1"
-    assert all(p["ordered"] and p["recording"] == "rec-lush" for p in found.proposals)
-    assert found.left["an entry of 'Some dance favs': a file no rendering made"] == 1
-    assert "Some dance favs #2: a file no rendering made" in [w for w, _, _ in found.unplaced.values()]
+    found = playlists(server.get, library(), Keeping(frozenset({"adopted"}), nothing_held))
+    assert {p["collection"] for p in found.proposals} == {"theirs"}, "instrument: one is mirrored"
+
+
+def test_a_playlist_unchanged_proposes_only_its_keeper() -> None:
+    """Nothing to add or remove is nothing proposed — and the keeper's record is the same every read."""
+    server = FakeServer()
+    server.lists = [plexamp("5", "made in plexamp", [RENDERED])]
+    found = playlists(server.get, library(), Keeping(frozenset(), lambda _n, _d: ([], [])))
+    assert [p["fact"] for p in found.proposals] == ["kept"]
+
+
+def test_an_entry_plex_dropped_is_taken_out_by_its_key() -> None:
+    """A removal names the entry's key, and its stamp is the same on every read of that state."""
+    server = FakeServer()
+    server.lists = [plexamp("5", "made in plexamp", [])]
+
+    def drop(_name: str, _desired: list[tuple[int, str]]) -> tuple[list[tuple[int, str]], list[tuple[str, str]]]:
+        return [], [("a1", "rec-gone")]
+
+    first = playlists(server.get, library(), Keeping(frozenset(), drop)).proposals
+    (removed,) = [p for p in first if p["fact"] == "uncollected"]
+    assert (removed["ord"], removed["recording"]) == ("a1", "rec-gone")
+    assert removed["elsewhere"]["at_ms"] == 2_000_000
+    assert playlists(server.get, library(), Keeping(frozenset(), drop)).proposals == first
 
 
 def test_a_long_playlist_is_read_to_its_end() -> None:
     """Every page of its items."""
     server = FakeServer()
-    server.lists = [("2", "Did someone say Pop?", False, [RENDERED] * (PAGE + 3))]
-    found = playlists(server.get, library())
-    assert len(found.proposals) == PAGE + 3
-    assert found.proposals[-1]["position"] == PAGE + 2
+    server.lists = [plexamp("2", "long", [RENDERED] * (PAGE + 3))]
+    found = playlists(server.get, library(), Keeping(frozenset(), nothing_held))
+    entries = [p for p in found.proposals if p["fact"] == "collected_into"]
+    assert len(entries) == PAGE + 3
+    assert entries[-1]["position"] == PAGE + 2
