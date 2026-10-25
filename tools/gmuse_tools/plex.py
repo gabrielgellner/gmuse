@@ -330,6 +330,44 @@ def rate(track: ET.Element, device: str, copy: Copy, out: Read) -> None:
         out.ratings += 1
 
 
+def playlists(get: Callable[..., ET.Element], resolve: Callable[[str], Copy | Why]) -> Read:
+    """The server's hand-made audio playlists as ordered collections — #349.
+
+    **Hand-made only.** A smart playlist is a rule Plex re-evaluates — `❤️
+    Tracks` is "rated tracks" — so it refills from whatever Plex serves and is
+    not a list to keep. A hand-made one is something a person put together,
+    and it points at items a switch to the rendering (#340) removes.
+
+    **The position is the item's index in Plex's list**, not its index among
+    the ones placed, so a track that cannot be placed leaves a gap rather than
+    shifting the rest — and a later read, once it can be, lands it where it was.
+    """
+    out = Read()
+    for playlist in get("/playlists", {"playlistType": "audio"}):
+        if playlist.get("smart") == "1":
+            continue
+        title = (playlist.get("title") or "").strip()
+        for n, item in enumerate(every(get, f"/playlists/{playlist.get('ratingKey')}/items")):
+            part = item.find("./Media/Part")
+            file = part.get("file", "") if part is not None else ""
+            copy = resolve(file)
+            if isinstance(copy, str):
+                out.left[f"an entry of {title!r}: {copy}"] += 1
+                out.leave(file, f"{title} #{n + 1}: {copy}")
+                continue
+            out.proposals.append(
+                {
+                    "fact": "collected_into",
+                    "recording": copy.recording,
+                    "collection": title,
+                    "ordered": True,
+                    "position": n,
+                }
+            )
+            out.plays += 1
+    return out
+
+
 def copies_of(lib: gmuse_core.Library) -> dict[str, Copy]:
     """Every copy this library holds, with its recording and the stars that recording has now."""
     rows = [r for r in lib.query(None, every_copy=True) if r.get("encoding") and r.get("recording")]
@@ -341,6 +379,33 @@ def register(app: typer.Typer) -> None:
     """Attach `plex read`."""
     plex_app = typer.Typer(no_args_is_help=True, help=__doc__)
     app.add_typer(plex_app, name="plex")
+
+    @plex_app.command("playlists")
+    def playlists_cmd(
+        server: str = typer.Option(SERVER, help="the Plex server, as this machine reaches it"),
+        target: str = typer.Option(TARGET, help="the rendering Plex reads, whose manifest names its files"),
+        plex_root: str = typer.Option(PLEX_ROOT, help="where Plex sees that rendering"),
+        mount: str = typer.Option(MOUNT, help="where this machine mounts the NAS's Media share"),
+    ) -> None:
+        """Read Plex's hand-made playlists into ordered collections, for `gmuse shelf apply`."""
+        token = secret("PLEX_TOKEN")
+        if not token:
+            print('no Plex token: security add-generic-password -a "$USER" -s gmuse-plex -w')
+            raise typer.Exit(1)
+        lib = open_library()
+        text = parse_target(target).read_manifest()
+        manifest = json.loads(text)["files"] if text else {}
+        audio = Audio(lib, mount, cache_dir() / "plex-audio.json")
+        try:
+            found = playlists(Server(server, token).get, resolver(manifest, copies_of(lib), plex_root, audio))
+        finally:
+            audio.save()
+        out = out_path("plex-playlists.jsonl")
+        lib.propose([json.dumps(p) for p in found.proposals], out)
+        print(f"  {found.plays} playlist entr{'y' if found.plays == 1 else 'ies'} proposed")
+        for why, n in sorted(found.left.items()):
+            print(f"  {n:6d}  left: {why}")
+        print(f"\n-> {out}\n   gmuse shelf apply {out} --write")
 
     @plex_app.command("read")
     def read_cmd(

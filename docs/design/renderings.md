@@ -252,6 +252,21 @@ about seven minutes. Left: 927 plays of 335 files whose audio the library does n
 recording it does — Lewis Del Mar's _AUGUST_, the standard edition of _Speak for Yourself_), 223 plays of 12 files whose
 audio could not be read (WMA, which Symphonia does not decode), and 15 plays of items Plex no longer has.
 
+### Playlists (#349)
+
+**A playlist is an ordered collection** (#118), so a Plex playlist comes in as one, each entry placed like a play — the
+manifest, then the audio — at **its index in Plex's list**, so an entry that cannot be placed leaves a gap rather than
+shifting the rest. `CollectedInto` gained a `position` for it; a seeded catalog still shares one, because a folder has
+no running order. A smart playlist is a rule Plex re-evaluates, not a list, and is not read.
+
+**The playlists Plex holds today become gmuse's**, against #349's default of "a Plex playlist stays Plex's": they point
+at the old libraries' items, which the switch (#340) removes, so a playlist left at home in Plex would empty. gmuse
+pushes them back once Plex reads the rendering. Mirroring a playlist made in Plexamp _after_ the switch — read-only
+here, home in Plex — is still #349's to build.
+
+Measured, 2026-10-25: two hand-made playlists, 159 of 170 entries placed (_Did someone say Pop?_ 144 of 153, _Some dance
+favs_ 15 of 17); the eleven left are audio the library does not hold or cannot read. Five smart playlists left as rules.
+
 **Read before every push.** A push that renames a path makes Plex start that track over, and the plays it held for the
 old path go with it. Reading first means they are already in the log.
 
