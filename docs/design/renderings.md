@@ -203,14 +203,33 @@ API is reported, never unlocked on its own (`CLAUDE.md`, _reported, never decide
 metadata over Plex's online match, which is known to merge and split artists; do not empty the trash automatically after
 a scan, so a half-pushed rendering cannot drop items; scan after a push rather than on every change.
 
-### Reading Plex back
+### Reading Plex back: Plex is one of your devices
 
-**One direction for state, ingestion for events.** Neither is two-way sync.
+**Settled in #337.** A play is `RecordingPlayed` and a rating `RecordingRated`; neither carries a `Source`, because
+neither is a claim about a name — who said it and when is the record's **stamp**, `(wall, counter, device)`. So a play
+or a rating read from Plex is recorded **as the Plex server's own**: in a log of its own, `events-plex-<server>.log`,
+stamped with Plex's time for it (`viewedAt`, `lastRatedAt`) and with the server as the device —
+`DeviceKind::PlexServer`, which the model has carried since #75 for this. Each item is found through the manifest (§4),
+by audio, never by name.
 
-- **A play on the phone is an event**, append-only, and cannot conflict with anything. It enters the log as a play with
-  Plex as its source, found through the manifest (§4).
-- **A rating set in Plex is a claim**, not a write. gmuse shows it beside its own and decides; the next push overwrites
-  Plex's copy with the library's.
+- **Provenance is the stamp.** "This came from Plex" is the device; no fact grows a field to say it.
+- **Times are true.** A play on the phone last Tuesday sorts last Tuesday, and "last played" is right whichever device
+  played it.
+- **A rating is the latest, as across any two devices.** Rating a track in Plexamp is the same act as rating it at the
+  laptop, with the same standing; `RecordingRated` already resolves two devices by the later stamp and keeps both in the
+  log. **This replaces "a rating set in Plex is a claim"**, which would have made the phone a second-class device and
+  needed machinery to show and settle claims nobody disputes.
+- **Reading twice is harmless by construction.** The library's records are a set, so a record with the same stamp and
+  fact is one record; a stamp built from Plex's own time and device is the same on every read. The reader also starts
+  from the newest stamp already in the Plex log, so it does not ask for what it has.
+
+**Two rules come with it.**
+
+- **One machine reads Plex** — the one that renders. Every log has one appender (#218), and two machines reading the
+  same server would both be writing the Plex device's log.
+- **No echo.** A rating gmuse pushes to Plex comes back with a new `lastRatedAt`. The reader records a Plex rating only
+  where it **differs** from what the library already says, so a push never returns as a new rating; a re-rate to the
+  same stars is nothing to record.
 
 **Read before every push.** A push that renames a path makes Plex start that track over, and the plays it held for the
 old path go with it. Reading first means they are already in the log.
@@ -260,8 +279,8 @@ declared operation like any other import, never by a renderer writing to the log
 
 ## 9. Open
 
-- **The Plex source.** A play or a rating from Plex needs a `Source` to stand at, and whether that is a new rung or an
-  existing one with a device is a domain-model question.
+- ~~**The Plex source.**~~ Settled in #337: not a `Source` at all. Plex is a device, its plays and ratings live in its
+  own log under its own stamps, and a rating from Plex has the standing of a rating from any device (§6).
 - ~~**The encoder setting.**~~ Settled in #334: `mp3-320` for Plex, as asked, with `mp3-v0` available. Either is a cache
   key, so the choice can change later at the cost of one re-render.
 - ~~**Where the transcode cache lives.**~~ Settled in #334: on the machine that renders, in the tools' cache directory.
