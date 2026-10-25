@@ -242,6 +242,16 @@ Measured against the server, 2026-10-24: 14,122 plays and 63 ratings, all of fil
 rendering, which Plex does not read yet — so the first read proposes nothing, and #339 is how those come in. A read
 takes 7 s.
 
+**And the old libraries, by their audio (#339).** A file outside the rendering is placed by hashing its bytes through
+the share with the library's own hash (`encoding_at`) and finding that encoding — never by its name. Hashes are kept by
+path, size and mtime, so a re-read hashes nothing. What cannot be placed goes to `tools/out/plex-unplaced.tsv` with its
+plays and rating attached, because for a file the library does not hold that history is its only record.
+
+Measured, 2026-10-24: **12,957 of 14,122 plays and 53 of 63 ratings placed** — 1,868 files hashed through the mount in
+about seven minutes. Left: 927 plays of 335 files whose audio the library does not hold (often a different download of a
+recording it does — Lewis Del Mar's _AUGUST_, the standard edition of _Speak for Yourself_), 223 plays of 12 files whose
+audio could not be read (WMA, which Symphonia does not decode), and 15 plays of items Plex no longer has.
+
 **Read before every push.** A push that renames a path makes Plex start that track over, and the plays it held for the
 old path go with it. Reading first means they are already in the log.
 
