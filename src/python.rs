@@ -289,6 +289,29 @@ impl Library {
         Ok(out.into())
     }
 
+    /// **The library's ordered collections — its playlists** — #340, #349.
+    ///
+    /// `{name: [recording ids, in order]}`, read from the fold: an entry is live
+    /// unless a retraction names it, and the set is keyed by position before
+    /// recording, so walking it is the list's order — a recording listed twice
+    /// appears twice. Unordered collections are curated sets, not playlists, and
+    /// are left out.
+    fn playlists(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let catalogue = self.projection.catalogue();
+        let out = pyo3::types::PyDict::new(py);
+        for (id, collected) in catalogue.collections.iter().filter(|(_, c)| c.ordered) {
+            let entries: Vec<String> = catalogue
+                .entries
+                .iter()
+                .filter(|(c, _, _)| c == id)
+                .filter(|e| !catalogue.entries_retracted.contains(e))
+                .map(|(_, _, r)| r.to_string())
+                .collect();
+            out.set_item(&collected.name, entries)?;
+        }
+        Ok(out.into())
+    }
+
     /// **Where each of these copies belongs in a rendered tree** — #332.
     ///
     /// `storage-layout.md` §2's path, relative, for each encoding id: a dict
