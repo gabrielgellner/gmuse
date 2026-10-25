@@ -184,6 +184,13 @@ pub enum Proposal {
         /// from a folder is a set somebody curated, not a running order.
         #[serde(default)]
         ordered: bool,
+        /// **Where in the list**, counting from 0 — #349, for a playlist read from
+        /// somewhere that has an order. Absent for a seeded catalog, whose
+        /// entries share one position because a folder has no running order.
+        /// Two positions holding one recording are two entries: a playlist can
+        /// play a track twice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<u32>,
     },
     /// **One genre is narrower than another** — the hierarchy #79 can group by
     /// and #93 can close over, but that nothing produced.
@@ -1558,6 +1565,7 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
             recording,
             collection,
             ordered,
+            position,
         } => {
             let name = collection.trim();
             if name.is_empty() {
@@ -1583,7 +1591,7 @@ fn into_facts(proposal: Proposal, library: &impl Holdings) -> Result<Vec<Fact>, 
                     //
                     // A collection later made *ordered* wants its keys spread
                     // first, which is the compaction `domain-model.md` names.
-                    ord: OrdKey::first(),
+                    ord: position.map_or_else(OrdKey::first, OrdKey::nth),
                 },
             ]
         }

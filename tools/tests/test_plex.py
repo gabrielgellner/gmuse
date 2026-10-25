@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from gmuse_tools.plex import PAGE, Audio, Copy, every, read, resolver, stamp
+from gmuse_tools.plex import PAGE, Audio, Copy, every, playlists, read, resolver, stamp
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -40,6 +40,8 @@ class FakeServer:
         self.rated: list[dict[str, str]] = []
         self.files: dict[str, str] = {}
         self.asked: list[str] = []
+        #: `(ratingKey, title, smart, [file per entry])`
+        self.lists: list[tuple[str, str, bool, list[str]]] = []
 
     def get(self, path: str, _params: Mapping[str, str] | None = None, *, start: int = 0) -> ET.Element:
         """One page of the answer to one endpoint."""
@@ -52,6 +54,8 @@ class FakeServer:
             return page(self.history, start)
         if path.startswith("/library/sections/"):
             return page(self.rated, start)
+        if path.startswith("/playlists"):
+            return self.playlist(path, start)
         if path.startswith("/library/metadata/"):
             keys = path.rsplit("/", 1)[-1].split(",")
             out = ET.Element("MediaContainer")
@@ -62,6 +66,24 @@ class FakeServer:
                     ET.SubElement(media, "Part", {"file": self.files[k]})
             return out
         raise AssertionError(path)
+
+    def playlist(self, path: str, start: int) -> ET.Element:
+        """The playlists, or one playlist's entries."""
+        if path == "/playlists":
+            return element(
+                "MediaContainer",
+                [
+                    {"tag": "Playlist", "ratingKey": k, "title": t, "smart": "1" if sm else "0"}
+                    for k, t, sm, _ in self.lists
+                ],
+            )
+        key = path.split("/")[2]
+        files = next(f for k, _, _, f in self.lists if k == key)
+        out = ET.Element("MediaContainer", {"totalSize": str(len(files))})
+        for file in files[start : start + PAGE]:
+            track = ET.SubElement(out, "Track")
+            ET.SubElement(ET.SubElement(track, "Media"), "Part", {"file": file})
+        return out
 
 
 def page(items: list[dict[str, str]], start: int) -> ET.Element:
@@ -282,3 +304,32 @@ def test_a_file_the_share_will_not_open_is_not_gone(tmp_path: Path) -> None:
     assert audio("/share/Media/DanceMusic/Lvis Mejía - In Praise Of Shadows.mp3") == (
         "!a file that could not be read through the share"
     )
+
+
+# --- Playlists — #349 -----------------------------------------------------------
+
+RENDERED = f"{ROOT}/Orbital/Diversions/05 Lush.mp3"
+
+
+def test_a_hand_made_playlist_comes_in_order_and_a_smart_one_does_not() -> None:
+    """Positions are Plex's indices: a gap for what cannot be placed, two entries for a track listed twice."""
+    server = FakeServer()
+    server.lists = [
+        ("1", "\u2764\ufe0f Tracks", True, [RENDERED]),
+        ("2", "Some dance favs", False, [RENDERED, "/share/Media/Music/elsewhere.mp3", RENDERED]),
+    ]
+    found = playlists(server.get, library())
+    assert [p["collection"] for p in found.proposals] == ["Some dance favs"] * 2, "the smart playlist is a rule, left"
+    assert [p["position"] for p in found.proposals] == [0, 2], "the unplaced entry leaves a gap at 1"
+    assert all(p["ordered"] and p["recording"] == "rec-lush" for p in found.proposals)
+    assert found.left["an entry of 'Some dance favs': a file no rendering made"] == 1
+    assert "Some dance favs #2: a file no rendering made" in [w for w, _, _ in found.unplaced.values()]
+
+
+def test_a_long_playlist_is_read_to_its_end() -> None:
+    """Every page of its items."""
+    server = FakeServer()
+    server.lists = [("2", "Did someone say Pop?", False, [RENDERED] * (PAGE + 3))]
+    found = playlists(server.get, library())
+    assert len(found.proposals) == PAGE + 3
+    assert found.proposals[-1]["position"] == PAGE + 2

@@ -112,6 +112,19 @@ impl OrdKey {
         Self("a0".to_string())
     }
 
+    /// **The key the `n`th entry gets when a list is built by appending** — #349.
+    ///
+    /// What a playlist read from somewhere else needs: its order is given, and
+    /// each entry's key is the one appending would have minted, so the list is
+    /// the same whichever way it was built. `nth(0)` is [`OrdKey::first`].
+    pub fn nth(n: u32) -> Self {
+        let mut key = Self::first();
+        for _ in 0..n {
+            key = Self::between(Some(&key), None);
+        }
+        key
+    }
+
     /// A key strictly between `before` and `after`.
     ///
     /// `None` on either side means no neighbour that way — the start or the
@@ -602,5 +615,28 @@ mod measured {
             lo = OrdKey::between(Some(&lo), Some(&b));
         }
         eprintln!("bisect    1,000 → {} digits, {lo}", lo.len());
+    }
+
+    /// **The `n`th key is the one appending would mint** — #349, so a playlist
+    /// read from Plex orders exactly as one built in the player.
+    #[test]
+    fn nth_is_what_appending_gives_and_rises_strictly() {
+        assert_eq!(OrdKey::nth(0), OrdKey::first());
+        let mut appended = vec![OrdKey::first()];
+        for _ in 0..300 {
+            let next = OrdKey::between(appended.last(), None);
+            appended.push(next);
+        }
+        assert!(
+            appended.len() > 300,
+            "instrument: a list long enough to widen the integer"
+        );
+        for (n, key) in appended.iter().enumerate() {
+            assert_eq!(&OrdKey::nth(n as u32), key, "position {n}");
+        }
+        assert!(
+            appended.windows(2).all(|w| w[0] < w[1]),
+            "each sorts after the last"
+        );
     }
 }

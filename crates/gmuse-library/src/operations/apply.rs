@@ -1029,4 +1029,79 @@ mod tests {
             "instrument: the first record is still there"
         );
     }
+
+    // --- A playlist with an order — #349 ----------------------------------------
+
+    /// A library holding two recordings, from two real files.
+    fn two_recordings(
+        name: &str,
+    ) -> (
+        std::path::PathBuf,
+        Id<Device>,
+        [Id<crate::model::entity::Recording>; 2],
+    ) {
+        let dir = std::env::temp_dir().join(format!("gmuse-apply-playlist-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let device = Id::<Device>::derived(b"laptop");
+        let mut log = Instance::new(device);
+        let mut held = Vec::new();
+        for (n, (title, len)) in [("Callisto", 4410), ("Triton", 8820)]
+            .into_iter()
+            .enumerate()
+        {
+            let file = dir.join(format!("0{} {title}.wav", n + 1));
+            crate::model::round_trip::write_wav(&file, len);
+            crate::model::round_trip::write_tags(&file, title, "Bodzin", None);
+            held.push(crate::model::ingest::read(&file).expect("reads"));
+        }
+        log.ingest(100, &held);
+        log.flush(&dir).expect("writes");
+        let cat = log.catalogue();
+        let by_title = |t: &str| {
+            *cat.recordings
+                .iter()
+                .find(|(_, r)| r.title == t)
+                .map(|(id, _)| id)
+                .expect("a recording by that title")
+        };
+        (dir, device, [by_title("Callisto"), by_title("Triton")])
+    }
+
+    /// **A playlist keeps its order, and a track listed twice is listed twice.**
+    #[test]
+    fn a_playlist_with_positions_lands_in_order() {
+        let (dir, device, [a, b]) = two_recordings("order");
+        let line = |r: Id<crate::model::entity::Recording>, at: u32| {
+            format!(
+                r#"{{"fact":"collected_into","recording":"{r}","collection":"Some dance favs","ordered":true,"position":{at}}}"#
+            )
+        };
+        let file = dir.join("playlist.jsonl");
+        std::fs::write(
+            &file,
+            [line(b, 0), line(a, 1), line(b, 2)].join("\n") + "\n",
+        )
+        .unwrap();
+        landed(super::run(&file, &dir, &[], device, 1_000, true), &dir).expect("applies");
+
+        let (log, _) = Instance::open(&dir, device, 0);
+        let cat = log.catalogue();
+        let list = Id::<crate::model::entity::Collection>::of_name("Some dance favs");
+        let order: Vec<_> = cat
+            .entries
+            .iter()
+            .filter(|(c, _, _)| *c == list)
+            .map(|(_, _, r)| *r)
+            .collect();
+        assert_eq!(
+            order,
+            vec![b, a, b],
+            "in the playlist's order, Triton twice"
+        );
+
+        let again =
+            landed(super::run(&file, &dir, &[], device, 2_000, true), &dir).expect("applies");
+        assert_eq!(again.fresh, 0, "applying it again is the same entries");
+    }
 }
