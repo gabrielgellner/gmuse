@@ -188,6 +188,38 @@ def placed_of(lib: gmuse_core.Library, manifest: Mapping[str, Mapping[str, str]]
     }
 
 
+@dataclass(frozen=True)
+class Held:
+    """A playlist Plex holds: its key, whether gmuse made it, and its items in order."""
+
+    key: str
+    ours: bool
+    items: list[str]
+
+
+def plan_playlists(wanted: Mapping[str, list[str]], held: Mapping[str, Held]) -> list[tuple[str, str, list[str]]]:
+    """`(action, name, keys)` for each of the library's playlists.
+
+    `create` where Plex has none by that name; `same` where gmuse's copy
+    already holds these items in this order; `resync` where gmuse's copy has
+    drifted — a renamed file is a new Plex item, and the old one's entry
+    drops out of every playlist that held it; `leave` where a playlist of
+    that name is not gmuse's, because it is somebody's Plexamp playlist.
+    """
+    out = []
+    for name, keys in wanted.items():
+        have = held.get(name)
+        if have is None:
+            out.append(("create", name, keys))
+        elif not have.ours:
+            out.append(("leave", name, keys))
+        elif have.items == keys:
+            out.append(("same", name, keys))
+        else:
+            out.append(("resync", name, keys))
+    return out
+
+
 @dataclass
 class Writer:
     """The two writes `push` makes, to the user's own server."""
@@ -209,6 +241,16 @@ class Writer:
         key = next((p.get("ratingKey") for p in ET.fromstring(created)), None)  # noqa: S314 — the user's own server
         if key:
             self._send("PUT", f"/playlists/{key}", {"summary": SUMMARY})
+
+    def refresh(self, section: str) -> None:
+        """Ask Plex to scan one library."""
+        self._send("GET", f"/library/sections/{section}/refresh", {})
+
+    def resync(self, machine: str, key: str, keys: list[str]) -> None:
+        """Replace a playlist's items with these, in this order, keeping the playlist."""
+        self._send("DELETE", f"/playlists/{key}/items", {})
+        uri = f"server://{machine}/com.plexapp.plugins.library/library/metadata/{','.join(keys)}"
+        self._send("PUT", f"/playlists/{key}/items", {"uri": uri})
 
     def _send(self, method: str, path: str, params: Mapping[str, str]) -> str:
         headers = {"X-Plex-Token": self.token, "Accept": "application/xml"}
@@ -263,13 +305,27 @@ def run_push(*, write: bool) -> None:
     tracks = tracks_of(server.get, section, PLEX_ROOT)
     ratings = ratings_to_push(tracks, placed)
     keys = keys_by_recording(tracks, placed)
-    existing = {p.get("title") for p in server.get("/playlists", {"playlistType": "audio"})}
+    held = {
+        p.get("title", ""): Held(
+            p.get("ratingKey", ""),
+            p.get("summary") == SUMMARY,
+            [i.get("ratingKey", "") for i in every(server.get, f"/playlists/{p.get('ratingKey')}/items")],
+        )
+        for p in server.get("/playlists", {"playlistType": "audio"})
+        if p.get("smart") == "0"
+    }
     wanted = lib.playlists()
     lists = {name: [keys[r] for r in recs if r in keys] for name, recs in wanted.items()}
+    plan = plan_playlists(lists, held)
+    said = {
+        "create": "to create",
+        "same": "already as the library has it",
+        "resync": "drifted — to re-sync",
+        "leave": "a Plex playlist of that name is not gmuse's — left",
+    }
     print(f"  {len(ratings)} rating(s) to set")
-    for name, ks in lists.items():
-        had = "a Plex playlist of that name exists — left, not replaced" if name in existing else "to create"
-        print(f"  playlist {name!r}: {len(ks)} of {len(wanted[name])} entries in the rendering, {had}")
+    for action, name, ks in plan:
+        print(f"  playlist {name!r}: {len(ks)} of {len(wanted[name])} entries in the rendering, {said[action]}")
     if not write:
         print("dry run — pass --write")
         return
@@ -277,14 +333,35 @@ def run_push(*, write: bool) -> None:
     for key, stars in ratings:
         out.rate(key, stars)
     machine = device_of(server.get).removeprefix("plex:")
-    made = [name for name, ks in lists.items() if name not in existing and ks]
-    for name in made:
-        out.playlist(machine, name, lists[name])
-    print(f"wrote {len(ratings)} rating(s) and {len(made)} playlist(s)")
+    for action, name, ks in plan:
+        if action == "create" and ks:
+            out.playlist(machine, name, ks)
+        elif action == "resync":
+            out.resync(machine, held[name].key, ks)
+    changed = sum(1 for a, _, ks in plan if (a == "create" and ks) or a == "resync")
+    print(f"wrote {len(ratings)} rating(s); {changed} playlist(s) created or re-synced")
+
+
+def run_refresh() -> None:
+    """`plex refresh`: tell Plex to scan the rendering's library now.
+
+    **Its own watcher does not see a push** (measured, 2026-10-25): after
+    `just plex write` renamed 75 files over ssh, Plex sat idle with the old
+    paths until asked. So the push asks.
+    """
+    token, server = connect()
+    section = section_of(server.get, PLEX_ROOT)
+    Writer(SERVER, token).refresh(section)
+    print(f"  asked Plex to scan library {section}")
 
 
 def register(plex_app: typer.Typer) -> None:
-    """Attach `plex verify` and `plex push` to the `plex` group."""
+    """Attach `plex verify`, `plex push` and `plex refresh` to the `plex` group."""
+
+    @plex_app.command("refresh")
+    def refresh_cmd() -> None:
+        """Ask Plex to scan the rendering's library now — what `just plex write` ends with."""
+        run_refresh()
 
     @plex_app.command("verify")
     def verify_cmd() -> None:

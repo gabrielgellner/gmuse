@@ -589,3 +589,6 @@ plex write="":
     WRITE=()
     if [ "{{write}}" = "write" ]; then WRITE=(--write); fi
     cd tools && uv run gmuse-tools render "$TARGET" --encode mp3-320 "${WRITE[@]}"
+    # **And tell Plex** (#340): its watcher does not see files rsync writes over
+    # ssh, so after a real push the rendering's library is asked to rescan.
+    if [ "{{write}}" = "write" ]; then uv run gmuse-tools plex refresh; fi

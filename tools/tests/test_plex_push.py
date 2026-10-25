@@ -15,6 +15,7 @@ import pytest
 
 from gmuse_tools import plex_push
 from gmuse_tools.plex_push import (
+    Held,
     Placed,
     PushError,
     Track,
@@ -22,6 +23,7 @@ from gmuse_tools.plex_push import (
     keys_by_recording,
     locked,
     placed_of,
+    plan_playlists,
     ratings_to_push,
     section_of,
     tracks_of,
@@ -181,3 +183,33 @@ def test_a_copy_nothing_has_named_is_left_out_not_a_crash() -> None:
     """The library lists unidentified copies on purpose; none is something to rate."""
     manifest = {"a.mp3": {"encoding": "e1"}, "b.mp3": {"encoding": "e2"}, "Album/cover.jpg": {"cover": "1-2"}}
     assert placed_of(Lib(), manifest) == {"a.mp3": Placed("r1", 4, compilation=False)}  # type: ignore[arg-type]
+
+
+def test_a_playlist_is_created_kept_resynced_or_left_by_whose_it_is() -> None:
+    """Gmuse's own copy follows the library; a Plexamp playlist of the same name is not touched."""
+    wanted = {"new": ["1"], "same": ["1", "2"], "drifted": ["1", "2", "3"], "reordered": ["2", "1"], "theirs": ["1"]}
+    held = {
+        "same": Held("10", ours=True, items=["1", "2"]),
+        "drifted": Held("11", ours=True, items=["1", "3"]),
+        "reordered": Held("13", ours=True, items=["1", "2"]),
+        "theirs": Held("12", ours=False, items=["9"]),
+    }
+    assert plan_playlists(wanted, held) == [
+        ("create", "new", ["1"]),
+        ("same", "same", ["1", "2"]),
+        ("resync", "drifted", ["1", "2", "3"]),
+        ("resync", "reordered", ["2", "1"]),
+        ("leave", "theirs", ["1"]),
+    ]
+
+
+def test_a_resync_clears_then_adds_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The playlist keeps its identity; its items become the library's, in order."""
+    sent = Sent()
+    monkeypatch.setattr(plex_push.requests, "request", sent)
+    Writer("http://plex", "t").resync("machine", "11", ["3", "1", "2"])
+    assert [(m, u.rsplit("plex", 1)[-1]) for m, u, _ in sent.calls] == [
+        ("DELETE", "/playlists/11/items"),
+        ("PUT", "/playlists/11/items"),
+    ]
+    assert sent.calls[1][2]["uri"].endswith("/library/metadata/3,1,2")
