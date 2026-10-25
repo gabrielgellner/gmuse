@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from gmuse_tools.plex import PAGE, Copy, every, read, resolver, stamp
+from gmuse_tools.plex import PAGE, Audio, Copy, every, read, resolver, stamp
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -129,7 +130,7 @@ def test_a_file_no_rendering_made_is_left_and_counted() -> None:
     server.history = [play("100", 1, 1000), play("200", 2, 2000)]
     found = read(server.get, library())
     assert found.plays == 1, "instrument: the rendered file's play was proposed"
-    assert found.left["a play of a file no rendering made"] == 1
+    assert found.left["a play: a file no rendering made"] == 1
 
 
 def rated(key: str, rating: str, at: int = 1_785_000_000) -> dict[str, str]:
@@ -198,3 +199,86 @@ def test_every_asks_until_the_total_is_reached() -> None:
     got = every(server.get, "/status/sessions/history/all")
     assert len(got) == PAGE + 1
     assert server.asked.count("/status/sessions/history/all") == 2
+
+
+# --- The old libraries, placed by their audio — #339 --------------------------
+
+
+def by_audio(answers: dict[str, str]) -> Callable[[str], str | None]:
+    """A stand-in for `Audio`: a file's encoding, or `!why`."""
+    return lambda file: answers.get(file, "!a file whose audio could not be read")
+
+
+OLD = "/share/Media/Music/General/Orbital/Diversions/05 Lush.mp3"
+
+
+def test_an_old_library_file_is_placed_by_its_audio() -> None:
+    """A file no rendering made, whose bytes are a copy the library holds."""
+    resolve = resolver(MANIFEST, COPIES, ROOT, by_audio({OLD: "enc-lush"}))
+    assert resolve(OLD) == COPIES["enc-lush"]
+    assert resolve(f"{ROOT}/Orbital/Diversions/05 Lush.mp3") == COPIES["enc-lush"], "the manifest still comes first"
+
+
+def test_what_cannot_be_placed_says_why() -> None:
+    """Each reason is its own, so the review can be read."""
+    resolve = resolver(MANIFEST, COPIES, ROOT, by_audio({OLD: "enc-someone-else"}))
+    assert resolve(OLD) == "audio the library does not hold"
+    assert resolve("/share/Media/Music/x.mp3") == "a file whose audio could not be read"
+    assert resolve("") == "an item Plex no longer has"
+    assert resolve(f"{ROOT}/Not/In/The Manifest.mp3") == "a file in the rendering its manifest does not name"
+    assert resolver(MANIFEST, COPIES, ROOT)(OLD) == "a file no rendering made", "without by_audio, as #338 was"
+
+
+def test_the_review_keeps_each_files_history() -> None:
+    """For a file the library does not hold, its plays and rating are its only record."""
+    server = FakeServer()
+    server.files["200"] = OLD
+    server.history = [play("200", 1, 1000), play("200", 2, 2000), {"historyKey": "/x/3", "viewedAt": "3000"}]
+    server.rated = [rated("200", "10.0")]
+    found = read(server.get, resolver(MANIFEST, COPIES, ROOT, by_audio({OLD: "enc-someone-else"})))
+    assert found.plays == 0
+    assert found.unplaced[OLD] == ["audio the library does not hold", 2, "10.0"]
+    assert found.unplaced["(no file)"][0] == "an item Plex no longer has"
+
+
+class Lib:
+    """`encoding_at`, counting how often it is asked."""
+
+    def __init__(self) -> None:
+        """Asked nothing yet."""
+        self.asked: list[str] = []
+
+    def encoding_at(self, path: object) -> str | None:
+        """The bytes' encoding: their content, here."""
+        self.asked.append(str(path))
+        return "enc-" + Path(str(path)).read_text()
+
+
+def test_audio_is_hashed_once_across_reads_and_again_when_it_changes(tmp_path: Path) -> None:
+    """Remembered by path, size and mtime: a second read hashes nothing."""
+    mount = tmp_path / "Media"
+    track = mount / "Music" / "a.mp3"
+    track.parent.mkdir(parents=True)
+    track.write_text("lush")
+    lib, cache = Lib(), tmp_path / "cache.json"
+
+    first = Audio(lib, str(mount), cache)  # type: ignore[arg-type]
+    assert first("/share/Media/Music/a.mp3") == "enc-lush"
+    first.save()
+    assert len(lib.asked) == 1, "instrument: the first read hashed it"
+
+    again = Audio(lib, str(mount), cache)  # type: ignore[arg-type]
+    assert again("/share/Media/Music/a.mp3") == "enc-lush"
+    assert len(lib.asked) == 1
+
+    track.write_text("a different take")
+    assert again("/share/Media/Music/a.mp3") == "enc-a different take"
+    assert len(lib.asked) == 2
+
+
+def test_a_file_the_share_will_not_open_is_not_gone(tmp_path: Path) -> None:
+    """The three DanceMusic files list and will not open: a reading failure, said as one."""
+    audio = Audio(Lib(), str(tmp_path), tmp_path / "cache.json")  # type: ignore[arg-type]
+    assert audio("/share/Media/DanceMusic/Lvis Mejía - In Praise Of Shadows.mp3") == (
+        "!a file that could not be read through the share"
+    )
