@@ -234,6 +234,9 @@ pub struct Outcome {
     /// many declarations a file repeated: seeding the Dance collection said
     /// "106 would apply" and appended 107.
     pub fresh: usize,
+    /// Of `fresh`, how many are **another device's records**, carrying its own
+    /// stamps (#338) — a Plex server's plays and ratings, bound for its own log.
+    pub elsewhere: usize,
     /// **The log with the facts merged in, for the caller to land** — #218.
     ///
     /// `run` used to commit; it cannot any more, because a running engine may hold
@@ -258,6 +261,13 @@ impl std::fmt::Display for Outcome {
             self.report.refused.len(),
             self.report.malformed.len(),
         )?;
+        if self.elsewhere > 0 {
+            write!(
+                f,
+                "\n{} of them another device's, to its own log",
+                self.elsewhere
+            )?;
+        }
         if self.dry_run {
             write!(f, "\nnothing written — pass `--write` to apply")
         } else {
@@ -420,6 +430,32 @@ pub fn run(
         _ => None,
     };
 
+    // **Another device's records are judged as records** — #338. Their stamp is
+    // their identity: two plays of one track are one fact told apart by when, so
+    // the wire-form check below would keep the first and drop every later one.
+    // A record already held is skipped; a *different* fact under a stamp already
+    // held is a contradiction, refused rather than counted as a collision.
+    let (foreign, proposed): (BTreeSet<_>, BTreeSet<_>) =
+        proposed.into_iter().partition(|r| r.stamp.device != device);
+    // The stamps held, once: a lookup per record rather than a scan of the log.
+    let stamps: BTreeSet<crate::model::clock::Stamp> =
+        log.records().iter().map(|r| r.stamp).collect();
+    let mut taken_elsewhere = BTreeSet::new();
+    let mut elsewhere_already = 0;
+    let mut report = report;
+    for record in foreign {
+        if log.records().contains(&record) {
+            elsewhere_already += 1;
+        } else if stamps.contains(&record.stamp) {
+            report.refused.push((
+                0,
+                format!("another fact already holds the stamp {:?}", record.stamp),
+            ));
+        } else {
+            taken_elsewhere.insert(record);
+        }
+    }
+
     let fresh: BTreeSet<_> = proposed
         .iter()
         .filter(|r| {
@@ -433,16 +469,18 @@ pub fn run(
         })
         .cloned()
         .collect();
-    let already = proposed.len() - fresh.len();
+    let already = proposed.len() - fresh.len() + elsewhere_already;
 
     if write {
         log.merge(now, &fresh);
+        log.record_elsewhere(now, &taken_elsewhere);
     }
 
     Ok(Outcome {
         report,
         already,
-        fresh: fresh.len(),
+        fresh: fresh.len() + taken_elsewhere.len(),
+        elsewhere: taken_elsewhere.len(),
         log,
         dry_run: !write,
     })
@@ -786,5 +824,209 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Another device's records — #337, #338 ---------------------------------
+
+    /// A library holding one recording — a real file, ingested and on disk, as
+    /// `holds` asks the folded disk — and the ids a Plex test needs.
+    fn plex_library(
+        name: &str,
+    ) -> (
+        std::path::PathBuf,
+        Id<Device>,
+        Id<crate::model::entity::Recording>,
+    ) {
+        let dir = std::env::temp_dir().join(format!("gmuse-apply-plex-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01 Callisto.wav");
+        crate::model::round_trip::write_wav(&file, 4410);
+        crate::model::round_trip::write_tags(&file, "Callisto", "Bodzin", None);
+        let device = Id::<Device>::derived(b"laptop");
+        let mut log = Instance::new(device);
+        log.ingest(100, &[crate::model::ingest::read(&file).expect("reads")]);
+        log.flush(&dir).expect("writes");
+        let recording = *log
+            .catalogue()
+            .recordings
+            .keys()
+            .next()
+            .expect("a recording");
+        (dir, device, recording)
+    }
+
+    const PLEX: &str = "plex:0c1eda1ba823bfe1fcce17edfd592f48560c435d";
+
+    fn played(recording: Id<crate::model::entity::Recording>, at_ms: i64, seq: u32) -> String {
+        format!(
+            r#"{{"fact":"played","recording":"{recording}","elsewhere":{{"device":"{PLEX}","at_ms":{at_ms},"seq":{seq}}}}}"#
+        )
+    }
+
+    fn plays(
+        dir: &std::path::Path,
+        device: Id<Device>,
+        recording: Id<crate::model::entity::Recording>,
+    ) -> usize {
+        let (log, _) = Instance::open(dir, device, 0);
+        log.records()
+            .iter()
+            .filter(|r| matches!(r.fact, crate::facts::Fact::RecordingPlayed { recording: x, .. } if x == recording))
+            .count()
+    }
+
+    /// **A Plex play lands in Plex's log, under Plex's time** — not this device's.
+    #[test]
+    fn a_play_elsewhere_lands_in_that_devices_log_at_its_time() {
+        let (dir, device, recording) = plex_library("lands");
+        let file = dir.join("plex.jsonl");
+        std::fs::write(&file, played(recording, 1_785_341_390_000, 41) + "\n").unwrap();
+        let outcome = landed(
+            super::run(&file, &dir, &[], device, 2_000_000_000_000, true),
+            &dir,
+        )
+        .expect("applies");
+        assert_eq!(outcome.elsewhere, 1);
+
+        let plex = Id::<Device>::derived(PLEX.as_bytes());
+        let theirs = crate::model::durable::log_path(&dir, plex);
+        let ours = crate::model::durable::log_path(&dir, device);
+        assert!(
+            std::fs::read_to_string(&theirs)
+                .expect("Plex has a log")
+                .contains("RecordingPlayed")
+        );
+        assert!(
+            !std::fs::read_to_string(&ours)
+                .unwrap()
+                .contains("RecordingPlayed"),
+            "instrument passed, claim failed: the play went into this device's log"
+        );
+        let (log, _) = Instance::open(&dir, device, 0);
+        let play = log
+            .records()
+            .iter()
+            .find(|r| matches!(r.fact, crate::facts::Fact::RecordingPlayed { .. }))
+            .unwrap();
+        assert_eq!(
+            play.stamp.wall, 1_785_341_390_000,
+            "stamped with when it was played, not when it was read"
+        );
+        assert_eq!(play.stamp.device, plex);
+    }
+
+    /// **Reading Plex twice cannot count a play twice** — the stamp is the play.
+    #[test]
+    fn the_same_play_applied_twice_is_one_play() {
+        let (dir, device, recording) = plex_library("twice");
+        let file = dir.join("plex.jsonl");
+        std::fs::write(&file, played(recording, 1_000, 7) + "\n").unwrap();
+        landed(super::run(&file, &dir, &[], device, 2_000, true), &dir).expect("applies");
+        assert_eq!(
+            plays(&dir, device, recording),
+            1,
+            "instrument: the first apply recorded it"
+        );
+        let again =
+            landed(super::run(&file, &dir, &[], device, 3_000, true), &dir).expect("applies");
+        assert_eq!(again.fresh, 0);
+        assert_eq!(again.already, 1);
+        assert_eq!(plays(&dir, device, recording), 1);
+    }
+
+    /// **Two plays of one track are two plays** — the fact is identical, the stamps are not.
+    /// The wire-form replay check, which a local proposal still gets, would keep one.
+    #[test]
+    fn two_plays_of_one_track_elsewhere_are_two_plays() {
+        let (dir, device, recording) = plex_library("two");
+        let file = dir.join("plex.jsonl");
+        std::fs::write(
+            &file,
+            played(recording, 1_000, 7) + "\n" + &played(recording, 9_000, 8) + "\n",
+        )
+        .unwrap();
+        landed(super::run(&file, &dir, &[], device, 10_000, true), &dir).expect("applies");
+        assert_eq!(plays(&dir, device, recording), 2);
+        std::fs::write(&file, played(recording, 20_000, 9) + "\n").unwrap();
+        landed(super::run(&file, &dir, &[], device, 30_000, true), &dir).expect("applies");
+        assert_eq!(
+            plays(&dir, device, recording),
+            3,
+            "and a later run adds the new one, not a count of facts"
+        );
+    }
+
+    /// **A rating is judged as a record, not by whether its fact was ever said** —
+    /// rated 5, then 4, then 5 in Plexamp: the last must land.
+    #[test]
+    fn a_rating_elsewhere_lands_though_its_fact_is_in_the_history() {
+        let (dir, device, recording) = plex_library("rerated");
+        let file = dir.join("ratings.jsonl");
+        let local =
+            |stars: u8| format!(r#"{{"fact":"rated","recording":"{recording}","stars":{stars}}}"#);
+        std::fs::write(&file, local(5) + "\n").unwrap();
+        landed(super::run(&file, &dir, &[], device, 1_000, true), &dir).expect("applies");
+        std::fs::write(&file, local(4) + "\n").unwrap();
+        landed(super::run(&file, &dir, &[], device, 2_000, true), &dir).expect("applies");
+        let stars = |dir: &std::path::Path| {
+            Instance::open(dir, device, 0)
+                .0
+                .catalogue()
+                .ratings
+                .get(&recording)
+                .copied()
+        };
+        assert_eq!(stars(&dir), Some(4), "instrument: the library now says 4");
+
+        let plex = format!(
+            r#"{{"fact":"rated","recording":"{recording}","stars":5,"elsewhere":{{"device":"{PLEX}","at_ms":3000,"seq":1}}}}"#
+        );
+        std::fs::write(&file, plex + "\n").unwrap();
+        landed(super::run(&file, &dir, &[], device, 4_000, true), &dir).expect("applies");
+        assert_eq!(
+            stars(&dir),
+            Some(5),
+            "the later rating, made in Plexamp, wins"
+        );
+    }
+
+    /// **A stamp naming this device is refused** — ours come from our own clock.
+    #[test]
+    fn a_stamp_naming_this_device_is_refused() {
+        let (dir, device, recording) = plex_library("ours");
+        let file = dir.join("forged.jsonl");
+        let forged = format!(
+            r#"{{"fact":"played","recording":"{recording}","elsewhere":{{"device":"laptop","at_ms":1000,"seq":1}}}}"#
+        );
+        std::fs::write(&file, played(recording, 1_000, 1) + "\n" + &forged + "\n").unwrap();
+        let outcome =
+            landed(super::run(&file, &dir, &[], device, 2_000, true), &dir).expect("applies");
+        assert_eq!(outcome.elsewhere, 1, "instrument: the Plex line was taken");
+        assert_eq!(outcome.report.refused.len(), 1);
+        assert_eq!(plays(&dir, device, recording), 1);
+    }
+
+    /// **Another fact under a stamp already held is a contradiction**, refused rather
+    /// than kept as a collision.
+    #[test]
+    fn a_different_fact_under_a_held_stamp_is_refused() {
+        let (dir, device, recording) = plex_library("clash");
+        let file = dir.join("plex.jsonl");
+        std::fs::write(&file, played(recording, 1_000, 7) + "\n").unwrap();
+        landed(super::run(&file, &dir, &[], device, 2_000, true), &dir).expect("applies");
+        let rated = format!(
+            r#"{{"fact":"rated","recording":"{recording}","stars":3,"elsewhere":{{"device":"{PLEX}","at_ms":1000,"seq":7}}}}"#
+        );
+        std::fs::write(&file, rated + "\n").unwrap();
+        let outcome =
+            landed(super::run(&file, &dir, &[], device, 3_000, true), &dir).expect("applies");
+        assert_eq!(outcome.report.refused.len(), 1);
+        assert_eq!(outcome.fresh, 0);
+        assert_eq!(
+            plays(&dir, device, recording),
+            1,
+            "instrument: the first record is still there"
+        );
     }
 }

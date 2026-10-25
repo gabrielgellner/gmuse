@@ -436,6 +436,20 @@ fn land(
     match gmuse::librarian::Appending::claim(data_dir) {
         Ok(appending) => Ok(gmuse::librarian::commit(log, data_dir, &appending)?),
         Err(held) => {
+            // **Another device's records cannot be handed over** — #338. They carry
+            // their own stamps (#337), and an engine stamps what it is sent with its
+            // own clock, which would turn a Plex play into a play on this machine,
+            // timed now. So they wait for the log to be free.
+            let elsewhere = log.elsewhere_pending();
+            if elsewhere > 0 {
+                eprintln!("{held}");
+                return Err(format!(
+                    "{elsewhere} record(s) are another device's and keep its own stamps, which a \
+                     running engine would replace with its own. Stop it with `gmuse ctl \
+                     engine.shutdown` and run this again."
+                )
+                .into());
+            }
             let facts = log.pending();
             if facts.is_empty() {
                 // Nothing to land, so nothing to argue about. A dry-run-shaped pass
