@@ -3882,6 +3882,9 @@ fn run_engine(
                 "stream_generation": now.generation,
                 "sample_rate": now.sample_rate,
                 "rate": now.rate,
+                // **The fader, so an attaching view is seeded with it** — #366. It
+                // changes on `params`, not here; this is the snapshot of it.
+                "fader": now.fader,
             });
 
             // **Rendered only when asked, and a bad template is reported once.**

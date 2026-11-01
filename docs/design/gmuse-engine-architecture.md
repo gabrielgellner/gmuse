@@ -736,6 +736,11 @@ one. Mid-album that is the length of a track.
 because a snapshot that could disagree with the stream is worse than no snapshot: a client cannot tell which of the two
 is stale. It omits `at_ns`, which a client did not use; §7.8 already has it extrapolating from its own clock.
 
+**It adds `fader`, which the event does not carry** (#366). The fader is a parameter, so it changes on `params` — the
+control thread reads it each tick and publishes `{"fader": 0.95}`, keyed so a held key coalesces — and that topic only
+says when it _changes_. The snapshot is where a view that attaches learns where it starts. Until this, an attached
+view's fader was the constant 1.0: the label said 100% throughout, and a `vol -5%` added to it sent `vol 95` every time.
+
 An optional `format` renders the current track engine-side, through the same template language the config and the `:`
 line use. That is not a convenience: this library's `now_playing` puts the title **last**, so a bar that truncated a
 pre-rendered line would throw away the field it was looking at. A caller that wants fields ignores `format`.

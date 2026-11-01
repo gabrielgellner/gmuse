@@ -113,6 +113,13 @@ pub struct Sounded {
     ///
     /// Not the recording, which a programme may hold twice.
     pub entry: Option<u64>,
+    /// **The fader position, where 1.0 is unity** — #366.
+    ///
+    /// The one field the `playback` event does not carry: it is a parameter, and §7.8
+    /// puts parameters on `params`. It is on the snapshot because a view that attaches
+    /// has to be seeded with it, and `params` only says when it *changes* — so without
+    /// this a fresh view showed 100% until somebody touched the volume.
+    pub fader: f32,
 }
 
 /// What the handshake needs to report, published by this thread.
@@ -420,6 +427,9 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
     let shared = player.shared();
     let mut told: Option<Told> = None;
     let mut lost = false;
+    // **The fader position last put on `params`** — #366. `None` so the first tick says
+    // where it starts, and a rebuilt stream says it again.
+    let mut faded: Option<f32> = None;
 
     while !stop.load(Ordering::Acquire) {
         // **A timeout, not a blocking receive.** §5.1: this thread must wake on
@@ -637,6 +647,23 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 ));
             }
             told = Some(now);
+        }
+
+        // **The fader is a parameter, so it goes on `params`** — #366, §7.8.
+        //
+        // An attached view had no way to learn it: `Remote::volume` was the constant 1.0,
+        // so the label said 100% whatever the engine was at. Read from the handle on the
+        // tick rather than announced from `Instruction::Volume`, because that is §5.1's
+        // shape — the control thread wakes on its own to read parameter values and
+        // publish what changed — and it covers a change that did not arrive as an
+        // instruction. Keyed, so a held key that moves it twenty times coalesces to the
+        // last (§7.10).
+        let fader = player.volume();
+        if faded != Some(fader) {
+            if let Some(engine) = engine.get().and_then(|weak| weak.upgrade()) {
+                engine.publish(&params_event(fader));
+            }
+            faded = Some(fader);
         }
 
         // **After the event, so every client knows before the stream changes.**
@@ -975,7 +1002,20 @@ fn sounded(
         // the same quantity honestly measured rather than a fourth run state invented
         // for the case.
         rate: if lost { 0.0 } else { 1.0 },
+        fader: player.volume(),
     }
+}
+
+/// **The fader position, on `params`** — #366.
+///
+/// Its own function so the shape a view reads is written down once, and a test can
+/// hold the body without starting a stream.
+fn params_event(fader: f32) -> Event {
+    Event::keyed(
+        Topic::Params,
+        "fader",
+        serde_json::json!({ "fader": fader }),
+    )
 }
 
 fn playback_event(

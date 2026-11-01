@@ -263,10 +263,22 @@ pub trait Transport {
     ///
     /// **A read as well as a write, because the RT side owns the value** (§6):
     /// a view asks for a change through `param.set` and learns the result
-    /// through the feedback path, rather than computing it and assuming. Reading
-    /// it here is how `vol +5` knows what to add to.
+    /// through the feedback path, rather than computing it and assuming. It is
+    /// what a view *shows*; a step goes through [`Transport::step_volume`] (#366).
     fn volume(&self) -> f32;
     fn set_volume(&self, position: f32);
+
+    /// Move the fader by `by`, resolved **where the value lives** — #366.
+    ///
+    /// Not `set_volume(volume() + by)` at the call site. That is D-8's read-modify-write:
+    /// an attached view's `volume` is a cache of the last thing the engine said, so two
+    /// presses faster than the round trip both add to the same stale number — and before
+    /// the fader had a producer the cache was the constant 1.0, so every `-` sent `vol 95`
+    /// and the volume moved once. Local playback owns the value, so the default is that
+    /// sum and it is exact; [`Remote`](crate::ui::remote_transport::Remote) sends the step.
+    fn step_volume(&self, by: f32) {
+        self.set_volume(self.volume() + by);
+    }
 
     /// Times the ring ran dry while audio was owed. Diagnostics, shown in the
     /// audit line.
