@@ -14,7 +14,7 @@ So the check reads the tags, never the folder name — a rule about names is how
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -746,3 +746,81 @@ def test_a_match_that_is_not_official_says_so(capsys: pytest.CaptureFixture[str]
     out = capsys.readouterr().out
     assert "Bootleg" in out
     assert "instrumental" in out
+
+
+def _box(titles_per_disc: list[list[str]]) -> dict[str, Any]:
+    """A release of several CDs, with an id on every track and recording."""
+    who = [{"name": "Steve Reich", "artist": {"id": "sr", "name": "Steve Reich", "sort-name": "Reich, Steve"}}]
+    media = [
+        {
+            "position": d + 1,
+            "format": "CD",
+            "tracks": [
+                {
+                    "id": f"t{d + 1}-{i + 1}",
+                    "title": t,
+                    "position": i + 1,
+                    "artist-credit": who,
+                    "recording": {"id": f"r{d + 1}-{i + 1}"},
+                }
+                for i, t in enumerate(titles)
+            ],
+        }
+        for d, titles in enumerate(titles_per_disc)
+    ]
+    return {"id": "box", "title": "Works", "artist-credit": who, "media": media, "status": "Official"}
+
+
+def _disc_folder(tmp_path: Path, titles: list[str]) -> Path:
+    from mutagen.oggvorbis import OggVorbis  # noqa: PLC0415
+
+    import tests.flacfixture as fixture  # noqa: PLC0415
+
+    d = tmp_path / "Works (2)"
+    d.mkdir()
+    for i, title in enumerate(titles):
+        p = d / f"{i + 1:02d} x.ogg"
+        fixture.write_ogg(p)
+        tag = OggVorbis(p)
+        tag["title"] = [title]
+        tag["tracknumber"] = [str(i + 1)]
+        tag.save()
+    return d
+
+
+def test_one_disc_of_a_box_is_tagged_as_that_disc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder holding disc 2 of a box is seated on disc 2 and told how many discs there are — #369.
+
+    Without `--disc` the folder is two files against a four-track release, so
+    the count gate refuses it and nothing is written; that refusal is the
+    instrument, and it is checked first.
+    """
+    from mutagen.oggvorbis import OggVorbis  # noqa: PLC0415
+
+    box = _box([["Come Out", "Its Gonna Rain"], ["Drumming, Part I", "Drumming, Part II"]])
+    monkeypatch.setattr(ing, "asked", lambda _url, _params: box)
+    # Titles that decide nothing, as a classical rip's often do: seating falls to
+    # position, so only the medium filter keeps these off disc 1.
+    d = _disc_folder(tmp_path, ["Track 1", "Track 2"])
+
+    # The instrument: the whole release is refused for this folder, so a tag below came from `--disc`.
+    ing.apply(d, ing.Wanted(artist="Steve Reich", album="", release="box"), None, write=True)
+    assert all("musicbrainz_trackid" not in OggVorbis(p) for p in d.iterdir())
+
+    ing.apply(d, ing.Wanted(artist="Steve Reich", album="", release="box", disc=2), None, write=True)
+    tags = sorted((OggVorbis(p)["musicbrainz_trackid"][0], OggVorbis(p)["discnumber"][0]) for p in d.iterdir())
+    assert tags == [("r2-1", "2"), ("r2-2", "2")]
+    assert {OggVorbis(p)["disctotal"][0] for p in d.iterdir()} == {"2"}
+
+
+def test_a_disc_the_release_does_not_have_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--disc 9` of a two-disc release is refused rather than seated somewhere — #369."""
+    from mutagen.oggvorbis import OggVorbis  # noqa: PLC0415
+
+    box = _box([["A", "B"], ["C", "D"]])
+    monkeypatch.setattr(ing, "asked", lambda _url, _params: box)
+    d = _disc_folder(tmp_path, ["C", "D"])
+    assert len(list(d.iterdir())) == 2, "the fixture holds no files"
+
+    ing.apply(d, ing.Wanted(artist="x", album="", release="box", disc=9), None, write=True)
+    assert all("musicbrainz_trackid" not in OggVorbis(p) for p in d.iterdir())
