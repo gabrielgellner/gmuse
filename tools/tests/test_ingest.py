@@ -567,6 +567,48 @@ class TestASilentServerIsNotAnEmptyAnswer:
             ing.identify("Possessed by Paul James", "Feed the Family", ["Texas Rose"])
 
 
+def test_an_ogg_album_is_read_and_tagged_like_a_flac_one(tmp_path: Path) -> None:
+    """An Ogg Vorbis folder reported `no audio` and could not be identified — #365.
+
+    `AUDIO` was mp3 and flac, so 313 of the NAS's 403 classical files had no
+    front door. A Vorbis comment is the same set of fields in either container.
+    """
+    from mutagen.oggvorbis import OggVorbis  # noqa: PLC0415
+
+    import tests.flacfixture as fixture  # noqa: PLC0415
+    from gmuse_tools.ingest import our_tracks, write_tags  # noqa: PLC0415
+
+    d = tmp_path / "Cello Suites"
+    d.mkdir()
+    p = d / "01 Prelude.ogg"
+    fixture.write_ogg(p)
+    tag = OggVorbis(p)
+    tag["title"] = ["Prelude"]
+    tag["tracknumber"] = ["1"]
+    tag.save()
+    # The instrument, read without the code under test: the fixture really is
+    # Ogg Vorbis and starts with no recording id, so one below came from here.
+    assert "musicbrainz_trackid" not in OggVorbis(p)
+
+    assert our_tracks(d) == [(p, "Prelude", 1)]
+
+    artist = [{"name": "Rostropovich", "artist": {"id": "a1", "name": "Rostropovich", "sort-name": "R"}}]
+    track = {
+        "id": "t1",
+        "title": "Suite No. 1: Prélude",
+        "position": 1,
+        "artist-credit": artist,
+        "recording": {"id": "r1"},
+    }
+    disc = {"position": 1, "tracks": [track]}
+    release = {"id": "rel1", "title": "Cello Suites", "artist-credit": artist, "media": [disc]}
+    write_tags(p, release, disc, track)
+
+    written = OggVorbis(p)
+    assert written["musicbrainz_trackid"] == ["r1"]
+    assert written["title"] == ["Suite No. 1: Prélude"]
+
+
 def test_the_album_artist_is_the_artist_and_not_the_credit() -> None:
     """One artist credited two ways must still file under one name — #306.
 
