@@ -2362,10 +2362,9 @@ fn the_commands_that_used_to_be_accepted_and_ignored_now_act() {
         "refused as needing a view: {err}"
     );
 
-    // **`vol` moves the fader.** No topic reports it yet (§7.8 puts parameters on
-    // `params`, which has no producer), so this asserts through the one thing that
-    // does answer: setting it low and back is accepted, and an out-of-range value
-    // is not silently clamped into a lie.
+    // **`vol` is accepted.** That it moves the fader, and that a view hears where to,
+    // is `an_attached_view_knows_the_fader_and_steps_it_from_there` (#366) — the
+    // fader is on `params` and the `playback.get` snapshot now.
     line("vol 40");
     line("vol +10");
 
@@ -3126,6 +3125,72 @@ fn a_silent_engine_is_named_and_not_waited_on() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **An attached view knows the fader and steps it from where the engine has it** — #366.
+///
+/// Reported as "`<leader> -` does nothing and the label does not move". `Remote::volume` was
+/// the constant 1.0, because no topic said what the fader was — so the label read 100%
+/// throughout, and a step added to it sent `vol 95` every time and moved the volume once.
+///
+/// Three halves, each against a real engine, because each is a different wire: the
+/// snapshot seeds a view that attaches late, a step goes as a step so two quick presses are
+/// two steps, and another client's change arrives on `params`.
+#[test]
+fn an_attached_view_knows_the_fader_and_steps_it_from_there() {
+    use gmuse::ui::transport::Transport;
+
+    let close = |a: f32, b: f32| (a - b).abs() < 0.005;
+    let engine = start("fader");
+    let driver = Client::connect(&engine.socket, "driver", "0").expect("connect");
+    let line = |text: &str| {
+        driver
+            .call("cmd.exec_line", Some(serde_json::json!({ "line": text })))
+            .unwrap_or_else(|e| panic!("{text}: {e}"))
+    };
+    let snapshot_fader = || {
+        driver.call("playback.get", None).expect("playback.get")["fader"]
+            .as_f64()
+            .map(|f| f as f32)
+    };
+
+    // Set before the view exists, and confirmed through the engine's own answer — so the
+    // only way the view below can know it is the snapshot it asks for when it attaches.
+    line("vol 40");
+    assert!(
+        wait_until(|| snapshot_fader().is_some_and(|f| close(f, 0.40))),
+        "`vol 40` never reached the engine's fader: the snapshot says {:?}",
+        snapshot_fader()
+    );
+
+    let client = std::sync::Arc::new(Client::connect(&engine.socket, "tui", "0").expect("connect"));
+    let remote = gmuse::ui::remote_transport::Remote::attach(client).expect("attach");
+    // **Asserted at once, not waited for.** Nothing moves the fader from here, so no
+    // `params` event is coming; only the snapshot can have told it.
+    assert!(
+        close(remote.volume(), 0.40),
+        "a view attaching to an engine at 40% believes {}",
+        remote.volume()
+    );
+
+    // **Two presses inside one round trip.** Resolved in the view, both add to the same
+    // cached 0.40 and the fader lands on 0.35; sent as steps, the engine adds both.
+    remote.step_volume(-0.05);
+    remote.step_volume(-0.05);
+    assert!(
+        wait_until(|| close(remote.volume(), 0.30)),
+        "two steps of -5% from 40% left the view at {}, and the engine at {:?}",
+        remote.volume(),
+        snapshot_fader()
+    );
+
+    // Another client's change, which this view did nothing to cause.
+    line("vol 70");
+    assert!(
+        wait_until(|| close(remote.volume(), 0.70)),
+        "another client set 70% and the view still says {}",
+        remote.volume()
+    );
 }
 
 /// **The second implementor of the seam, over a real socket** — #219.

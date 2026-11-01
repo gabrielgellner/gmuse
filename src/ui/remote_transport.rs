@@ -63,6 +63,11 @@ struct Heard {
     rate: f64,
     /// When this arrived here, for extrapolating forward.
     at: Instant,
+    /// **The fader position, from `params` and the snapshot** — #366.
+    ///
+    /// Not a transport fact, so no `playback` event touches it; it was the constant 1.0
+    /// until the engine had a producer for it, which is why the label said 100%.
+    fader: f32,
 }
 
 impl Default for Heard {
@@ -74,6 +79,7 @@ impl Default for Heard {
             recording: None,
             rate: 1.0,
             at: Instant::now(),
+            fader: 1.0,
         }
     }
 }
@@ -149,11 +155,22 @@ fn absorb(held: &mut Heard, body: &serde_json::Value) {
     held.at = Instant::now();
 }
 
+/// Take a `params` body into the cache — #366.
+///
+/// **Absent is unchanged.** `params` carries whichever parameters moved, and the snapshot
+/// is a `playback` body with `fader` beside it; neither absence means unity.
+fn absorb_params(held: &mut Heard, body: &serde_json::Value) {
+    if let Some(fader) = body["fader"].as_f64() {
+        held.fader = fader as f32;
+    }
+}
+
 impl Remote {
     /// Subscribe to `playback`, ask what is playing, and keep the cache fresh.
     pub fn attach(client: Arc<Client>) -> Result<Self, gmuse_client::ClientError> {
         // **`engine` too, for what the engine says rather than what it is doing** — #319.
-        client.subscribe(&[Topic::Playback, Topic::Engine])?;
+        // **`params` for the fader** — #366.
+        client.subscribe(&[Topic::Playback, Topic::Engine, Topic::Params])?;
 
         let mut seed = Heard {
             sample_rate: client.hello().sample_rate.max(1),
@@ -176,6 +193,7 @@ impl Remote {
         // rather than to no view at all.
         if let Ok(now) = client.call(gmuse_proto::method::PLAYBACK_GET, None) {
             absorb(&mut seed, &now);
+            absorb_params(&mut seed, &now);
         }
 
         let heard = Arc::new(Mutex::new(seed));
@@ -203,6 +221,10 @@ impl Remote {
                                 Topic::Playback => {
                                     let mut held = heard.lock().expect("heard");
                                     absorb(&mut held, &event.body);
+                                }
+                                Topic::Params => {
+                                    let mut held = heard.lock().expect("heard");
+                                    absorb_params(&mut held, &event.body);
                                 }
                                 Topic::Engine => {
                                     if let Some(notice) = notice_of(&event.body) {
@@ -414,16 +436,26 @@ impl Transport for Remote {
         );
     }
 
+    /// **What the engine last said on `params`** — #366.
+    ///
+    /// This was the constant 1.0, on the reasoning that it was "not wrong about anything
+    /// a view acts on". It was: `vol -5%` added to it, so every step sent `vol 95`, and
+    /// the label drew it, so it said 100% throughout.
     fn volume(&self) -> f32 {
-        // Not on the `playback` payload: §7.8 puts parameter values on `params`,
-        // which has no producer yet (#230 scoped it out). Unity until it does,
-        // which is wrong by whatever the fader is set to and is not wrong about
-        // anything a view acts on.
-        1.0
+        self.heard.lock().expect("heard").fader
     }
 
     fn set_volume(&self, position: f32) {
         self.line(&format!("vol {}", (position * 100.0).round() as i32));
+    }
+
+    /// **A step goes as a step, and the engine adds it** — #366, D-8.
+    ///
+    /// `vol -5` is relative in the command language, and the engine resolves it against
+    /// the fader it owns (`Fader::By`). Computing the target here would add to a cache
+    /// that is a round trip behind.
+    fn step_volume(&self, by: f32) {
+        self.line(&format!("vol {:+}", by * 100.0));
     }
 
     fn underruns(&self) -> u32 {
@@ -537,6 +569,7 @@ mod tests {
             rate,
             // A second ago, so any extrapolation is visible.
             at: Instant::now() - Duration::from_secs(1),
+            fader: 1.0,
         };
 
         let running = Remote::extrapolated(&held(1.0));

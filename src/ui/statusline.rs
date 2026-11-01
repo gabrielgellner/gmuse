@@ -104,7 +104,7 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
     }
 
     spans.push(Span::raw("   "));
-    spans.push(Span::styled(modes(ui), theme.get(Role::StatusModes)));
+    spans.push(Span::styled(modes(ui, ctx), theme.get(Role::StatusModes)));
 
     // Keys typed so far, as vim's showcmd. Derived from state, so a completed
     // chord leaves nothing behind.
@@ -144,7 +144,7 @@ pub fn status<'a>(ui: &'a Ui, ctx: &Context<'_>) -> Paragraph<'a> {
 
 /// Mode indicators, in the order cmus shows them. Only what is on appears, so
 /// the common case stays quiet.
-fn modes(ui: &Ui) -> String {
+pub(super) fn modes(ui: &Ui, ctx: &Context<'_>) -> String {
     let mut out = Vec::new();
     // What the view is comes first: without it, "half my music is missing" is
     // a puzzle rather than a glance.
@@ -181,8 +181,12 @@ fn modes(ui: &Ui) -> String {
             .into(),
         );
     }
-    if let Some(vol) = ui.volume_hint {
-        out.push(format!("[vol {vol:.0}%]"));
+    // **Read when drawn** — #366. The engine answers a step a moment after it is
+    // sent, so a number taken at the keypress is the level before it.
+    if ui.volume_hint
+        && let Some(p) = ctx.player
+    {
+        out.push(format!("[vol {:.0}%]", p.volume() * 100.0));
     }
     out.join(" ")
 }

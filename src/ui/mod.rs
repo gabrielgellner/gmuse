@@ -517,7 +517,12 @@ pub struct Ui {
     pub playback: Playback,
     /// Shown briefly after a volume change, so the level is visible without a
     /// permanent indicator taking up room.
-    pub volume_hint: Option<f32>,
+    ///
+    /// **Whether to show it, not what it was** — #366. This held `p.volume()` read
+    /// straight after the change was sent, which for an attached view is before the
+    /// engine has said anything: the number was frozen at the old level. The status
+    /// line reads the transport when it draws, so the label follows the engine.
+    pub volume_hint: bool,
     /// **Whether a cue preview is running** — #228.
     ///
     /// The view's, not the engine's: the engine is simply playing, and knows
@@ -990,7 +995,7 @@ impl Ui {
             open: None,
             queue: Queue::new(),
             playback: Playback::default(),
-            volume_hint: None,
+            volume_hint: false,
             bindings: bind::defaults(),
             leader: crate::config::default_leader(),
             help: None,
@@ -1239,7 +1244,7 @@ impl Ui {
         {
             self.status.clear();
             self.status_until = None;
-            self.volume_hint = None;
+            self.volume_hint = false;
         }
     }
 
@@ -3904,12 +3909,15 @@ pub fn execute_counted(ui: &mut Ui, ctx: &Context<'_>, cmd: Command, count: Opti
                 // Stepping the *position*, not the gain: a step of the gain
                 // is what made `-` do almost nothing at the top of the range
                 // and fall off a cliff at the bottom.
-                let next = match spec {
-                    VolSpec::Absolute(v) => v,
-                    VolSpec::Relative(d) => p.volume() + d,
-                };
-                p.set_volume(next);
-                ui.volume_hint = Some(p.volume() * 100.0);
+                //
+                // **A step is sent as a step** — #366. Adding it to `p.volume()` here
+                // was a read-modify-write against an attached view's cache, which was
+                // the constant 1.0: every `-` asked for 95% and the volume moved once.
+                match spec {
+                    VolSpec::Absolute(v) => p.set_volume(v),
+                    VolSpec::Relative(d) => p.step_volume(d),
+                }
+                ui.volume_hint = true;
                 ui.notify("");
             }
         }
@@ -20820,6 +20828,8 @@ mod tests {
         std::sync::Mutex<Vec<String>>,
         /// The playlist each `load` carried — #329.
         std::sync::Mutex<Vec<Option<Vec<Id<Recording>>>>>,
+        /// What `volume` answers, unity when unset — #366.
+        std::sync::Mutex<Option<f32>>,
     );
 
     impl Noted {
@@ -20862,10 +20872,13 @@ mod tests {
             self.note("seek");
         }
         fn volume(&self) -> f32 {
-            1.0
+            self.2.lock().expect("noted").unwrap_or(1.0)
         }
         fn set_volume(&self, _position: f32) {
             self.note("set_volume");
+        }
+        fn step_volume(&self, by: f32) {
+            self.note(&format!("step_volume {by:+.2}"));
         }
         fn underruns(&self) -> u32 {
             0
@@ -20934,6 +20947,88 @@ mod tests {
             noted.asked(),
             vec!["cue-preview".to_string(), "cue".to_string()],
             "a held preview is one preview and one snap back"
+        );
+    }
+
+    /// **A volume key asks for a step, not for a level it worked out** — #366.
+    ///
+    /// Reported as "`<leader> -` does nothing, and `i` then `-` does nothing". The keys were
+    /// bound; what they ran added the step to `p.volume()` and sent the sum, and an attached
+    /// view's `volume` was the constant 1.0 — so every press asked for 95% and only the
+    /// first one moved anything.
+    ///
+    /// `Noted` answers 1.0 for `volume`, which is the bug's own cache, and records the two
+    /// writes under different names, so a view that resolved the step itself shows up here
+    /// as `set_volume`. Pressed through the keymap, both postures, because both were
+    /// reported.
+    #[test]
+    fn a_volume_key_sends_a_step_and_lets_the_transport_resolve_it() {
+        let store = fixture();
+        let noted = Noted::default();
+        let ctx = Context {
+            library: lib_of(&store),
+            player: Some(&noted),
+            gapless: None,
+        };
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "<leader> -");
+        press(&mut ui, &ctx, "<leader> +");
+        press(&mut ui, &ctx, "i");
+        // **The instrument**: `i` really entered the mode, or the two presses below
+        // would be resolved in the view's keymap and prove nothing about the mode's.
+        assert_eq!(
+            ui.mode,
+            crate::cmd::Mode::Transport,
+            "`i` did not enter transport mode"
+        );
+        press(&mut ui, &ctx, "-");
+        press(&mut ui, &ctx, "-");
+
+        assert_eq!(
+            noted.asked(),
+            vec![
+                "step_volume -0.05".to_string(),
+                "step_volume +0.05".to_string(),
+                "step_volume -0.05".to_string(),
+                "step_volume -0.05".to_string(),
+            ],
+            "a volume key resolved its own level instead of sending the step"
+        );
+    }
+
+    /// **The volume label says what the transport says when it is drawn** — #366.
+    ///
+    /// It held `p.volume() * 100` read the instant the change was sent, which for an
+    /// attached view is before the engine has answered — so the label showed the level
+    /// the key had just left. Here the transport's answer changes *after* the key, the
+    /// way a `params` event lands after the send, and the label must follow it.
+    #[test]
+    fn the_volume_label_follows_the_transport_after_the_key() {
+        let store = fixture();
+        let noted = Noted::default();
+        let ctx = Context {
+            library: lib_of(&store),
+            player: Some(&noted),
+            gapless: None,
+        };
+        let mut ui = ui_of(&store, true);
+
+        press(&mut ui, &ctx, "<leader> -");
+        // **The instrument**: at the keypress the transport still says unity, and the
+        // label says so — the label is on, and it reads this transport.
+        assert!(
+            statusline::modes(&ui, &ctx).contains("[vol 100%]"),
+            "no volume label after a volume key: {:?}",
+            statusline::modes(&ui, &ctx)
+        );
+
+        // The engine answers.
+        *noted.2.lock().expect("noted") = Some(0.40);
+        assert!(
+            statusline::modes(&ui, &ctx).contains("[vol 40%]"),
+            "the label kept the level from before the engine answered: {:?}",
+            statusline::modes(&ui, &ctx)
         );
     }
 
