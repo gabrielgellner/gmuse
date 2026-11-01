@@ -50,6 +50,7 @@ import gmuse_core
 import typer
 from mutagen import File
 from mutagen.flac import FLAC
+from mutagen.oggvorbis import OggVorbis
 from mutagen.id3 import (
     ID3,
     TALB,
@@ -137,7 +138,19 @@ class Match:
 #: and reported an empty folder, so a bought FLAC could only be brought in by
 #: hand — which is how five albums arrived without a MusicBrainz id between
 #: them and minted 67 recordings the library already had.
-AUDIO: Final = {".mp3", ".flac"}
+#:
+#: **Ogg Vorbis had the same gap** (#365): 313 of the NAS's 403 classical files
+#: are `.ogg`, so 24 of its 34 album folders reported `no audio`. A Vorbis
+#: comment is the same container of fields whether FLAC or Ogg carries it.
+AUDIO: Final = {".mp3", ".flac", ".ogg"}
+
+#: The formats whose tags are a Vorbis comment rather than ID3.
+VORBIS: Final = {".flac", ".ogg"}
+
+
+def vorbis(path: Path) -> FLAC | OggVorbis:
+    """The Vorbis comment of a FLAC or an Ogg Vorbis file, opened for editing."""
+    return FLAC(path) if path.suffix.lower() == ".flac" else OggVorbis(path)
 
 
 def our_titles(folder: Path) -> list[tuple[Path, str]]:
@@ -155,10 +168,10 @@ def our_tracks(folder: Path) -> list[tuple[Path, str, int]]:
     for path in folder.iterdir():
         if path.suffix.lower() not in AUDIO:
             continue
-        if path.suffix.lower() == ".flac":
-            flac = FLAC(path)
-            title = (flac.get("title") or [path.stem])[0]
-            number = (flac.get("tracknumber") or ["0"])[0].split("/")[0]
+        if path.suffix.lower() in VORBIS:
+            comment = vorbis(path)
+            title = (comment.get("title") or [path.stem])[0]
+            number = (comment.get("tracknumber") or ["0"])[0].split("/")[0]
         else:
             tag = ID3(path)
             title = str(tag["TIT2"].text[0]) if "TIT2" in tag else path.stem
@@ -570,7 +583,7 @@ def credit(artist_credit: list[dict[str, Any]]) -> Credit:
 
 def write_tags(path: Path, release: dict[str, Any], disc: dict[str, Any], track: dict[str, Any]) -> None:
     """Put the gold-standard set onto one file, in the form its container uses."""
-    if path.suffix.lower() == ".flac":
+    if path.suffix.lower() in VORBIS:
         write_vorbis(path, release, disc, track)
     else:
         write_id3(path, release, disc, track)
@@ -587,7 +600,7 @@ def write_vorbis(path: Path, release: dict[str, Any], disc: dict[str, Any], trac
     `musicbrainz_artistid` are real lists, where the ID3 path packs them into a
     `TXXX` frame and a slash-join.
     """
-    tag = FLAC(path)
+    tag = vorbis(path)
     group = release.get("release-group") or {}
     label_info = (release.get("label-info") or [{}])[0]
     recording = track.get("recording") or {}
