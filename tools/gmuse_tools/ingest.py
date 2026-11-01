@@ -50,7 +50,6 @@ import gmuse_core
 import typer
 from mutagen import File
 from mutagen.flac import FLAC
-from mutagen.oggvorbis import OggVorbis
 from mutagen.id3 import (
     ID3,
     TALB,
@@ -69,6 +68,7 @@ from mutagen.id3 import (
     TXXX,
     UFID,
 )
+from mutagen.oggvorbis import OggVorbis
 
 from gmuse_tools import bronze
 from gmuse_tools.genre.common import AUDIO as READABLE
@@ -243,7 +243,32 @@ def identified(folder: Path, wanted: Wanted, ours: list[str]) -> Match | None:
     except bronze.UnansweredError as why:
         say_unanswered(why)
         return None
+    if match is not None and wanted.disc:
+        shown = on_disc(match, wanted.disc, ours)
+        if shown is None:
+            print(f"  {match.release['title']} has no disc {wanted.disc}")
+            return None
+        # **Reported as the one disc, kept as the whole release.** The count gate in
+        # `report` has to see this disc's tracks, or every folder would be refused
+        # against the box; the tags still need every medium, or `disctotal` says 1.
+        return match if report(shown, ours) else None
     return match if report(match, ours) else None
+
+
+def on_disc(match: Match, disc: int, ours: list[str]) -> Match | None:
+    """The match as one medium of it, for judging a folder that holds only that disc — #369.
+
+    A box set arrives a disc at a time: Steve Reich's *Works 1965-1995* is ten
+    CDs, and the NAS held four of them as four folders. Asserting the release
+    against one of them would compare four files with ninety-three tracks and
+    seat them as the box's first four, which is why `report` refuses a count
+    mismatch. Narrowing to the medium makes the count the right one to refuse on.
+    """
+    media = [m for m in match.release.get("media", []) if m.get("position") == disc]
+    if not media:
+        return None
+    _, share = tracklist_match(ours, [t["title"] for t in media[0].get("tracks", [])])
+    return Match({**match.release, "media": media}, match.verdict, share)
 
 
 def say_unanswered(why: Exception) -> None:
@@ -785,6 +810,8 @@ class Wanted:
     artist: str
     album: str
     release: str
+    #: One medium of `release`, where the folder holds only that disc — #369.
+    disc: int | None = None
 
 
 def seated(
@@ -877,6 +904,11 @@ def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> No
         return
     if not whole_album(folder):
         return
+    if wanted.disc and not wanted.release:
+        # A search finds albums; which disc of one is only answerable once a
+        # person has said which release it is.
+        print("  --disc needs --release: name the set first, then which disc of it this is")
+        return
     ours = [t for _, t in pairs]
     match = identified(folder, wanted, ours)
     if match is None:
@@ -887,7 +919,7 @@ def apply(folder: Path, wanted: Wanted, dest: Path | None, *, write: bool) -> No
 
     release = match.release
     tally: collections.Counter[str] = collections.Counter()
-    flat = [(m, t) for m in release["media"] for t in m["tracks"]]
+    flat = [(m, t) for m in release["media"] if wanted.disc in (None, m["position"]) for t in m["tracks"]]
     for (path, _), (disc, track) in seated(pairs, flat, [n for _, _, n in tracks]):
         write_tags(path, release, disc, track)
         renamed = path.with_name(safe_name(track["position"], track["title"], path.suffix))
@@ -1495,11 +1527,12 @@ def register(app: typer.Typer) -> None:
         accept(root.expanduser(), out_path("ingest-review.tsv"), write=write)
 
     @ingest_app.command("apply")
-    def apply_cmd(  # noqa: PLR0913
+    def apply_cmd(  # noqa: PLR0913, PLR0917
         folder: Path = typer.Argument(..., help="the download to bring in"),
         artist: str = typer.Option(..., help="who it is by"),
         album: str = typer.Option("", help="defaults to the folder name"),
         release: str = RELEASE,
+        disc: int | None = typer.Option(None, help="the folder is only this disc of --release"),
         dest: Path | None = typer.Option(None, help="album folder in the library to move into"),
         *,
         write: bool = typer.Option(default=False, help="actually move and tag"),
@@ -1507,7 +1540,7 @@ def register(app: typer.Typer) -> None:
         """Identify a download against MusicBrainz and bring it in."""
         apply(
             folder.expanduser(),
-            Wanted(artist=artist, album=album, release=release),
+            Wanted(artist=artist, album=album, release=release, disc=disc),
             dest.expanduser() if dest else None,
             write=write,
         )
