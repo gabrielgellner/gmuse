@@ -66,6 +66,12 @@ pub struct Tagged {
     /// are two releases in one group — the shape a test about editions needs
     /// (#137), and the only way to mint a second pressing.
     pub mb_release: Option<uuid::Uuid>,
+    /// Which **album** it is, where two share a title — #322. Without it the
+    /// group derives from the credit and the title, so two performances of one
+    /// work under one composer are one group and cannot be told apart.
+    pub mb_release_group: Option<uuid::Uuid>,
+    /// When the album first appeared, as opposed to `date`, the pressing's.
+    pub first_released: Option<i32>,
     /// What kind of release the album is — #133. `Album` unless a test says
     /// otherwise, which is what a file with no tag reads as.
     pub release_kind: crate::model::spine::ReleaseType,
@@ -122,6 +128,10 @@ impl Tagged {
                 .mb_recording
                 .map(crate::model::basis::Basis::MusicBrainz),
             mb_release: self.mb_release,
+            mb_release_group: self.mb_release_group,
+            first_released: self
+                .first_released
+                .map(|y| crate::model::spine::PartialDate::year(y as i16)),
             levels: self.levels,
             format: format_of(&self.path),
             bitrate: self.bitrate.unwrap_or(0),
