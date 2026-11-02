@@ -49,6 +49,7 @@ MusicLibrary/
   off from the artist it belongs to (#84).
 - **`album`** — the release group's title, so two pressings land together. **Absent when the tags name no release**;
   there is no `Singles/` and no stand-in, because a track on no album is an ordinary thing and not a category.
+  **Qualified where two albums want one folder** (#322) — §5.
 - **`disc-`** — only where the release has more than one medium, which is knowable now that a release carries its disc
   count (#134).
 
@@ -117,6 +118,27 @@ These were a rendered tree's problem all along; they are now the only tree's pro
   names are composed on APFS and decomposed on the share. Both fold composition on lookup so nothing is lost today;
   `ext4` and `btrfs` do not, and there the same album is two directories.
 - **Case-insensitive collisions** — APFS and SMB fold case, so two artists differing only in case are one directory.
+- **Two albums, one folder** — **built** (#322). `{album}` is the release _group's_ title so that pressings land
+  together, and nothing stopped two _albums_ doing the same: three Enya releases called _Amarantine_ in one folder, and
+  five performances of Purcell's _Dido and Aeneas_, every one credited `Henry Purcell; …`. Their file names differed, so
+  the path check never fired and the albums mixed under one `cover.jpg` and one album gain.
+
+  So an album whose folder another album wants is **qualified by what separates them, and only that**: the kind where
+  the rivals' kinds differ — the album keeps its plain name and the single says `Amarantine (Single)` — then the year
+  each first appeared, among those the kind left together: `Dido and Aeneas (1986)`. Both are facts about the release,
+  so this stays inside §1. For classical it is the ordinary case rather than an edge: one composer and one title, many
+  times over, is what a classical shelf is. An album with no rival never sees a qualifier.
+
+  **Whatever is still together is refused**, both sides, as two copies wanting one path are. Measured on this library on
+  2026-11-02: _High Voltage_ (1975 and 1976, two different records) and the _Amarantine_ single were split out, and two
+  pairs were refused — each one album catalogued twice under two artist ids, one with a year and one without. That is a
+  split to merge, not a folder to invent. Rivals are found across the whole library, so an import is told apart from
+  what is already shelved.
+
+  **Pressings are not rivals**, deliberately: two pressings of one album still share its folder, and where their file
+  names collide (`Enya/The Celts`, 28 files) that is still `Contested`. Telling pressings apart is a different decision
+  from telling albums apart, and MusicBrainz's release disambiguation is not in the model yet.
+
 - **Reserved names and characters** — `CON`, `PRN`, `:`, `?`, `*`, for a tree read over SMB from Windows.
 - **The 255-byte component cap** — already reached here: Fiona Apple's album folder is truncated mid-word.
 - **Trailing dots**, and carefully: stripping them is a Windows rule, and applied bluntly it turns

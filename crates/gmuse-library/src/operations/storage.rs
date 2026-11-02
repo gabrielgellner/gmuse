@@ -54,20 +54,28 @@
 //! the sleeve's own text either way; this is how a filename is written, which
 //! is the same standing as replacing a colon.
 //!
+//! ## Two albums, one title — #322
+//!
+//! `{album}` is the release group's title, so pressings land together; two
+//! *albums* with one title under one credit are told apart by kind, then year,
+//! and refused where neither separates them. [`Shelves`] has the rule.
+//!
 //! ## No ellipsis, and no leading dot — 2026-10-25
 //!
 //! An ellipsis is dropped from a name and the space around it closes up; a
 //! name never starts with a dot, which would hide it. `storage-layout.md` §5
 //! has the measurement and what it reverses.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use unicode_normalization::UnicodeNormalization;
 
-use crate::model::entity::Encoding;
+use crate::model::entity::{Encoding, ReleaseGroup};
 use crate::model::id::Id;
+use crate::model::reference::CreditOn;
 use crate::model::seam::Librarian;
+use crate::model::spine::ReleaseType;
 
 /// The longest a single path component may be, in bytes.
 ///
@@ -99,6 +107,10 @@ pub enum Refused {
     /// Two copies want one path. **Both are refused**, because picking a
     /// winner would move one file on top of another's name.
     Contested(PathBuf),
+    /// Two albums want one folder and nothing the library holds tells them
+    /// apart — #322. Refused for the reason `Contested` is, one level up: their
+    /// files would not collide, so nothing else would notice them mixing.
+    Shared(PathBuf),
 }
 
 impl std::fmt::Display for Refused {
@@ -110,6 +122,13 @@ impl std::fmt::Display for Refused {
             }
             Refused::Reserved(part) => write!(f, "a reserved name: {part}"),
             Refused::Contested(at) => write!(f, "two copies want {}", at.display()),
+            Refused::Shared(at) => {
+                write!(
+                    f,
+                    "two albums want {} and nothing tells them apart",
+                    at.display()
+                )
+            }
         }
     }
 }
@@ -317,22 +336,192 @@ fn check(part: &str) -> Result<(), Refused> {
     Ok(())
 }
 
+/// What an album's folder is called where its title alone does not say which
+/// album it is — #322.
+///
+/// **`{album}` is the release group's title**, so two pressings of one album
+/// land together, which is meant. Two *albums* with one title under one credit
+/// landed together too, which is not: three Enya releases called *Amarantine*
+/// in one folder, and five performances of Purcell's *Dido and Aeneas* — every
+/// one credited `Henry Purcell; …`. Their file names differed, so the
+/// `Contested` check never fired and the albums mixed without a word, under
+/// one `cover.jpg` and one album gain.
+///
+/// **Qualified by what the library holds about the album**, which keeps it
+/// inside the structural rule: what kind of release it is, then the year it
+/// first appeared. Only rivals get a qualifier, and only the facts that
+/// separate them, so a library with one *Amarantine* never sees a year in the
+/// name:
+///
+/// - **The kind, where the rivals' kinds differ.** An album keeps its plain
+///   name, and the single named after it says `(Single)`.
+/// - **The year, among those the kind left together** — `Dido and Aeneas
+///   (1986)`. For classical this is the ordinary case rather than an edge: one
+///   composer and one title, many times over, is what a classical shelf is.
+///
+/// **Whatever is still together is refused**, both sides, as two copies
+/// wanting one path are: picking a winner is a guess, and a folder of two
+/// albums is the failure this exists to stop.
+///
+/// **Rivals are found across the whole library**, never only the copies being
+/// placed — an import of one *Dido* has to know the library already holds
+/// another. Only albums some copy is filed on count, because a group nothing is
+/// filed on has no folder to want.
+#[derive(Debug, Default)]
+struct Shelves {
+    /// A group whose folder is not its plain title, and what it is instead.
+    named: BTreeMap<Id<ReleaseGroup>, String>,
+    /// A group nothing tells apart from another wanting its folder.
+    shared: BTreeMap<Id<ReleaseGroup>, PathBuf>,
+}
+
+/// One album wanting a folder.
+struct Rival {
+    group: Id<ReleaseGroup>,
+    under: String,
+    album: String,
+    kind: ReleaseType,
+    year: Option<i16>,
+}
+
+impl Shelves {
+    fn of(l: &Librarian) -> Self {
+        let filed: BTreeSet<Id<ReleaseGroup>> = l
+            .every_copy()
+            .into_iter()
+            .filter_map(|copy| l.group_of(l.placed_at(copy)))
+            .collect();
+
+        let mut wanted: BTreeMap<String, Vec<Rival>> = BTreeMap::new();
+        for group in filed {
+            let Some(g) = l.spine.groups.get(&group) else {
+                continue;
+            };
+            // An album with no credit of its own files each track under the
+            // track's, so it has no one folder to contest.
+            let under = l.reference.files_under(CreditOn::ReleaseGroup(group));
+            let album = component(&g.title);
+            if under.is_empty() || album.is_empty() {
+                continue;
+            }
+            let under = fit(&component(&under), COMPONENT_LIMIT);
+            wanted
+                .entry(folded(
+                    &Path::new(&under).join(fit(&album, COMPONENT_LIMIT)),
+                ))
+                .or_default()
+                .push(Rival {
+                    group,
+                    under,
+                    album,
+                    kind: g.kind,
+                    year: g.first_released.map(|d| d.year),
+                });
+        }
+
+        let mut out = Shelves::default();
+        let mut taken: BTreeMap<String, Vec<(Id<ReleaseGroup>, PathBuf)>> = BTreeMap::new();
+        for rivals in wanted.values() {
+            let marks = if rivals.len() > 1 {
+                qualifiers(rivals)
+            } else {
+                vec![Vec::new()]
+            };
+            for (rival, marks) in rivals.iter().zip(marks) {
+                let name = if marks.is_empty() {
+                    rival.album.clone()
+                } else {
+                    let name = format!("{} ({})", rival.album, marks.join(", "));
+                    out.named.insert(rival.group, name.clone());
+                    name
+                };
+                let at = Path::new(&rival.under).join(fit(&name, COMPONENT_LIMIT));
+                taken
+                    .entry(folded(&at))
+                    .or_default()
+                    .push((rival.group, at));
+            }
+        }
+        // **Checked after naming, and against every album**: a qualified name
+        // can land on another album's plain one, and two rivals of one kind
+        // and one year are still one folder.
+        for claims in taken.into_values().filter(|c| c.len() > 1) {
+            for (group, at) in claims {
+                out.shared.insert(group, at);
+            }
+        }
+        out
+    }
+}
+
+/// What separates each of several albums wanting one folder — the kind where
+/// their kinds differ, then the year among those the kind left together.
+fn qualifiers(rivals: &[Rival]) -> Vec<Vec<String>> {
+    let mut marks: Vec<Vec<String>> = vec![Vec::new(); rivals.len()];
+    if rivals.iter().any(|r| r.kind != rivals[0].kind) {
+        for (i, rival) in rivals.iter().enumerate() {
+            if let Some(kind) = kind_label(rival.kind) {
+                marks[i].push(kind.to_owned());
+            }
+        }
+    }
+    let mut together: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
+    for (i, m) in marks.iter().enumerate() {
+        together.entry(m.clone()).or_default().push(i);
+    }
+    for still in together.into_values().filter(|s| s.len() > 1) {
+        let years: BTreeSet<i16> = still.iter().filter_map(|&i| rivals[i].year).collect();
+        if years.len() < 2 {
+            continue;
+        }
+        for i in still {
+            if let Some(year) = rivals[i].year {
+                marks[i].push(year.to_string());
+            }
+        }
+    }
+    marks
+}
+
+/// How a folder names a kind of release, and `None` for an album, which is
+/// what a folder is unless it says otherwise.
+fn kind_label(kind: ReleaseType) -> Option<&'static str> {
+    match kind {
+        ReleaseType::Album => None,
+        ReleaseType::Single => Some("Single"),
+        ReleaseType::Ep => Some("EP"),
+        ReleaseType::Broadcast => Some("Broadcast"),
+        ReleaseType::Other => Some("Other"),
+    }
+}
+
 /// Where this copy belongs, relative to the library root.
 ///
 /// `None` for a copy the library cannot describe — it has no row, so there is
 /// nothing to render from.
-pub fn proposed(l: &Librarian, copy: Id<Encoding>) -> Option<Result<PathBuf, Refused>> {
+fn proposed(
+    l: &Librarian,
+    shelves: &Shelves,
+    copy: Id<Encoding>,
+) -> Option<Result<PathBuf, Refused>> {
     // **A row is an appearance** (#155) and this renders a *file*, so the file
     // names its row rather than being one.
     let format = l.encoding(copy)?.format;
     let row = l.describe(l.row_of_copy(copy)?)?;
 
+    let group = l.group_of(l.placed_at(copy));
+    if let Some(at) = group.and_then(|g| shelves.shared.get(&g)) {
+        return Some(Err(Refused::Shared(at.clone())));
+    }
+
     let under = fit(&component(row.file_under), COMPONENT_LIMIT);
     // **`album_if_named`, not `album`.** The latter stands in `No Album` so a
     // tree node always has a label; rendering that would make a directory
     // called "No Album" the answer to "what release is this on".
-    let album = row
-        .album_if_named
+    let album = group
+        .and_then(|g| shelves.named.get(&g))
+        .map(String::as_str)
+        .or(row.album_if_named)
         .map(component)
         .filter(|a| !a.is_empty())
         .map(|a| fit(&a, COMPONENT_LIMIT));
@@ -407,13 +596,14 @@ pub fn layout_of(l: &Librarian, copies: &[Id<Encoding>]) -> Layout {
     let mut wanted: BTreeMap<String, usize> = BTreeMap::new();
     let mut out = Layout::default();
     let mut proposals = Vec::new();
+    let shelves = Shelves::of(l);
 
     for copy in copies.iter().copied() {
         if l.where_held(copy).is_none() {
             out.elsewhere += 1;
             continue;
         }
-        match proposed(l, copy) {
+        match proposed(l, &shelves, copy) {
             None => out.elsewhere += 1,
             Some(Err(refused)) => out.refused.push((copy, refused)),
             Some(Ok(at)) => {
@@ -754,7 +944,7 @@ mod tests {
     fn only(l: &Librarian) -> Result<PathBuf, Refused> {
         // **Storage is copy-shaped** (#155): it renders a file, not a row.
         let copy = l.every_copy()[0];
-        proposed(l, copy).expect("a fixture row renders")
+        proposed(l, &Shelves::of(l), copy).expect("a fixture row renders")
     }
 
     /// `Sinéad`, decomposed: an `e` followed by U+0301 COMBINING ACUTE.
@@ -817,16 +1007,14 @@ mod tests {
         assert_eq!(plan.settled, 1);
     }
 
-    #[test]
-    fn two_recordings_whose_names_differ_only_in_form_contest_one_path() {
-        // The filesystem is form-insensitive, so these land in one directory.
-        // A byte-comparing check reports no contest and finds out during the
-        // move, which is too late.
-        let l = library(&[
+    /// Two copies of one name in two Unicode forms, with no album between them —
+    /// so the only place they can meet is the file name.
+    fn in_two_forms(album: Option<&str>) -> Librarian {
+        library(&[
             Tagged {
                 path: "/m/a.flac".into(),
                 artist: Some(NFD.into()),
-                album: Some("The Lion and the Cobra".into()),
+                album: album.map(Into::into),
                 title: Some("Troy".into()),
                 tracknumber: Some(1),
                 ..Default::default()
@@ -834,23 +1022,68 @@ mod tests {
             Tagged {
                 path: "/m/b.flac".into(),
                 artist: Some(NFC.into()),
-                album: Some("The Lion and the Cobra".into()),
+                album: album.map(Into::into),
                 title: Some("Troy".into()),
                 tracknumber: Some(1),
                 ..Default::default()
             },
-        ]);
-        let plan = plan(&l, Path::new("/m"));
+        ])
+    }
+
+    #[test]
+    fn two_recordings_whose_names_differ_only_in_form_contest_one_path() {
+        // The filesystem is form-insensitive, so these land in one directory.
+        // A byte-comparing check reports no contest and finds out during the
+        // move, which is too late.
+        //
+        // **No album**, since #322: with one, the two credits are two albums
+        // wanting one folder and are refused a level up, before the file names
+        // are ever compared — the next test.
+        let plan = plan(&in_two_forms(None), Path::new("/m"));
         assert_eq!(
             plan.moves.len(),
             0,
             "neither moves while the contest stands"
+        );
+        assert_eq!(
+            plan.refused.len(),
+            2,
+            "both are reported: {:?}",
+            plan.refused
         );
         assert!(
             plan.refused
                 .iter()
                 .all(|(_, r)| matches!(r, Refused::Contested(_))),
             "both are refused as contested, not silently merged: {:?}",
+            plan.refused
+        );
+    }
+
+    /// **The same, one level up** — #322. Two spellings of one artist mint two
+    /// credits and so two albums, and `component` composes both names, so the
+    /// folder they want is one folder byte for byte.
+    #[test]
+    fn two_albums_whose_credits_differ_only_in_form_want_one_folder() {
+        let l = in_two_forms(Some("The Lion and the Cobra"));
+        assert_eq!(
+            albums(&l),
+            2,
+            "two credits have to be two albums for this to test anything"
+        );
+        let plan = plan(&l, Path::new("/m"));
+        assert_eq!(plan.moves.len(), 0);
+        assert_eq!(
+            plan.refused.len(),
+            2,
+            "both are reported: {:?}",
+            plan.refused
+        );
+        assert!(
+            plan.refused
+                .iter()
+                .all(|(_, r)| matches!(r, Refused::Shared(_))),
+            "{:?}",
             plan.refused
         );
     }
@@ -1496,6 +1729,235 @@ mod tests {
                 PathBuf::from("/m/Dance/Singles/whatever.mp3"),
                 PathBuf::from("An Artist/An Album/01 A Track.mp3")
             ))
+        );
+    }
+
+    /// One track of an album #322 is about: a composer's credit, a work's
+    /// title, and the album named by its own MusicBrainz group.
+    fn dido(path: &str, group: u128, first: Option<i32>, track: u32, title: &str) -> Tagged {
+        Tagged {
+            path: path.into(),
+            artist: Some("Henry Purcell".into()),
+            albumartist: Some("Henry Purcell".into()),
+            album: Some("Dido and Aeneas".into()),
+            title: Some(title.into()),
+            tracknumber: Some(track),
+            mb_release_group: Some(uuid::Uuid::from_u128(group)),
+            first_released: first,
+            ..Default::default()
+        }
+    }
+
+    /// Where each copy goes, sorted, so a test can say the set.
+    fn placed(l: &Librarian, copies: &[Id<Encoding>]) -> Vec<PathBuf> {
+        let mut at: Vec<PathBuf> = layout_of(l, copies)
+            .placed
+            .into_iter()
+            .map(|(_, at)| at)
+            .collect();
+        at.sort();
+        at
+    }
+
+    /// How many albums the library's copies are filed on — counted from the
+    /// copies' slots, not from anything the layout decided.
+    fn albums(l: &Librarian) -> usize {
+        l.every_copy()
+            .into_iter()
+            .filter_map(|c| l.group_of(l.placed_at(c)))
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// **Two albums with one title under one credit get a folder each** — #322.
+    ///
+    /// Their file names differ, so `Contested` never fired and both landed in
+    /// `Henry Purcell/Dido and Aeneas/` without a word. The year they first
+    /// appeared is what tells two performances of one work apart.
+    #[test]
+    fn two_albums_with_one_title_are_told_apart_by_their_years() {
+        let l = library(&[
+            dido(
+                "/m/a.ogg",
+                0xd1d0,
+                Some(1986),
+                15,
+                "When I am laid in earth",
+            ),
+            dido("/m/b.mp3", 0xd1d1, Some(1994), 27, "Thy hand, Belinda"),
+        ]);
+        assert_eq!(
+            albums(&l),
+            2,
+            "the fixture has to be two albums for this to test anything"
+        );
+        assert_eq!(
+            placed(&l, &l.every_copy()),
+            vec![
+                PathBuf::from(
+                    "Henry Purcell/Dido and Aeneas (1986)/15 When I am laid in earth.ogg"
+                ),
+                PathBuf::from("Henry Purcell/Dido and Aeneas (1994)/27 Thy hand, Belinda.mp3"),
+            ]
+        );
+    }
+
+    /// **Only what separates them, and only where something must.** The single
+    /// says what it is and the album it is named after keeps its plain name —
+    /// so does an album with no rival, which never sees a year.
+    #[test]
+    fn a_single_named_after_its_album_says_so_and_the_album_keeps_its_name() {
+        let single = Tagged {
+            release_kind: ReleaseType::Single,
+            ..dido("/m/s.mp3", 0x5146, Some(1994), 1, "When I am laid in earth")
+        };
+        let l = library(&[
+            dido("/m/a.mp3", 0xa1b0, Some(1994), 2, "Shake the cloud"),
+            single,
+            Tagged {
+                album: Some("The Fairy-Queen".into()),
+                ..dido("/m/f.mp3", 0xfa1e, Some(1990), 1, "Overture")
+            },
+        ]);
+        assert_eq!(albums(&l), 3);
+        assert_eq!(
+            placed(&l, &l.every_copy()),
+            vec![
+                PathBuf::from("Henry Purcell/Dido and Aeneas/02 Shake the cloud.mp3"),
+                PathBuf::from(
+                    "Henry Purcell/Dido and Aeneas (Single)/01 When I am laid in earth.mp3"
+                ),
+                PathBuf::from("Henry Purcell/The Fairy-Queen/01 Overture.mp3"),
+            ]
+        );
+    }
+
+    /// **Rivals are found case-insensitively**, because APFS and SMB fold case:
+    /// two albums whose titles differ only in capitals want one folder there,
+    /// whatever their bytes say. Told apart by their years where they have
+    /// them, and refused where they do not.
+    #[test]
+    fn two_albums_whose_titles_differ_only_in_case_are_rivals() {
+        let shouted = |first| {
+            library(&[
+                dido("/m/a.mp3", 0xd1d0, first, 1, "Overture"),
+                Tagged {
+                    album: Some("Dido And Aeneas".into()),
+                    ..dido(
+                        "/m/b.mp3",
+                        0xd1d1,
+                        first.map(|y| y + 8),
+                        2,
+                        "Shake the cloud",
+                    )
+                },
+            ])
+        };
+        let dated = shouted(Some(1986));
+        assert_eq!(albums(&dated), 2);
+        assert_eq!(
+            placed(&dated, &dated.every_copy()),
+            vec![
+                PathBuf::from("Henry Purcell/Dido And Aeneas (1994)/02 Shake the cloud.mp3"),
+                PathBuf::from("Henry Purcell/Dido and Aeneas (1986)/01 Overture.mp3"),
+            ]
+        );
+
+        let undated = shouted(None);
+        let layout = layout_of(&undated, &undated.every_copy());
+        assert_eq!(
+            layout.refused.len(),
+            2,
+            "both are reported: {:?}",
+            layout.placed
+        );
+        assert!(
+            layout
+                .refused
+                .iter()
+                .all(|(_, r)| matches!(r, Refused::Shared(_))),
+            "{:?}",
+            layout.refused
+        );
+    }
+
+    /// **What nothing tells apart is refused, both sides** — the same answer
+    /// `Contested` gives one level down. A folder of two albums is the failure,
+    /// and a guess at which keeps the name is a guess.
+    #[test]
+    fn two_albums_nothing_tells_apart_are_refused_both() {
+        let l = library(&[
+            dido("/m/a.mp3", 0xd1d0, Some(1994), 1, "Overture"),
+            dido("/m/b.mp3", 0xd1d1, Some(1994), 2, "Shake the cloud"),
+        ]);
+        assert_eq!(albums(&l), 2);
+        let layout = layout_of(&l, &l.every_copy());
+        assert!(
+            layout.placed.is_empty(),
+            "neither is placed: {:?}",
+            layout.placed
+        );
+        assert_eq!(layout.refused.len(), 2, "both are reported, not just one");
+        assert!(
+            layout
+                .refused
+                .iter()
+                .all(|(_, r)| *r == Refused::Shared("Henry Purcell/Dido and Aeneas".into())),
+            "{:?}",
+            layout.refused
+        );
+    }
+
+    /// **Two pressings of one album still land together**, which `{album}`
+    /// being the group's title is for. Only *albums* are rivals.
+    #[test]
+    fn two_pressings_of_one_album_still_share_its_folder() {
+        let l = library(&[
+            Tagged {
+                mb_release: Some(uuid::Uuid::from_u128(0x1986)),
+                ..dido("/m/a.mp3", 0xd1d0, Some(1986), 1, "Overture")
+            },
+            Tagged {
+                mb_release: Some(uuid::Uuid::from_u128(0x2001)),
+                ..dido("/m/b.mp3", 0xd1d0, Some(1986), 2, "Shake the cloud")
+            },
+        ]);
+        let pressings: BTreeSet<_> = l
+            .every_copy()
+            .into_iter()
+            .filter_map(|c| l.release_of(l.placed_at(c)))
+            .collect();
+        assert_eq!(pressings.len(), 2, "the fixture has to be two pressings");
+        assert_eq!(
+            placed(&l, &l.every_copy()),
+            vec![
+                PathBuf::from("Henry Purcell/Dido and Aeneas/01 Overture.mp3"),
+                PathBuf::from("Henry Purcell/Dido and Aeneas/02 Shake the cloud.mp3"),
+            ]
+        );
+    }
+
+    /// **The rival can already be in the library.** An import lays out only
+    /// the files it took in, and the album it collides with is not one of them
+    /// — which is the *Dido* import exactly: four performances arriving beside
+    /// one already shelved.
+    #[test]
+    fn an_import_is_told_apart_from_an_album_already_held() {
+        let l = library(&[
+            dido("/m/held.ogg", 0xd1d0, Some(1986), 16, "With drooping wings"),
+            dido("/m/new.mp3", 0xd1d1, Some(1995), 39, "With drooping wings"),
+        ]);
+        let arriving: Vec<Id<Encoding>> = l
+            .every_copy()
+            .into_iter()
+            .filter(|&c| l.where_held(c).is_some_and(|at| at.ends_with("new.mp3")))
+            .collect();
+        assert_eq!(arriving.len(), 1, "the import is one file of the two");
+        assert_eq!(
+            placed(&l, &arriving),
+            vec![PathBuf::from(
+                "Henry Purcell/Dido and Aeneas (1995)/39 With drooping wings.mp3"
+            )]
         );
     }
 }
