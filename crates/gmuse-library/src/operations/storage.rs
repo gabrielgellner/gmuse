@@ -60,6 +60,12 @@
 //! *albums* with one title under one credit are told apart by kind, then year,
 //! and refused where neither separates them. [`Shelves`] has the rule.
 //!
+//! ## Two pressings, one file name — #375
+//!
+//! The same rule one level down. Pressings of one album share its folder
+//! until their file names collide; then those pressings, and only those, are
+//! told apart by their own title and then their year (`Shelves::press`).
+//!
 //! ## No ellipsis, and no leading dot — 2026-10-25
 //!
 //! An ellipsis is dropped from a name and the space around it closes up; a
@@ -71,7 +77,7 @@ use std::path::{Path, PathBuf};
 
 use unicode_normalization::UnicodeNormalization;
 
-use crate::model::entity::{Encoding, ReleaseGroup};
+use crate::model::entity::{Encoding, Release, ReleaseGroup};
 use crate::model::id::Id;
 use crate::model::reference::CreditOn;
 use crate::model::seam::Librarian;
@@ -111,6 +117,9 @@ pub enum Refused {
     /// apart — #322. Refused for the reason `Contested` is, one level up: their
     /// files would not collide, so nothing else would notice them mixing.
     Shared(PathBuf),
+    /// Two pressings of one album would collide file by file and nothing the
+    /// library holds about them tells them apart — #375.
+    Pressed(PathBuf),
 }
 
 impl std::fmt::Display for Refused {
@@ -122,6 +131,13 @@ impl std::fmt::Display for Refused {
             }
             Refused::Reserved(part) => write!(f, "a reserved name: {part}"),
             Refused::Contested(at) => write!(f, "two copies want {}", at.display()),
+            Refused::Pressed(at) => {
+                write!(
+                    f,
+                    "two pressings collide in {} and nothing tells them apart",
+                    at.display()
+                )
+            }
             Refused::Shared(at) => {
                 write!(
                     f,
@@ -373,6 +389,11 @@ struct Shelves {
     named: BTreeMap<Id<ReleaseGroup>, String>,
     /// A group nothing tells apart from another wanting its folder.
     shared: BTreeMap<Id<ReleaseGroup>, PathBuf>,
+    /// A pressing whose files would collide with another pressing's, and the
+    /// folder it takes instead — #375.
+    pressed: BTreeMap<Id<Release>, String>,
+    /// A pressing nothing tells apart from one it collides with.
+    shared_pressings: BTreeMap<Id<Release>, PathBuf>,
 }
 
 /// One album wanting a folder.
@@ -420,7 +441,8 @@ impl Shelves {
         }
 
         let mut out = Shelves::default();
-        let mut taken: BTreeMap<String, Vec<(Id<ReleaseGroup>, PathBuf)>> = BTreeMap::new();
+        let mut taken: BTreeMap<String, Vec<(Holder, PathBuf)>> = BTreeMap::new();
+        let mut folders: BTreeMap<Id<ReleaseGroup>, (String, String)> = BTreeMap::new();
         for rivals in wanted.values() {
             let marks = if rivals.len() > 1 {
                 qualifiers(rivals)
@@ -439,19 +461,178 @@ impl Shelves {
                 taken
                     .entry(folded(&at))
                     .or_default()
-                    .push((rival.group, at));
+                    .push((Holder::Album(rival.group), at));
+                folders.insert(rival.group, (rival.under.clone(), name));
             }
         }
+        out.press(l, &folders, &mut taken);
         // **Checked after naming, and against every album**: a qualified name
         // can land on another album's plain one, and two rivals of one kind
         // and one year are still one folder.
         for claims in taken.into_values().filter(|c| c.len() > 1) {
-            for (group, at) in claims {
-                out.shared.insert(group, at);
+            for (holder, at) in claims {
+                match holder {
+                    Holder::Album(group) => out.shared.insert(group, at),
+                    Holder::Pressing(release) => out.shared_pressings.insert(release, at),
+                };
             }
         }
         out
     }
+
+    /// **Two pressings of one album whose files collide get a folder each** —
+    /// #375, and #322's rule one level down.
+    ///
+    /// `{album}` is the group's title so that pressings land together, and
+    /// usually they can: a deluxe edition's extra tracks have names of their
+    /// own. Where they cannot — the 1988 *Enya* and its 1992 reissue *The
+    /// Celts*, one tracklist under two titles — every track was `Contested`
+    /// and both sides stayed where they were, which left the album in two
+    /// folders anyway, with whichever track's title happened to differ moved
+    /// in beside the other pressing.
+    ///
+    /// So only the pressings whose names collide are qualified, and only by
+    /// what separates them: **the pressing's own title** where it is not the
+    /// album's — `The Celts (Enya)` — then **the year it was issued**. One
+    /// that needs neither keeps the album's folder. Whatever still collides is
+    /// refused both sides, as before.
+    fn press(
+        &mut self,
+        l: &Librarian,
+        folders: &BTreeMap<Id<ReleaseGroup>, (String, String)>,
+        taken: &mut BTreeMap<String, Vec<(Holder, PathBuf)>>,
+    ) {
+        // Which pressings claim each file name inside an album's folder —
+        // **among copies held here**, as `layout_of` counts a contest: a copy
+        // held only on another device, or retired, has no file to collide.
+        let mut names: BTreeMap<(Id<ReleaseGroup>, String), BTreeSet<Id<Release>>> =
+            BTreeMap::new();
+        for copy in l.every_copy() {
+            if l.where_held(copy).is_none() {
+                continue;
+            }
+            let slot = l.placed_at(copy);
+            let (Some(group), Some(release)) = (l.group_of(slot), l.release_of(slot)) else {
+                continue;
+            };
+            if !folders.contains_key(&group) {
+                continue;
+            }
+            let Some((name, _)) = leaf(l, copy) else {
+                continue;
+            };
+            names
+                .entry((group, folded(Path::new(&name))))
+                .or_default()
+                .insert(release);
+        }
+        let mut colliding: BTreeMap<Id<ReleaseGroup>, BTreeSet<Collision>> = BTreeMap::new();
+        for ((group, _), releases) in names {
+            let releases: Vec<_> = releases.into_iter().collect();
+            for (i, a) in releases.iter().enumerate() {
+                for b in &releases[i + 1..] {
+                    colliding.entry(group).or_default().insert((*a, *b));
+                }
+            }
+        }
+
+        for (group, pairs) in colliding {
+            let (under, base) = &folders[&group];
+            let album = l
+                .spine
+                .groups
+                .get(&group)
+                .map(|g| component(&g.title))
+                .unwrap_or_default();
+            let involved: Vec<Id<Release>> = pairs
+                .iter()
+                .flat_map(|(a, b)| [*a, *b])
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let pressings: Vec<(String, Option<i16>)> = involved
+                .iter()
+                .map(|r| {
+                    let r = l.spine.releases.get(r);
+                    (
+                        r.map(|r| component(&r.title)).unwrap_or_default(),
+                        r.and_then(|r| r.released).map(|d| d.year),
+                    )
+                })
+                .collect();
+            let marks = pressing_marks(&album, &pressings);
+            let mut plain: BTreeSet<Id<Release>> = BTreeSet::new();
+            for (release, marks) in involved.iter().zip(marks) {
+                if marks.is_empty() {
+                    plain.insert(*release);
+                    continue;
+                }
+                let name = format!("{base} ({})", marks.join(", "));
+                let at = Path::new(under).join(fit(&name, COMPONENT_LIMIT));
+                taken
+                    .entry(folded(&at))
+                    .or_default()
+                    .push((Holder::Pressing(*release), at));
+                self.pressed.insert(*release, name);
+            }
+            // Two pressings left in the album's own folder that still collide
+            // are what this could not separate. Those marked alike land on one
+            // qualified folder and are caught by `taken`.
+            for (a, b) in &pairs {
+                if plain.contains(a) && plain.contains(b) {
+                    let at = Path::new(under).join(fit(base, COMPONENT_LIMIT));
+                    self.shared_pressings.insert(*a, at.clone());
+                    self.shared_pressings.insert(*b, at);
+                }
+            }
+        }
+    }
+}
+
+/// Two pressings of one album that want one file name.
+type Collision = (Id<Release>, Id<Release>);
+
+/// Who wants a folder: an album, or one pressing of it given its own.
+#[derive(Debug, Clone, Copy)]
+enum Holder {
+    Album(Id<ReleaseGroup>),
+    Pressing(Id<Release>),
+}
+
+/// What separates each of several pressings whose files collide — the
+/// pressing's own title where it is not the album's, then the year it was
+/// issued among those the title left together.
+fn pressing_marks(album: &str, pressings: &[(String, Option<i16>)]) -> Vec<Vec<String>> {
+    let fold = |t: &str| t.nfc().collect::<String>().to_lowercase();
+    let mut marks: Vec<Vec<String>> = pressings
+        .iter()
+        .map(|(title, _)| {
+            if title.is_empty() || fold(title) == fold(album) {
+                Vec::new()
+            } else {
+                vec![title.clone()]
+            }
+        })
+        .collect();
+    let mut together: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
+    for (i, m) in marks.iter().enumerate() {
+        together
+            .entry(m.iter().map(|t| fold(t)).collect())
+            .or_default()
+            .push(i);
+    }
+    for still in together.into_values().filter(|s| s.len() > 1) {
+        let years: BTreeSet<i16> = still.iter().filter_map(|&i| pressings[i].1).collect();
+        if years.len() < 2 {
+            continue;
+        }
+        for i in still {
+            if let Some(year) = pressings[i].1 {
+                marks[i].push(year.to_string());
+            }
+        }
+    }
+    marks
 }
 
 /// What separates each of several albums wanting one folder — the kind where
@@ -495,36 +676,11 @@ fn kind_label(kind: ReleaseType) -> Option<&'static str> {
     }
 }
 
-/// Where this copy belongs, relative to the library root.
-///
-/// `None` for a copy the library cannot describe — it has no row, so there is
-/// nothing to render from.
-fn proposed(
-    l: &Librarian,
-    shelves: &Shelves,
-    copy: Id<Encoding>,
-) -> Option<Result<PathBuf, Refused>> {
-    // **A row is an appearance** (#155) and this renders a *file*, so the file
-    // names its row rather than being one.
+/// The file name a copy renders to — the part of its path that does not
+/// depend on which folder it lands in — and whether it has no title.
+fn leaf(l: &Librarian, copy: Id<Encoding>) -> Option<(String, bool)> {
     let format = l.encoding(copy)?.format;
     let row = l.describe(l.row_of_copy(copy)?)?;
-
-    let group = l.group_of(l.placed_at(copy));
-    if let Some(at) = group.and_then(|g| shelves.shared.get(&g)) {
-        return Some(Err(Refused::Shared(at.clone())));
-    }
-
-    let under = fit(&component(row.file_under), COMPONENT_LIMIT);
-    // **`album_if_named`, not `album`.** The latter stands in `No Album` so a
-    // tree node always has a label; rendering that would make a directory
-    // called "No Album" the answer to "what release is this on".
-    let album = group
-        .and_then(|g| shelves.named.get(&g))
-        .map(String::as_str)
-        .or(row.album_if_named)
-        .map(component)
-        .filter(|a| !a.is_empty())
-        .map(|a| fit(&a, COMPONENT_LIMIT));
     let title = component(if row.title.is_empty() { "" } else { row.title });
 
     // The disc prefix only where the release has more than one (#134).
@@ -541,7 +697,47 @@ fn proposed(
     // The extension and the track prefix are part of the name's budget.
     let ext = format.extension();
     let room = COMPONENT_LIMIT.saturating_sub(lead.len() + 1 + ext.len());
-    let name = format!("{lead}{}.{ext}", fit(&title, room));
+    Some((
+        format!("{lead}{}.{ext}", fit(&title, room)),
+        title.is_empty(),
+    ))
+}
+
+/// Where this copy belongs, relative to the library root.
+///
+/// `None` for a copy the library cannot describe — it has no row, so there is
+/// nothing to render from.
+fn proposed(
+    l: &Librarian,
+    shelves: &Shelves,
+    copy: Id<Encoding>,
+) -> Option<Result<PathBuf, Refused>> {
+    // **A row is an appearance** (#155) and this renders a *file*, so the file
+    // names its row rather than being one.
+    let row = l.describe(l.row_of_copy(copy)?)?;
+
+    let group = l.group_of(l.placed_at(copy));
+    if let Some(at) = group.and_then(|g| shelves.shared.get(&g)) {
+        return Some(Err(Refused::Shared(at.clone())));
+    }
+    let release = l.release_of(l.placed_at(copy));
+    if let Some(at) = release.and_then(|r| shelves.shared_pressings.get(&r)) {
+        return Some(Err(Refused::Pressed(at.clone())));
+    }
+
+    let under = fit(&component(row.file_under), COMPONENT_LIMIT);
+    // **`album_if_named`, not `album`.** The latter stands in `No Album` so a
+    // tree node always has a label; rendering that would make a directory
+    // called "No Album" the answer to "what release is this on".
+    let album = release
+        .and_then(|r| shelves.pressed.get(&r))
+        .or_else(|| group.and_then(|g| shelves.named.get(&g)))
+        .map(String::as_str)
+        .or(row.album_if_named)
+        .map(component)
+        .filter(|a| !a.is_empty())
+        .map(|a| fit(&a, COMPONENT_LIMIT));
+    let (name, untitled) = leaf(l, copy)?;
     let mut parts = vec![under];
     parts.extend(album);
     parts.push(name);
@@ -552,7 +748,7 @@ fn proposed(
         }
     }
     // A title of nothing leaves a name that is only an extension.
-    if title.is_empty() {
+    if untitled {
         return Some(Err(Refused::Nameless));
     }
     Some(Ok(parts.iter().collect()))
@@ -1934,6 +2130,147 @@ mod tests {
                 PathBuf::from("Henry Purcell/Dido and Aeneas/01 Overture.mp3"),
                 PathBuf::from("Henry Purcell/Dido and Aeneas/02 Shake the cloud.mp3"),
             ]
+        );
+    }
+
+    /// One track of the album #375 is about: two pressings in one group, the
+    /// same tracklist under the pressing's own title.
+    fn celts(path: &str, release: u128, album: &str, year: i32, track: u32, title: &str) -> Tagged {
+        Tagged {
+            path: path.into(),
+            artist: Some("Enya".into()),
+            albumartist: Some("Enya".into()),
+            album: Some(album.into()),
+            title: Some(title.into()),
+            tracknumber: Some(track),
+            date: Some(year),
+            mb_release_group: Some(uuid::Uuid::from_u128(0xce175)),
+            mb_release: Some(uuid::Uuid::from_u128(release)),
+            ..Default::default()
+        }
+    }
+
+    /// How many pressings the library's copies sit on — counted from their
+    /// slots, not from anything the layout decided.
+    fn pressings(l: &Librarian) -> usize {
+        l.every_copy()
+            .into_iter()
+            .filter_map(|c| l.release_of(l.placed_at(c)))
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// **Two pressings whose files collide get a folder each** — #375. One
+    /// tracklist under two titles made every track `Contested`, and both sides
+    /// stayed where they were: the album in two folders anyway.
+    #[test]
+    fn two_pressings_whose_files_collide_are_told_apart_by_their_titles() {
+        let l = library(&[
+            celts("/m/a.mp3", 0x1992, "The Celts", 1992, 1, "The Celts"),
+            celts("/m/b.mp3", 0x1988, "Enya", 1988, 1, "The Celts"),
+        ]);
+        assert_eq!(albums(&l), 1, "the fixture has to be one album");
+        assert_eq!(pressings(&l), 2, "and two pressings of it");
+        let album = l.spine.groups.values().next().unwrap().title.clone();
+        let other = if album == "Enya" { "The Celts" } else { "Enya" };
+        assert_eq!(
+            placed(&l, &l.every_copy()),
+            vec![
+                PathBuf::from(format!("Enya/{album}/01 The Celts.mp3")),
+                PathBuf::from(format!("Enya/{album} ({other})/01 The Celts.mp3")),
+            ]
+        );
+    }
+
+    /// **The year, where the titles are one** — and both are qualified,
+    /// because neither is the album's more than the other.
+    #[test]
+    fn two_pressings_with_one_title_are_told_apart_by_their_years() {
+        let l = library(&[
+            celts("/m/a.mp3", 0x1992, "The Celts", 1992, 1, "The Celts"),
+            celts("/m/b.mp3", 0x2009, "The Celts", 2009, 1, "The Celts"),
+        ]);
+        assert_eq!(pressings(&l), 2, "the fixture has to be two pressings");
+        assert_eq!(
+            placed(&l, &l.every_copy()),
+            vec![
+                PathBuf::from("Enya/The Celts (1992)/01 The Celts.mp3"),
+                PathBuf::from("Enya/The Celts (2009)/01 The Celts.mp3"),
+            ]
+        );
+    }
+
+    /// **And where nothing separates them, both stay put**, as two copies
+    /// wanting one path always have.
+    #[test]
+    fn two_pressings_nothing_tells_apart_are_refused_both() {
+        let l = library(&[
+            celts("/m/a.mp3", 0x1992, "The Celts", 1992, 1, "The Celts"),
+            celts("/m/b.mp3", 0x1993, "The Celts", 1992, 1, "The Celts"),
+        ]);
+        assert_eq!(pressings(&l), 2, "the fixture has to be two pressings");
+        let layout = layout_of(&l, &l.every_copy());
+        assert_eq!(layout.placed, vec![]);
+        assert_eq!(layout.refused.len(), 2);
+        assert!(
+            layout
+                .refused
+                .iter()
+                .all(|(_, r)| *r == Refused::Pressed("Enya/The Celts".into())),
+            "{:?}",
+            layout.refused
+        );
+    }
+
+    /// **Only the pressings that collide.** A third whose names are its own
+    /// stays in the album's folder beside the one that kept it.
+    #[test]
+    fn a_pressing_that_collides_with_nothing_keeps_the_albums_folder() {
+        let l = library(&[
+            celts("/m/a.mp3", 0x1992, "The Celts", 1992, 1, "The Celts"),
+            celts("/m/b.mp3", 0x1988, "The Celts", 1988, 1, "The Celts"),
+            celts("/m/c.mp3", 0x2009, "The Celts", 2009, 16, "Bonus"),
+        ]);
+        assert_eq!(pressings(&l), 3, "the fixture has to be three pressings");
+        assert_eq!(
+            placed(&l, &l.every_copy()),
+            vec![
+                PathBuf::from("Enya/The Celts/16 Bonus.mp3"),
+                PathBuf::from("Enya/The Celts (1988)/01 The Celts.mp3"),
+                PathBuf::from("Enya/The Celts (1992)/01 The Celts.mp3"),
+            ]
+        );
+    }
+
+    /// **A pressing held nowhere here collides with nothing.** Its copies have
+    /// no file on this device, so qualifying the one that does would move it
+    /// out of its album's folder for a collision that cannot happen — what six
+    /// James Blake and The Bug files did on the live library before this was
+    /// counted the way `layout_of` counts a contest.
+    #[test]
+    fn a_pressing_held_elsewhere_does_not_move_the_one_held_here() {
+        let here = celts("/m/a.mp3", 0x1992, "The Celts", 1992, 1, "The Celts");
+        let away = celts("/m/b.mp3", 0x1988, "The Celts", 1988, 1, "The Celts");
+        let mut both = Holdings::new();
+        both.upsert(here.clone());
+        both.upsert(away.clone());
+        let mut held = Holdings::new();
+        held.upsert(here);
+        let mut log = crate::model::instance::Instance::new(crate::fixture::device());
+        log.ingest(100, &both.tags());
+        let mut l = crate::bridge::librarian(&held, log.records(), crate::fixture::device(), 100);
+        l.here(crate::fixture::device());
+
+        assert_eq!(pressings(&l), 2, "both pressings have to be catalogued");
+        let unheld = l
+            .every_copy()
+            .into_iter()
+            .filter(|&c| l.where_held(c).is_none())
+            .count();
+        assert_eq!(unheld, 1, "and one of them held nowhere here");
+        assert_eq!(
+            placed(&l, &l.every_copy()),
+            vec![PathBuf::from("Enya/The Celts/01 The Celts.mp3")]
         );
     }
 

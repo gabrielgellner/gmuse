@@ -49,7 +49,8 @@ MusicLibrary/
   off from the artist it belongs to (#84).
 - **`album`** — the release group's title, so two pressings land together. **Absent when the tags name no release**;
   there is no `Singles/` and no stand-in, because a track on no album is an ordinary thing and not a category.
-  **Qualified where two albums want one folder** (#322) — §5.
+  **Qualified where two albums want one folder** (#322), **and where two pressings of one album collide file by file**
+  (#375) — §5.
 - **`disc-`** — only where the release has more than one medium, which is knowable now that a release carries its disc
   count (#134).
 
@@ -135,9 +136,19 @@ These were a rendered tree's problem all along; they are now the only tree's pro
   split to merge, not a folder to invent. Rivals are found across the whole library, so an import is told apart from
   what is already shelved.
 
-  **Pressings are not rivals**, deliberately: two pressings of one album still share its folder, and where their file
-  names collide (`Enya/The Celts`, 28 files) that is still `Contested`. Telling pressings apart is a different decision
-  from telling albums apart, and MusicBrainz's release disambiguation is not in the model yet.
+  **Pressings are not rivals**, deliberately: two pressings of one album still share its folder. A deluxe edition's
+  extra tracks have names of their own, so the folder holds both without a word.
+
+- **Two pressings, one file name** — **built** (#375). Where they cannot share it, they used to be `Contested` track by
+  track: the 1988 _Enya_ and its 1992 reissue _The Celts_ are one MusicBrainz group with one tracklist under two titles,
+  so 28 files were refused and the album sat in two folders anyway, with the one track whose title differed moved in
+  beside the other pressing. So **the pressings whose names collide, and only those**, are told apart by #322's rule one
+  level down: the pressing's own title where it is not the album's — `Enya/The Celts (Enya)/` — then the year it was
+  issued. One that needs neither keeps the album's folder, as does any pressing that collides with nothing. Whatever is
+  still together is refused both sides. MusicBrainz's release disambiguation is not in the model, so it is not a third
+  step yet. Measured on this library on 2026-11-04: 15 files move, 28 refusals become 0, and nothing else changes — once
+  the collisions were counted only among copies held here, as `layout_of` counts a contest. Counted over every copy, six
+  James Blake and The Bug files were refused for colliding with copies on no disk.
 
 - **Reserved names and characters** — `CON`, `PRN`, `:`, `?`, `*`, for a tree read over SMB from Windows.
 - **The 255-byte component cap** — already reached here: Fiona Apple's album folder is truncated mid-word.
