@@ -128,6 +128,7 @@ NARROWER: Final[dict[str, tuple[str, ...]]] = {
     "Industrial Metal": ("Metal",),
     "Rock And Roll": ("Rock",),
     "Rock & Roll": ("Rock",),
+    "Rockabilly": ("Rock",),
     "Glam": ("Rock",),
     "Garage Rock": ("Rock",),
     "Symphonic Rock": ("Rock",),
@@ -269,6 +270,7 @@ NARROWER: Final[dict[str, tuple[str, ...]]] = {
     "Synth Funk": ("Electronic", "Funk"),
     # ── jazz ──────────────────────────────────────────────────────────────
     "Contemporary Jazz": ("Jazz",),
+    "Cool Jazz": ("Jazz",),
     "Jazz-rock": ("Jazz", "Rock"),
     "Free Jazz": ("Jazz",),
     "Vocal Jazz": ("Jazz",),
