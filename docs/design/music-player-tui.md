@@ -6640,6 +6640,26 @@ Append here as decisions are made. Format: date, decision, rationale.
   event goes first as the instrument. Five targeted sabotages each fail one of the two tests: not subscribing to
   `engine`, dropping its events, never draining, reading notices without taking them, and treating any body as a notice.
 
+- **2026-11-04** **A file re-read where the library holds it corrects its own placement (#373).** #148's contradiction
+  check was compared within one pass, because a check against the log had called all 480 files of #147's renumbered
+  albums liars. The `Luna` fix later seeded it from the log anyway, so that a badly tagged staging copy could not
+  re-place the library's encodings, and that brought the #147 failure back for a single file. Deller's _Dido and Aeneas_
+  was placed at 2-40 off a stale stacked ID3 tag (#303). rsgain then dropped the stale tag, and every re-import refused
+  the file for saying 1-40, which is what its one-disc release says.
+
+  The 2026-09-06 entry said telling the cases apart "would need the log to record which file a placement came from". It
+  still does not, and **where this device holds the encoding** answers closely enough. An import publishes holdings
+  before it places, so the held copy is the one its placement was read from or carried to. A file re-read at that exact
+  path skips the log seed, and the fold's rule decides: the latest placement on the same rung wins, and a MusicBrainz
+  release still outranks a name. A copy at any other path is still refused, and so are two files disagreeing in one
+  pass. The paths are compared as a walk prints them, so a root given in another form falls back to refusing.
+
+  Three alternatives were set aside. An import flag makes a person decide something the holdings already answer. A
+  placement proposal through `shelf apply` is a second way into a fact `ingest` already writes. A locator on every
+  `EncodingPlaced` is a schema change for a distinction the holdings already draw. Three targeted sabotages each fail a
+  test: the exemption removed, the path comparison dropped, and the log seed removed. The last is the `Luna` case, which
+  had no test until now.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
