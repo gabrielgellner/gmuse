@@ -562,16 +562,19 @@ pub fn populate(
     // group nothing points at: an entry nobody will ever fix, which is what
     // `library-api.md` §7 exists to stop accumulating.
     //
-    // **Compared within this pass, not against the log**, and that is the
-    // whole difficulty. A recorded placement disagreeing with a file is
-    // usually the file being *better* than it was: it gained a MusicBrainz
-    // release-group id, or the id rule changed under it — #147 renumbered
-    // every fallback-minted album, and a check against the log called all 480
-    // of their files liars. Neither is a contradiction; both are updates.
+    // **Compared within this pass, and against the log only for other
+    // copies**, and that is the whole difficulty. A recorded placement
+    // disagreeing with a file is usually the file being *better* than it was:
+    // it gained a MusicBrainz release-group id, or the id rule changed under
+    // it — #147 renumbered every fallback-minted album, and a check against
+    // the log called all 480 of their files liars. Neither is a
+    // contradiction; both are updates.
     //
     // Two files in one pass claiming one encoding for two albums cannot be
-    // explained that way. Telling those apart *across* passes needs the log to
-    // record which file a placement came from, and it does not.
+    // explained that way. Telling those apart *across* passes needs to know
+    // which file a placement came from; the log does not record that, and
+    // where the device holds the encoding stands in for it — see `corrected`
+    // below (#373).
     // **Does anyone this album is credited to actually appear on it?** — the
     // check `[MARAPCANA.COM]` walked past. Asked within the pass, because it
     // is a question about the record in hand and not about the library.
@@ -623,7 +626,36 @@ pub fn populate(
     //
     // Same shape as the `Early James` retirement (`surviving_holders`): two
     // paths are one encoding, and the second one to be looked at wins.
+    //
+    // **Unless this file is the copy the library holds** — #373. Seeding from
+    // the log brought back the case #147 paid for: a file re-read *where it
+    // sits* that disagrees with its placement is the file being corrected,
+    // not a stranger. Deller's *Dido* was placed at 2-40 off a stale stacked
+    // tag, rsgain dropped that tag, and every re-import then refused the
+    // file for saying 1-40, which is what its one-disc release says.
+    //
+    // The question the Decision Log said needed "which file a placement came
+    // from" is answered closely enough by **where this device holds the
+    // encoding**: an import publishes holdings before it places, so the copy
+    // the library holds is the one its placement was read from or carried
+    // to. `Luna`'s staging copy is at another path and stays refused.
+    // Compared as the path a walk prints, so a root given in another form
+    // falls back to refusing, which is the safe direction.
+    let holds = instance
+        .holdings_asserted(instance.device())
+        .cloned()
+        .unwrap_or_default();
+    let corrected: std::collections::BTreeSet<Id<Encoding>> = paths_of
+        .iter()
+        .zip(&scanned)
+        .map(|(at, s)| (at, Id::<Encoding>::of_audio(&s.audio)))
+        .filter(|(at, encoding)| holds.get(encoding).map(Path::new) == Some(at.as_path()))
+        .map(|(_, encoding)| encoding)
+        .collect();
     for (encoding, placement) in already_placed(&crate::projection::catalogue::fold(&before)) {
+        if corrected.contains(&encoding) {
+            continue;
+        }
         wanted.insert(
             encoding,
             (placement, PathBuf::from("(what the library already held)")),
@@ -1003,6 +1035,65 @@ mod tests {
         assert_eq!(again.written, 0);
     }
 
+    /// **A file corrected where the library holds it takes its new place** —
+    /// #373. Deller's *Dido* was placed on disc 2 off a stale stacked tag, and
+    /// once the tag was gone every re-import refused the file for telling the
+    /// truth.
+    #[test]
+    fn a_file_corrected_where_the_library_holds_it_takes_its_new_place() {
+        let dir = std::env::temp_dir().join("gmuse-populate-corrected");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("2-40 When I am laid in earth.wav");
+        write_wav(&at, 4410);
+        write_placed_on(&at, "When I am laid in earth", "Dido and Aeneas", 2);
+
+        let mut i = Instance::new(Id::derived(b"laptop"));
+        imported(&mut i, std::slice::from_ref(&dir), 100);
+        assert_eq!(disc_of(&i, &at), Some(2), "the stale disc was never placed");
+
+        write_placed_on(&at, "When I am laid in earth", "Dido and Aeneas", 1);
+        let again = imported(&mut i, std::slice::from_ref(&dir), 200);
+        assert_eq!(again.contradicts, vec![], "the corrected file was refused");
+        assert_eq!(disc_of(&i, &at), Some(1), "the correction did not land");
+    }
+
+    /// **But a copy somewhere else still cannot re-place it** — the `Luna`
+    /// case the log seeding exists for, which had no test of its own.
+    #[test]
+    fn a_copy_elsewhere_still_cannot_re_place_what_the_library_holds() {
+        let root = std::env::temp_dir().join("gmuse-populate-elsewhere");
+        let _ = std::fs::remove_dir_all(&root);
+        let library = root.join("library");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        let held = library.join("01 Triton.wav");
+        write_wav(&held, 4410);
+        write_placed_on(&held, "Triton", "Luna", 1);
+        let copy = staging.join("Triton.wav");
+        std::fs::copy(&held, &copy).unwrap();
+        write_placed_on(&copy, "Triton", "Luna", 2);
+
+        let mut i = Instance::new(Id::derived(b"laptop"));
+        imported(&mut i, std::slice::from_ref(&library), 100);
+        assert_eq!(disc_of(&i, &held), Some(1));
+
+        let report = populate(
+            &mut i,
+            std::slice::from_ref(&staging),
+            200,
+            Admits::Anything,
+            &mut crate::model::ingest::Reads::default(),
+        );
+        assert_eq!(report.contradicts.len(), 1, "{:?}", report.contradicts);
+        assert_eq!(
+            disc_of(&i, &held),
+            Some(1),
+            "the copy re-placed the held file"
+        );
+    }
+
     /// **Cataloguing some files does not unpublish the rest** — #145.
     ///
     /// `HoldingsAsserted` supersedes per device, so a pass over a few paths
@@ -1347,6 +1438,11 @@ mod tests {
     /// A title, an artist, an album and a track number — what a placement
     /// needs, which `write_tags` deliberately does not carry.
     fn write_placed(at: &Path, title: &str, album: &str) {
+        write_placed_on(at, title, album, 1);
+    }
+
+    /// The same, on a named disc — what a stale stacked tag got wrong (#373).
+    fn write_placed_on(at: &Path, title: &str, album: &str, disc: u16) {
         use lofty::config::WriteOptions;
         use lofty::id3::v2::Id3v2Tag;
         use lofty::prelude::{ItemKey, TagExt};
@@ -1368,7 +1464,34 @@ mod tests {
             ItemKey::TrackNumber,
             ItemValue::Text("1".into()),
         ));
+        tag.insert(TagItem::new(
+            ItemKey::DiscNumber,
+            ItemValue::Text(disc.to_string()),
+        ));
         tag.save_to_path(at, WriteOptions::default()).unwrap();
+    }
+
+    /// The disc the library has this file's audio on.
+    fn disc_of(i: &Instance, at: &Path) -> Option<u16> {
+        let audio = crate::model::ingest::read(at).unwrap().audio;
+        let encoding = Id::<Encoding>::of_audio(&audio);
+        already_placed(&i.catalogue())
+            .into_iter()
+            .find(|(e, _)| *e == encoding)
+            .map(|(_, (_, disc, _))| disc)
+    }
+
+    /// Import and publish holdings, the way `shelf import --write` does.
+    fn imported(i: &mut Instance, roots: &[PathBuf], now: i64) -> Report {
+        let report = populate(
+            i,
+            roots,
+            now,
+            Admits::Anything,
+            &mut crate::model::ingest::Reads::default(),
+        );
+        reconcile(i, roots, now, &mut crate::model::ingest::Reads::default());
+        report
     }
 
     fn library(name: &str, files: &[(&str, Option<&str>)]) -> PathBuf {
