@@ -57,6 +57,7 @@ import csv
 import io
 import json
 import re
+import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Final, NamedTuple
@@ -65,7 +66,6 @@ import typer
 from mutagen import MutagenError
 from mutagen.apev2 import APENoHeaderError, APEv2
 from mutagen.id3 import ID3, USLT, ID3NoHeaderError
-from mutagen.mp3 import MP3
 
 from gmuse_tools.genre.common import out_path, walk, write_tsv
 from gmuse_tools.paths import STUMP_LENGTHS
@@ -393,7 +393,7 @@ def strip_extra_id3_bytes(path: Path) -> bool:
 
     **Verified the way `strip_ape_bytes` is**, and for the stronger reason:
     this cuts bytes out of the middle of a file rather than off its end, so a
-    mis-sized tag would take audio with it. The MPEG duration must agree
+    mis-sized tag would take audio with it. The decoded audio must agree
     before and after, and no stacked tag may remain; otherwise the file goes
     back exactly as it was.
     """
@@ -401,10 +401,10 @@ def strip_extra_id3_bytes(path: Path) -> bool:
     if span is None:
         return False
     start, end = span
-    before = mp3_seconds(path)
+    before = decoded_digest(path)
     original = path.read_bytes()
     path.write_bytes(original[:start] + original[end:])
-    if mp3_seconds(path) != before or extra_id3_span(path) is not None:
+    if before is None or decoded_digest(path) != before or extra_id3_span(path) is not None:
         path.write_bytes(original)
         why = f"refused: cutting the stacked ID3v2 tag changed {path.name}"
         raise ValueError(why)
@@ -415,8 +415,8 @@ def strip_ape_bytes(path: Path) -> bool:
     """Cut the APEv2 tag out by position. True if anything was removed.
 
     **Verified against what the removal is for.** The audio must be untouched,
-    so the MPEG stream's duration is read before and after and must agree; if
-    it does not, the file is put back exactly as it was. Truncating a file is
+    so the decoded audio is digested before and after and must agree; if it
+    does not, the file is put back exactly as it was. Truncating a file is
     destructive in a way rewriting a tag is not, and this is the one place in
     this module that does it.
     """
@@ -424,22 +424,43 @@ def strip_ape_bytes(path: Path) -> bool:
     if span is None:
         return False
     start, end = span
-    before = mp3_seconds(path)
+    before = decoded_digest(path)
     original = path.read_bytes()
     path.write_bytes(original[:start] + original[end:])
-    if mp3_seconds(path) != before or ape_span(path) is not None:
+    if before is None or decoded_digest(path) != before or ape_span(path) is not None:
         path.write_bytes(original)
         why = f"refused: cutting the APE tag changed {path.name}"
         raise ValueError(why)
     return True
 
 
-def mp3_seconds(path: Path) -> int | None:
-    """The audio's length in whole seconds, for checking nothing moved."""
+def decoded_digest(path: Path) -> str | None:
+    """An MD5 of the decoded audio, for checking nothing moved. None if it will not decode.
+
+    **Not the length, which is what this used to compare** — in whole seconds,
+    from mutagen. A CBR file with no Xing header has no stated length, so
+    mutagen estimates it from the file's size, tag bytes included. Cutting a
+    322-byte APE tag took *United States Live*'s `4-13 The Visitors` from
+    182.0085 s to 181.995 s, the whole second flipped, and the cut was refused
+    for an audio stream that decoded identically. Two files of the Plex
+    rendering failed on it (2026-11-09).
+
+    A decode is what "the audio is untouched" means, and it is the recipe the
+    library's own checks already use (`ffmpeg -map 0:a -f md5`).
+    """
     try:
-        return int(MP3(path).info.length)
-    except (MutagenError, OSError, ValueError):
+        done = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a", "-f", "md5", "-"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
         return None
+    digest = done.stdout.strip()
+    if done.returncode != 0 or not digest.startswith("MD5="):
+        return None
+    return digest
 
 
 def id3_of(path: Path) -> ID3 | None:

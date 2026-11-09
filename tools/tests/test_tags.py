@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from mutagen.id3 import ID3
+from mutagen.mp3 import MP3
 
 from gmuse_tools.tags import (
     APE_MAGIC,
@@ -148,6 +149,32 @@ def test_a_cut_that_would_change_the_audio_is_refused(tmp_path: Path, monkeypatc
     with pytest.raises(ValueError, match="refused"):
         strip_ape_bytes(at)
     assert at.read_bytes() == was, "a refused cut left the file damaged"
+
+
+def test_a_cut_across_a_whole_second_of_estimated_length_is_not_refused(tmp_path: Path) -> None:
+    """The check is the decoded audio, not mutagen's length.
+
+    A CBR file with no Xing header has its length estimated from its size, tag
+    included. Two Laurie Anderson files went from 182.0085 s to 181.995 s when
+    their APE tag was cut, and a whole-second comparison refused them with the
+    audio decoding identically. Here: 38 frames are 0.99 s, and the tag pushes
+    the estimate past 1.
+    """
+    at = tmp_path / "t.mp3"
+    items = b"x" * 200
+    body = items + footer(size=len(items) + FOOTER_LEN, is_header=False)
+    audio = FRAME * 38
+    at.write_bytes(audio + footer(size=len(items) + FOOTER_LEN, is_header=True) + body)
+
+    # The instrument: the fixture really does sit across the boundary, read
+    # from mutagen directly rather than through anything under test.
+    estimated = MP3(at).info.length
+    assert int(estimated) == 1, f"the tagged file must estimate past 1 s, got {estimated}"
+    (tmp_path / "bare.mp3").write_bytes(audio)
+    assert int(MP3(tmp_path / "bare.mp3").info.length) == 0, "the bare audio must estimate under 1 s"
+
+    assert strip_ape_bytes(at) is True
+    assert at.read_bytes() == audio
 
 
 # --- A second ID3v2 tag stacked behind the first — issue #303 -----------------
