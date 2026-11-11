@@ -28,6 +28,7 @@ from gmuse_tools.plex_push import (
     section_of,
     tracks_of,
     verify,
+    wait_for_scan,
 )
 
 if TYPE_CHECKING:
@@ -51,6 +52,36 @@ def test_the_rendering_library_is_found_by_where_it_reads() -> None:
     assert section_of(lambda *_a, **_k: answer, ROOT) == "10"
     with pytest.raises(PushError):
         section_of(lambda *_a, **_k: answer, "/share/Media/Elsewhere")
+
+
+def scans(*states: tuple[str, str]) -> tuple[Any, list[float]]:
+    """A library, key 10, that answers with each `(refreshing, scannedAt)` in turn; and the sleeps taken."""
+    answers = [
+        xml(
+            '<MediaContainer><Directory key="3" refreshing="1" scannedAt="999"/>'
+            f'<Directory key="10" refreshing="{busy}" scannedAt="{stamp}"/></MediaContainer>'
+        )
+        for busy, stamp in states
+    ]
+    return (lambda *_a, **_k: answers.pop(0)), []
+
+
+def test_a_scan_is_finished_at_a_new_stamp_not_at_an_idle_library() -> None:
+    """Idle with the old stamp is a scan not begun; a new stamp while busy is the next one running."""
+    get, slept = scans(("0", "100"), ("1", "100"), ("1", "200"), ("0", "200"), ("0", "300"))
+    waited = wait_for_scan(get, "10", "100", sleep=slept.append)
+    # Three answers were not it, and the fifth was never asked for.
+    assert len(slept) == 3
+    assert waited == sum(slept)
+    assert get().find("Directory[@key='10']").get("scannedAt") == "300"
+
+
+def test_a_scan_that_never_finishes_is_an_error_not_a_push() -> None:
+    """What follows builds playlists from Plex's items; unscanned, it would drop the new ones."""
+    get, slept = scans(*[("1", "100")] * 4)
+    with pytest.raises(PushError, match="still scanning"):
+        wait_for_scan(get, "10", "100", sleep=slept.append, patience=4.0)
+    assert slept == [plex_push.SCAN_POLL] * 2
 
 
 def page(*tracks: str) -> ET.Element:

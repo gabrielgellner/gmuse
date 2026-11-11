@@ -217,6 +217,10 @@ _Both_, so the `cover.jpg` beside an album is used and Plex fills the 56 that ha
   without the mark is somebody's Plexamp playlist and is left.
 - **`just plex write` ends by asking Plex to rescan.** Its watcher does not see files rsync writes over ssh: after a
   push renamed 75 files, Plex sat idle on the old paths until asked.
+- **And then by `plex push --write`, once that scan is done.** Ratings and playlists are not files, so rendering alone
+  never carried them: a track added to a playlist here was rendered and never listed. `plex refresh --wait` stays until
+  the library's `scannedAt` moves — an idle library is one that has not started as well as one that has finished —
+  because a playlist is made from the items Plex holds. Without `write`, `just plex` ends with the push's dry run.
 
 ### Reading Plex back: Plex is one of your devices
 

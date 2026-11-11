@@ -17,6 +17,7 @@ that this module checks and acts on:
 uv run gmuse-tools plex verify
 uv run gmuse-tools plex push            # dry run
 uv run gmuse-tools plex push --write
+uv run gmuse-tools plex refresh --wait  # ask Plex to scan, and stay until it has
 ```
 
 ## A playlist pushed says where it came from
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import collections
 import json
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
@@ -54,6 +56,11 @@ SUMMARY: Final = GMUSE_SUMMARY
 #: Plex's item types: an artist, an album, a track.
 TYPES: Final = {"8": "artist", "9": "album", "10": "track"}
 
+#: How long `refresh --wait` gives a scan, and how often it asks, in seconds.
+#: A scan that finds nothing new took 4s on 9,164 tracks (measured, 2026-11-11).
+SCAN_PATIENCE: Final = 900.0
+SCAN_POLL: Final = 2.0
+
 
 class PushError(RuntimeError):
     """Plex refused a write."""
@@ -77,6 +84,42 @@ def section_of(get: Callable[..., ET.Element], plex_root: str) -> str:
             return d.get("key", "")
     msg = f"no Plex library reads {plex_root}"
     raise PushError(msg)
+
+
+def scan_state(get: Callable[..., ET.Element], section: str) -> tuple[bool, str]:
+    """Whether a library is scanning now, and the stamp of the last scan it finished."""
+    for d in get("/library/sections", None):
+        if d.get("key") == section:
+            return d.get("refreshing") == "1", d.get("scannedAt", "")
+    msg = f"Plex has no library {section}"
+    raise PushError(msg)
+
+
+def wait_for_scan(
+    get: Callable[..., ET.Element],
+    section: str,
+    before: str,
+    *,
+    sleep: Callable[[float], None],
+    patience: float = SCAN_PATIENCE,
+) -> float:
+    """Stay until the scan asked for after `before` has finished; the seconds waited.
+
+    **Finished is a new stamp, not an idle library**: Plex is idle before it
+    starts as well as after it ends, and `scannedAt` moves when a scan ends
+    even if it found nothing (measured, 2026-11-11). So a playlist pushed
+    after this is built from items Plex has, not the ones it had.
+    """
+    waited = 0.0
+    while True:
+        busy, stamp = scan_state(get, section)
+        if not busy and stamp != before:
+            return waited
+        if waited >= patience:
+            msg = f"Plex was still scanning library {section} after {waited:.0f}s"
+            raise PushError(msg)
+        sleep(SCAN_POLL)
+        waited += SCAN_POLL
 
 
 def tracks_of(get: Callable[..., ET.Element], section: str, plex_root: str) -> list[Track]:
@@ -348,26 +391,35 @@ def run_push(*, write: bool) -> None:
     print(f"wrote {len(ratings)} rating(s); {changed} playlist(s) created or re-synced")
 
 
-def run_refresh() -> None:
+def run_refresh(*, wait: bool) -> None:
     """`plex refresh`: tell Plex to scan the rendering's library now.
 
     **Its own watcher does not see a push** (measured, 2026-10-25): after
     `just plex write` renamed 75 files over ssh, Plex sat idle with the old
     paths until asked. So the push asks.
+
+    **And `--wait` stays until the scan is done**, because `plex push` builds a
+    playlist from the items Plex holds: pushed while Plex is still scanning, a
+    track just rendered is not one of them and the playlist goes up without it.
     """
     token, server = connect()
     section = section_of(server.get, PLEX_ROOT)
+    _, before = scan_state(server.get, section)
     Writer(SERVER, token).refresh(section)
     print(f"  asked Plex to scan library {section}")
+    if wait:
+        print(f"  scanned, after {wait_for_scan(server.get, section, before, sleep=time.sleep):.0f}s")
 
 
 def register(plex_app: typer.Typer) -> None:
     """Attach `plex verify`, `plex push` and `plex refresh` to the `plex` group."""
 
     @plex_app.command("refresh")
-    def refresh_cmd() -> None:
-        """Ask Plex to scan the rendering's library now — what `just plex write` ends with."""
-        run_refresh()
+    def refresh_cmd(
+        *, wait: bool = typer.Option(default=False, help="stay until the scan has finished, so a push sees it")
+    ) -> None:
+        """Ask Plex to scan the rendering's library now — what `just plex write` does before it pushes."""
+        run_refresh(wait=wait)
 
     @plex_app.command("verify")
     def verify_cmd() -> None:

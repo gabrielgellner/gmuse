@@ -592,4 +592,14 @@ plex write="":
     cd tools && uv run gmuse-tools render "$TARGET" --encode mp3-320 ${WRITE[@]+"${WRITE[@]}"}
     # **And tell Plex** (#340): its watcher does not see files rsync writes over
     # ssh, so after a real push the rendering's library is asked to rescan.
-    if [ "{{write}}" = "write" ]; then uv run gmuse-tools plex refresh; fi
+    #
+    # **Then give it the ratings and the playlists**, which are not files and so
+    # are not in the rendering. Only once the scan is done: a playlist is made
+    # from the items Plex holds, and a track it has not scanned is not one.
+    # Without `write` the same question is asked of Plex as it stands.
+    if [ "{{write}}" = "write" ]; then
+        uv run gmuse-tools plex refresh --wait
+        uv run gmuse-tools plex push --write
+    else
+        uv run gmuse-tools plex push
+    fi
