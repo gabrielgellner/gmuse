@@ -1353,10 +1353,6 @@ impl Instance {
 
     #[allow(
         dead_code,
-        reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — compaction is safe to run whenever and is run by nothing"
-    )]
-    #[allow(
-        dead_code,
         reason = "the model is tested ahead of its callers; exercised by tests, no production caller yet — nothing imports derivation relations, and `derived[…]` reads the fold rather than writing it"
     )]
     /// Say one recording was made out of another — a remix, an edit, a dub
