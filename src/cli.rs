@@ -237,6 +237,24 @@ pub enum Command {
             value_parser = truthy,
         )]
         media_keys: bool,
+        /// Come back where it was: the last track loaded, at its position, paused.
+        ///
+        /// On by default, so the play key has something to play on an engine that
+        /// has just started and no view is needed to hand it a track. `--resume=false`,
+        /// `GMUSE_RESUME=0` or the global `--no-resume` start with nothing loaded and
+        /// leave the saved place alone.
+        ///
+        /// **Off with `--null-audio` unless asked for**: an engine nobody can hear is
+        /// a test's or a script's, and it should neither take up where you stopped
+        /// listening nor overwrite it with where it stopped.
+        #[arg(
+            long,
+            env = "GMUSE_RESUME",
+            num_args = 0..=1,
+            default_missing_value = "true",
+            value_parser = truthy,
+        )]
+        resume: Option<bool>,
     },
     /// Answer the media keys for the running engine — macOS only so far.
     ///

@@ -6706,6 +6706,45 @@ Append here as decisions are made. Format: date, decision, rationale.
   because it leaves one fewer state whose effect on the keys is unmeasured. What a key press _does_ beside an empty
   engine is a different question — nothing, today, because the engine starts with no programme.
 
+- **2026-11-12** **The engine comes back where it was, paused; a view is no longer what restores playback.** The media
+  keys made the gap visible the first time they were tried on a fresh engine: the key reached gmuse and there was
+  nothing to play. Two earlier decisions meet there. #219 said an attached view restores nothing about playback, since
+  playback is the engine's. #321 said the engine keeps its modes and not its queue. Both hold — and between them the
+  track that was playing belonged to nobody, so every engine start was a blank one until a view pressed play.
+
+  The engine's wiring now writes `$XDG_STATE_HOME/gmuse/engine.toml` — one recording and a position — and at start asks
+  the control thread to `Ask::Resume` it: the `Start` a play gesture makes, then seek, then pause, the same three
+  commands `restore_session` and the device-recovery path already use. **#321 is not reopened.** The programme around
+  the resumed track is a fresh one in the remembered modes.
+
+  **Where it is written, and by whom.** Not the librarian's `programme-<device>.json`, which was the first plan: that
+  file is rewritten by the librarian thread on every edit from what the programme knows, and the programme does not know
+  a position — only the engine does. Not the control thread either; §4.4 keeps file I/O off it. So `run_engine`'s main
+  thread, which was already waking five times a second to check a flag, asks the control thread what is sounding every
+  five seconds and once more on the way out, and writes when the answer has changed. The last write is exact; the others
+  bound what a crash or a flat battery loses. In the state directory beside the view's `session.toml`, because the data
+  directory may be synced and where one machine stopped is not another's business.
+
+  **Three small rules that came with it.** A track that had stopped is remembered at its top (D-9), since a playhead
+  left at the end resumes onto nothing. An engine with nothing loaded writes nothing, so a track that could not be found
+  today — a drive not mounted — is still the answer tomorrow. And a play is not counted twice: the count is earned by
+  position, so a track resumed past the mark is marked counted rather than earning it on the first tick.
+
+  **A `--null-audio` engine neither resumes nor remembers unless told to** (`--resume`). Every test engine is one, and
+  without that rule the suite would load the last thing its author listened to and then overwrite it.
+
+  One end-to-end test, four engines in a row on one library, each the control for the next: told nothing and writes
+  nothing; told to resume and left paused part-way; told not to and comes up empty; told to again and comes back on the
+  track, paused, within 50 ms of the place. Five sabotages each fail it a different way — no seek, no pause, a null
+  engine resuming unasked, `--resume=false` loading anyway, no write on the way out. **Not covered:** the five-second
+  write, the play-count rule, and a client's gesture cancelling a resume that has not landed.
+
+  The fixture was wrong twice before the code was, and the second is worth keeping. It paused and then _sought_ to a
+  known place, and the playhead turned up 0.3 s into the **other** tone: the decoder reads ahead, a one-second track is
+  short enough that it is already inside the next file, and a seek goes where the decoder is. On a real track that is
+  the last fraction of a second before a gapless join, where a seek back would land in the next track instead. Not fixed
+  here and not yet reproduced outside the fixture.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

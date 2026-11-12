@@ -6069,3 +6069,183 @@ fn a_play_from_a_playlist_programmes_the_playlist() {
         "the programme is not the playlist in its order: {page}"
     );
 }
+
+/// Stop the engine the way a person would, and start another on the same library.
+///
+/// **Asked to stop, not killed**, because what is under test is what an engine does on
+/// its way out. The state directory is the scratch one for every engine started here,
+/// so nothing this file does can read or write where the person running the suite
+/// stopped listening.
+fn restart(engine: &mut Engine, extra: &[&str]) {
+    let _ = ctl(&engine.socket, &["engine.shutdown"]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while engine.child.try_wait().ok().flatten().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the engine was asked to stop and did not"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    engine.child = Command::new(binary())
+        .args(["engine", "--foreground", "--null-audio"])
+        .args(extra)
+        .env("GMUSE_SOCKET", &engine.socket)
+        .env("GMUSE_DATA_DIR", engine.dir.join("xdg").join("gmuse"))
+        .env("GMUSE_ROOTS", &engine.dir)
+        .env("XDG_STATE_HOME", engine.dir.join("state"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn gmuse engine");
+    for _ in 0..400 {
+        if std::os::unix::net::UnixStream::connect(&engine.socket).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("the restarted engine never listened");
+}
+
+/// What `playback.get` says, once `until` is true of it — or the last answer, when it
+/// never was.
+fn playback_once(client: &Client, until: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..200 {
+        last = client.call("playback.get", None).expect("playback.get");
+        if until(&last) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    last
+}
+
+/// Seconds into the track, from a `playback.get` reply.
+fn seconds_in(playback: &serde_json::Value) -> f64 {
+    let frames = playback["pos_frames"].as_u64().expect("a position") as f64;
+    frames / playback["sample_rate"].as_u64().expect("a rate") as f64
+}
+
+/// **An engine that is restarted comes back on the track it was on, where it was, paused.**
+///
+/// The engine exists so there can be music with no view open, and until this it
+/// remembered nothing a view had not told it: restarted, it came up with nothing loaded,
+/// and a media key pressed then had nothing to act on. The view's own session file is no
+/// help — an attached view restores nothing about playback (#219), which is right, and
+/// which left nobody restoring it.
+///
+/// Three engines in a row, because each is the control for the next. The first is told
+/// nothing and must write nothing. The second is told to resume and is left paused at a
+/// known place. The third is told *not* to resume and must come up empty — which is what
+/// shows the fourth found its place in the file rather than in something that survived
+/// the restart by another route.
+#[test]
+fn a_restarted_engine_comes_back_where_it_was_and_paused() {
+    let (mut engine, recording) = start_with_a_track("resumes");
+    let left = engine.dir.join("state").join("gmuse").join("engine.toml");
+    let named = |playback: &serde_json::Value| playback["recording"] == recording.as_str();
+    let load = |client: &Client| {
+        client
+            .call(
+                "player.load",
+                Some(serde_json::json!({ "recording": recording })),
+            )
+            .expect("the load is accepted");
+    };
+
+    // **A null engine told nothing remembers nothing.** Every other test in this file
+    // starts one, against whatever state directory the machine has.
+    restart(&mut engine, &[]);
+    {
+        let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+        load(&client);
+        let playing = playback_once(&client, named);
+        assert!(
+            named(&playing),
+            "it did play something to remember: {playing}"
+        );
+    }
+    restart(&mut engine, &["--resume"]);
+    assert!(
+        !left.exists(),
+        "an engine that was not asked to resume wrote where it was"
+    );
+
+    // **Left paused, some way in.** Three things about the fixture shape this, and the
+    // first two versions of it failed most runs for reasons that were all its own.
+    //
+    // The tone is a second long, the null renderer runs at wall speed and the programme
+    // has a second track behind it, so a pause can land on the *other* recording or on
+    // nothing; either is loaded again rather than asserted on. And there is **no seek**:
+    // the decoder reads ahead, on a track this short it is already inside the next file,
+    // and a seek goes where the decoder is — so seeking put the playhead 0.3 s into the
+    // other tone. Where it is paused is where the pause happened to land, which is as
+    // good a place as a chosen one so long as it is not the top of the track.
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+    let underway = |p: &serde_json::Value| named(p) && seconds_in(p) >= 0.15;
+    let caught = |p: &serde_json::Value| underway(p) && p["state"] == "paused";
+    let mut was = serde_json::Value::Null;
+    for _ in 0..8 {
+        load(&client);
+        playback_once(&client, underway);
+        client
+            .call(
+                "player.transport",
+                Some(serde_json::json!({ "verb": "pause" })),
+            )
+            .expect("pause");
+        was = playback_once(&client, |p| p["state"] != "playing");
+        if caught(&was) {
+            break;
+        }
+    }
+    // **The instrument**: a place that is not the top, so "came back at 0" cannot pass
+    // for "came back where it was".
+    assert!(
+        caught(&was),
+        "the fixture never caught the track part-way through: {was}"
+    );
+    let near = |p: &serde_json::Value| named(p) && (seconds_in(p) - seconds_in(&was)).abs() < 0.05;
+    drop(client);
+
+    // **Told not to resume: nothing is loaded**, and the place is left alone.
+    restart(&mut engine, &["--resume=false"]);
+    let written = std::fs::read_to_string(&left).expect("the engine wrote where it was");
+    assert!(written.contains(&recording), "{written}");
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+    // Two seconds, not `playback_once`'s ten: a resume lands within a tick or two of the
+    // librarian answering, and this is waiting for something that must not happen.
+    let mut empty = serde_json::Value::Null;
+    for _ in 0..40 {
+        empty = client.call("playback.get", None).expect("playback.get");
+        if named(&empty) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        empty["recording"].is_null(),
+        "an engine told not to resume loaded something: {empty}"
+    );
+    drop(client);
+
+    restart(&mut engine, &["--resume"]);
+    assert_eq!(
+        std::fs::read_to_string(&left).ok().as_deref(),
+        Some(written.as_str()),
+        "an engine told not to resume rewrote the place it was told to leave"
+    );
+    let client = Client::connect(&engine.socket, "test", "0").expect("connect");
+    let back = playback_once(&client, |p| named(p) && p["state"] == "paused");
+    assert!(named(&back), "it did not come back on the track: {back}");
+    assert_eq!(
+        back["state"], "paused",
+        "nothing starts audio nobody asked for"
+    );
+    let landed = playback_once(&client, near);
+    assert!(
+        near(&landed),
+        "it came back on the track and not at the place: {landed}"
+    );
+}

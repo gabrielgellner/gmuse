@@ -397,6 +397,11 @@ starts beside itself on macOS (`crates/gmuse-mediakeys`): it tells the system wh
 request `ctl` would send. `gmuse engine --media-keys=false` or `GMUSE_MEDIA_KEYS=0` leaves the keys alone, and
 `--null-audio` never starts it. Anything OS-shaped for transport goes there, not into `gmuse-engine`.
 
+**The engine comes back where it was.** It writes `$XDG_STATE_HOME/gmuse/engine.toml` — one recording and a position —
+and a restarted engine loads that track there and leaves it paused, so there is something for a media key to play with
+no view open. The queue is still not kept (#321). `gmuse engine --resume=false`, `GMUSE_RESUME=0` or `--no-resume` start
+empty, and a `--null-audio` engine neither resumes nor remembers unless given `--resume`.
+
 **Use clap with the derive API for anything CLI-shaped.** Parsing belongs at the boundary (§12): flags become typed
 values in `cli.rs` and travel down as `PlayerConfig`, so nothing below reads the environment or handles a raw string.
 The same rule applies to the `:` line — a line becomes a typed `Command` before anything acts on it.
