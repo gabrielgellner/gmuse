@@ -6660,6 +6660,36 @@ Append here as decisions are made. Format: date, decision, rationale.
   test: the exemption removed, the path comparison dropped, and the log seed removed. The last is the `Luna` case, which
   had no test until now.
 
+- **2026-11-12** **The media keys are a client process, and two dependencies come with it.** §1 has wanted media keys
+  since the first draft and `gmuse-engine-architecture.md` §13 already said how: an adapter that subscribes to
+  `playback` and sends `player.*`. It is `crates/gmuse-mediakeys`, run as `gmuse media-keys`, and the engine starts it
+  once its socket is bound. macOS only so far.
+
+  **A process rather than a thread**, because macOS delivers a key on the main thread's run loop and only to a process
+  that has published what it is playing. The engine's main thread waits on a flag and its audio path is real-time;
+  neither is a place for a run loop or an Objective-C runtime. As a client it can die without a dropout, and
+  `--null-audio` never starts it, so a test engine does not claim the system's now-playing.
+
+  **`souvlaki` 0.9.3**, macOS target only, default features off: the `MPRemoteCommandCenter` and
+  `MPNowPlayingInfoCenter` calls, with their `unsafe` on its side of the boundary. Its cost is recorded rather than
+  hidden — it is built on the old `objc` and `block` crates, and cargo reports `block 0.1.6` as code a future compiler
+  will reject. If that day comes the replacement is the same two classes through `objc2`, which is already in the tree.
+
+  **`objc2-core-foundation` 0.3.2** as a direct dependency of that crate, for `CFRunLoop::run`. It was already in the
+  lock file under cpal, and the function is safe, so the adapter waits for keys with **no `unsafe` of its own** and the
+  two exceptions in §12 stay two.
+
+  `next` and `prev` go through `cmd.exec_line`, because moving through the programme has no typed method until
+  `playback-programme.md` is built; `toggle` is sent as `toggle` and never resolved by the adapter, which is D-8. The
+  adapter re-asks `playback.get` on each `playback` event instead of reading the event, since only that reply carries
+  the names, and asks `query.recording` for the length because the format language renders a duration for a person.
+  Measured running against a playing engine: 16 MB resident, 0.0% CPU. Each of the crate's assertions was seen to fail
+  under a one-line sabotage — toggle resolved to play, a misspelt param, a dropped empty name, frames read as seconds,
+  `prev` sending `next`. A sixth came from running it rather than from thinking: an engine with no stream answers
+  `playback.get` with explicit nulls, the first test of the idle case had guessed the fields would be absent, and the
+  adapter logged `invalid type: null` twice on its first start beside a fresh engine. The test now holds the reply as it
+  was sent.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.

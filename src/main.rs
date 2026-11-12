@@ -139,14 +139,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_events(topics, *count);
     }
 
+    if let Some(gmuse::cli::Command::MediaKeys) = &args.command {
+        // **On this thread, which is the main one**: it is where macOS delivers a key.
+        let path = gmuse::engine::socket::default_path();
+        return gmuse_mediakeys::run(&path, env!("CARGO_PKG_VERSION")).map_err(|e| match e {
+            gmuse_mediakeys::Error::Client(e) => {
+                die(format!("{e}\n\nStart one with: gmuse engine --foreground"))
+            }
+            other => die(other),
+        });
+    }
+
     if let Some(gmuse::cli::Command::Engine {
         foreground,
         null_audio,
+        media_keys,
     }) = &args.command
     {
         // The same flags a local player takes: `gmuse --device ua-101 engine` now means
         // something (#241).
-        return run_engine(*foreground, *null_audio, args.player_config());
+        return run_engine(*foreground, *null_audio, *media_keys, args.player_config());
     }
 
     if let Some(gmuse::cli::Command::Shelf(op)) = &args.command {
@@ -3087,6 +3099,8 @@ fn surviving_holders<'a>(
 fn run_engine(
     foreground: bool,
     null_audio: bool,
+    // Whether to start the process that answers the keyboard's media keys.
+    media_keys: bool,
     // **What device to open, and to reopen** — #241. The engine hardcoded
     // `PlayerConfig::default`-shaped values, so `--device` could not reach it at all
     // and "honour the intent that opened the first stream" had no intent to honour.
@@ -4699,6 +4713,11 @@ fn run_engine(
     mark("listening");
     eprintln!("gmuse engine: listening on {}", engine.path().display());
 
+    // **After the socket is bound, so the adapter connects once and does not poll.**
+    if media_keys && !null_audio && cfg!(target_os = "macos") {
+        spawn_media_keys();
+    }
+
     // **Say what is held, when asked for at build time** — #255.
     //
     // Every few seconds rather than once, because the interesting number is whether it
@@ -4736,6 +4755,38 @@ fn run_engine(
 }
 
 /// Connect to a running engine, or say plainly that there is none.
+/// Start `gmuse media-keys` beside the engine — `gmuse-engine-architecture.md` §13.
+///
+/// **A child process and not a thread**, because what it needs is this process's
+/// main thread running a run loop, and that thread is the engine's. It is a client
+/// of the socket like any other, so nothing here has to stop it: it exits when the
+/// connection closes.
+///
+/// **Failing to start is a line on stderr and not a refusal to play.** The keys
+/// are a convenience on top of an engine that works without them.
+fn spawn_media_keys() {
+    let spawned = std::env::current_exe().and_then(|exe| {
+        std::process::Command::new(exe)
+            .arg("media-keys")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            // stderr is inherited: what the adapter says belongs in the engine's log.
+            .spawn()
+    });
+    match spawned {
+        // Waited on so that an adapter that dies first is reaped, not left a zombie
+        // for as long as the engine runs.
+        Ok(mut child) => {
+            let _ = std::thread::Builder::new()
+                .name("gmuse-mediakeys-reaper".into())
+                .spawn(move || {
+                    let _ = child.wait();
+                });
+        }
+        Err(e) => eprintln!("gmuse engine: media keys not started: {e}"),
+    }
+}
+
 fn connect() -> Result<gmuse_client::Client, String> {
     let path = gmuse::engine::socket::default_path();
     gmuse_client::Client::connect(&path, "gmuse-cli", env!("CARGO_PKG_VERSION")).map_err(|e| {

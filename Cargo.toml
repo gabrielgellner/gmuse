@@ -12,6 +12,7 @@ members = [
   "crates/gmuse-proto",
   "crates/gmuse-client",
   "crates/gmuse-engine",
+  "crates/gmuse-mediakeys",
 ]
 
 [package]
@@ -37,6 +38,7 @@ gmuse-programme = { path = "crates/gmuse-programme" }
 gmuse-proto = { path = "crates/gmuse-proto" }
 gmuse-client = { path = "crates/gmuse-client" }
 gmuse-engine = { path = "crates/gmuse-engine" }
+gmuse-mediakeys = { path = "crates/gmuse-mediakeys" }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 cpal = "0.18.2"
 crossbeam-channel = "0.5.16"

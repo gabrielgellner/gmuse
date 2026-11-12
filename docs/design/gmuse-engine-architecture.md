@@ -1379,6 +1379,10 @@ A control-plane `param.set` counts as a touch for precedence purposes.
     friends being **reported, never decided**: those exist to brief a person, and an agent acting on one unasked is the
     exact failure they were designed against.
 - **macOS Now Playing and media keys:** an adapter process that subscribes to `playback` and sends `player.*` commands.
+  **Built** as `gmuse-mediakeys` and `gmuse media-keys`, which the engine starts beside itself once its socket is bound.
+  It asks `playback.get` on every `playback` event rather than reading the event, because that reply is the one with the
+  names in it, and it sends `next` and `prev` through `cmd.exec_line` until the programme has a typed method for them.
+  MPRIS on Linux would be a second platform file in the same crate.
 
 ---
 

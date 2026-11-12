@@ -1,0 +1,36 @@
+[package]
+name = "gmuse-mediakeys"
+version = "0.2.1"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "The keyboard's play, next and previous keys, as one more client of the engine"
+repository = "https://github.com/gabrielgellner/gmuse"
+
+# **A client, and a crate so that it stays one** — `gmuse-engine-architecture.md`
+# §13: "an adapter process that subscribes to `playback` and sends `player.*`
+# commands."
+#
+# The operating system's half of this needs a run loop on the main thread and an
+# Objective-C runtime. Neither belongs in the engine, and the way to be sure
+# neither gets there is a manifest the engine does not name: this depends on the
+# protocol and the client, and nothing depends on it but the binary.
+[dependencies]
+gmuse-proto = { path = "../gmuse-proto" }
+gmuse-client = { path = "../gmuse-client" }
+crossbeam-channel = "0.5.16"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+
+# **macOS only, and both recorded in §13's Decision Log.** `souvlaki` is the
+# `MPRemoteCommandCenter` and `MPNowPlayingInfoCenter` calls, with the `unsafe`
+# they need kept on its side of the boundary. `objc2-core-foundation` is already
+# in the tree under cpal; it is named here for `CFRunLoop::run`, which is a safe
+# function, so the main thread can wait for keys without this crate writing an
+# `unsafe` block of its own.
+[target.'cfg(target_os = "macos")'.dependencies]
+souvlaki = { version = "0.9.3", default-features = false }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CFRunLoop",
+] }
