@@ -221,7 +221,30 @@ pub enum Command {
         /// with no sound card.
         #[arg(long)]
         null_audio: bool,
+        /// Answer the keyboard's play, next and previous keys — macOS only so far.
+        ///
+        /// On by default, and done by a second process the engine starts beside
+        /// itself (`gmuse media-keys`), so none of it is in the audio path.
+        /// `--media-keys=false` or `GMUSE_MEDIA_KEYS=0` leaves the keys to
+        /// whatever else wants them. Never started with `--null-audio`: an engine
+        /// nobody can hear has no business claiming the system's now-playing.
+        #[arg(
+            long,
+            env = "GMUSE_MEDIA_KEYS",
+            num_args = 0..=1,
+            default_missing_value = "true",
+            default_value_t = true,
+            value_parser = truthy,
+        )]
+        media_keys: bool,
     },
+    /// Answer the media keys for the running engine — macOS only so far.
+    ///
+    /// **The engine starts this itself**; it is a command so that it can, and so
+    /// it can be run by hand to see what it says. It is a client like `ctl`: it
+    /// subscribes to `playback`, tells the system what is playing, and sends the
+    /// engine a request when a key is pressed. It exits when the engine does.
+    MediaKeys,
     /// Send one command to the running engine and print the reply — §4.2.
     ///
     /// **This is what `--remote` became.** The same job with a protocol behind

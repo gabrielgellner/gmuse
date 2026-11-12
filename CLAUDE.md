@@ -383,14 +383,19 @@ Options are parsed with clap (derive), and each also reads an env var as a fallb
 | `--no-lock`      | —                | Start even if another gmuse holds the lock                     |
 
 **This table is the env-var-backed options, not the CLI.** The subcommands are `shelf` (18 library operations),
-`engine`, `ctl` and `events`, and `gmuse --help` is the authority on all of them — #247 is where the docs stop lagging
-it.
+`engine`, `ctl`, `events` and `media-keys`, and `gmuse --help` is the authority on all of them — #247 is where the docs
+stop lagging it.
 
 **`--remote` is gone** (#243). `gmuse ctl <method-or-line>` replaced it, and the two overlapped for longer than intended
 because `ctl` existing was mistaken for `ctl` being able to do `--remote`'s job: a status bar polls, and no method
 reported playback state until `playback.get`. `gmuse ctl engine.shutdown` stops a running engine;
 `gmuse ctl playback.get '{"format":"{title}"}'` is what a status bar asks. Params are a JSON word after the method,
 because everything after the command is taken as part of the command.
+
+**The keyboard's media keys are a client, not part of the engine.** `gmuse media-keys` is a second process the engine
+starts beside itself on macOS (`crates/gmuse-mediakeys`): it tells the system what is playing and turns a key into the
+request `ctl` would send. `gmuse engine --media-keys=false` or `GMUSE_MEDIA_KEYS=0` leaves the keys alone, and
+`--null-audio` never starts it. Anything OS-shaped for transport goes there, not into `gmuse-engine`.
 
 **Use clap with the derive API for anything CLI-shaped.** Parsing belongs at the boundary (§12): flags become typed
 values in `cli.rs` and travel down as `PlayerConfig`, so nothing below reads the environment or handles a raw string.

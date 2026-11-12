@@ -387,6 +387,9 @@ fn every_crate_depends_only_on_what_it_is_meant_to() {
         // §4.3: it must not depend on engine internals, which is why the ids are separate.
         ("gmuse-proto", &["gmuse-ids"]),
         ("gmuse-client", &["gmuse-proto", "gmuse-ids"]),
+        // **A client, and the manifest is what keeps it one** — the operating system's
+        // media keys. It reaches the engine through the socket or not at all.
+        ("gmuse-mediakeys", &["gmuse-proto", "gmuse-client"]),
         // The librarian. Notably **not** `gmuse-proto`: the wire describes the library, and
         // an edge the other way would let a fact be shaped by a message.
         (
@@ -880,4 +883,31 @@ fn a_read_never_waits_for_the_appender() {
         "only {loads} of the read handlers load the fold at all, so the absences above are \
          about functions that no longer read one"
     );
+}
+
+/// **The lines the media keys send are commands the `:` line knows** — `gmuse-mediakeys`.
+///
+/// `next` and `prev` have no typed method, so the adapter sends them as text and the
+/// engine parses it. The adapter's own test can only show that the text arrives as an
+/// `ExecLine`; whether the line *means* anything is decided by a parser that crate cannot
+/// name. Here both are in reach, so a verb renamed in `cmd/parse.rs` fails a test rather
+/// than making a key do nothing.
+#[test]
+fn the_lines_a_media_key_sends_are_commands() {
+    use gmuse::cmd::Command;
+    use gmuse_mediakeys::Key;
+
+    let meant = [(Key::Next, Command::Next), (Key::Previous, Command::Prev)];
+    for (key, command) in meant {
+        let (method, params) = key.request();
+        assert_eq!(method, gmuse_proto::request::method::EXEC_LINE, "{key:?}");
+        let line = params["line"]
+            .as_str()
+            .expect("an exec_line carries a line");
+        assert_eq!(
+            gmuse::cmd::parse::command(line).ok(),
+            Some(command),
+            "{key:?}"
+        );
+    }
 }
