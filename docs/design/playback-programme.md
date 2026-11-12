@@ -296,6 +296,21 @@ own programme, and an attached view offered it to an engine that came up empty. 
 engine restart by the side door, so it went with the rest. A session written before still has the field, which is
 skipped on read.
 
+**The engine remembers what was sounding and where, and comes back there paused.** Dropping the entries (#321) and
+having an attached view restore nothing about playback (#219) were each right, and together they left nobody restoring
+it: an engine that was restarted came up with nothing loaded and waited for a view to hand it a track. That is backwards
+for the one case the engine exists for, music with no view open — a media key pressed then had nothing to act on.
+
+So the engine's wiring writes `engine.toml` beside the view's `session.toml`, holding one recording and a position,
+every few seconds and once more on the way out. At start it asks the control thread to `Resume`: the same `Start` a play
+gesture makes, followed by a seek and a pause when the cue lands. **The programme is still not kept** — what follows the
+resumed track is a fresh one in the remembered modes, exactly as if somebody had pressed play on it. The state directory
+and not the data directory, because where one machine stopped listening is not something to sync to another.
+
+`gmuse engine --resume=false`, `GMUSE_RESUME=0` or the global `--no-resume` start empty and leave the file alone, and a
+`--null-audio` engine does neither unless told to: it is a test's or a script's, and must not take up where a person
+stopped or overwrite it.
+
 **The check is a cargo one, not a convention:** `crates/gmuse-engine/Cargo.toml` has no `gmuse-library` line. The same
 idiom that turned `layers.md`'s direction rule from a source-scraping ratchet into a compile error. An audio engine that
 cannot name a `Recording` cannot quietly acquire an opinion about what follows one.

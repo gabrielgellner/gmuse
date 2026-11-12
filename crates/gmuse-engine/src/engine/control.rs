@@ -64,6 +64,23 @@ pub enum Ask {
         /// programme is these rows and `within` is not consulted.
         order: Option<Vec<gmuse_ids::copy::CopyId>>,
     },
+    /// **Come back where it was: loaded, positioned, and left paused.**
+    ///
+    /// What an engine is asked once, at start, by whoever remembered for it — this
+    /// crate keeps no file and must not. It differs from [`Load`] in the two things
+    /// that follow the load: the seek, and the pause. Nothing starts audio nobody
+    /// asked for, which is the rule the device-recovery path below already follows
+    /// with the same three commands.
+    ///
+    /// **It opens a programme around the track, as a play gesture does** — #321: the
+    /// queue that was is not kept, and what follows is a fresh one in the modes the
+    /// librarian remembered.
+    ///
+    /// [`Load`]: Ask::Load
+    Resume {
+        recording: Id<Recording>,
+        at: Duration,
+    },
     /// **What is playing, as one answer** — #243, #248.
     ///
     /// Asked rather than derived from the event stream, because the events are
@@ -222,6 +239,7 @@ impl Control {
                         playing: None,
                         pending: None,
                         next_cue: None,
+                        resuming: None,
                         sounding: None,
                         announced: 0,
                         folded: desk.moved(),
@@ -382,6 +400,14 @@ struct Held {
     /// the engine could tell when it moved. A counter says the same thing and names nothing
     /// (#257).
     folded: u64,
+    /// **Where to seek once the track being resumed has loaded**, and the mark that it
+    /// should then be paused — [`Ask::Resume`].
+    ///
+    /// Held because the load is not immediate: the librarian is asked for the cue and
+    /// answers on a later tick (#259). Cleared by anything a client asks for in the
+    /// meantime, so that a resume whose track is no longer held — and so never loads —
+    /// cannot seek and pause whatever somebody plays next.
+    resuming: Option<Duration>,
     /// **The engine's own count of streams**, monotonic across rebuilds.
     ///
     /// Not the handle's: a rebuilt `PlayerHandle` has a fresh `Shared` whose generation
@@ -437,7 +463,11 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
         // generation change are both discontinuities nobody sent it a command
         // about.
         let mut moved = match asks.recv_timeout(Duration::from_millis(50)) {
-            Ok(Ask::Do(instruction)) => apply(player, instruction, desk, roots, held),
+            Ok(Ask::Do(instruction)) => {
+                // Somebody is driving, so a resume still waiting for its track is over.
+                held.resuming = None;
+                apply(player, instruction, desk, roots, held)
+            }
             // **Queued rather than waited for** — #259. The librarian may be reconciling
             // 7,267 files, and a play gesture that timed out answered `accepted: true` while
             // doing nothing. It is loaded on the tick its answer arrives, so the `playback`
@@ -448,7 +478,14 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
                 within,
                 order,
             }) => {
+                held.resuming = None;
                 held.queue.start(recording, within, order);
+                false
+            }
+            // The same ask a play gesture makes, with what to do when it lands.
+            Ok(Ask::Resume { recording, at }) => {
+                held.queue.start(recording, None, None);
+                held.resuming = Some(at);
                 false
             }
             // **Answered from the same three sources the event is built from**, and
@@ -516,6 +553,21 @@ fn run(player: &PlayerHandle, held: &mut Held, w: Wiring<'_>) -> Ran {
         // short. A gesture whose answer is here gets loaded now.
         if let Some(cue) = held.queue.tick(desk) {
             moved |= load_picked(player, held, Some(cue));
+            // **Load, seek, then pause** — the three commands `restore_session` and the
+            // device recovery above use, queued in that order so the decoder opens the
+            // file, moves, and stops there without a sample reaching the output.
+            if let Some(at) = held.resuming.take() {
+                if at > Duration::ZERO {
+                    player.seek(crate::audio::SeekTo::Absolute(at));
+                }
+                player.pause();
+                // **A play counted last time is not counted again.** The count is
+                // earned by position, and a track resumed past the mark would earn it
+                // on the first tick without a second of it being heard.
+                if let Some((cue, counted)) = held.sounding.as_mut() {
+                    *counted = gmuse_programme::counts_as_played(at, cue.length);
+                }
+            }
         }
 
         // What the player has to say for itself. Draining rather than taking
@@ -1069,6 +1121,7 @@ mod tests {
             playing: None,
             pending: None,
             next_cue: None,
+            resuming: None,
             sounding: None,
             announced: 0,
             folded: 0,
@@ -1114,6 +1167,7 @@ mod tests {
             playing: None,
             pending: None,
             next_cue: None,
+            resuming: None,
             sounding: None,
             announced: 0,
             folded: 0,

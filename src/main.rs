@@ -154,11 +154,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         foreground,
         null_audio,
         media_keys,
+        resume,
     }) = &args.command
     {
+        // **One answer from three spellings, resolved here** so nothing below reads a
+        // flag: the global `--no-resume` wins, then what was said to `engine`, and an
+        // engine that was told nothing resumes unless it is a null one.
+        let resume = !args.no_resume && resume.unwrap_or(!*null_audio);
         // The same flags a local player takes: `gmuse --device ua-101 engine` now means
         // something (#241).
-        return run_engine(*foreground, *null_audio, *media_keys, args.player_config());
+        return run_engine(
+            *foreground,
+            *null_audio,
+            *media_keys,
+            resume,
+            args.player_config(),
+        );
     }
 
     if let Some(gmuse::cli::Command::Shelf(op)) = &args.command {
@@ -3101,6 +3112,8 @@ fn run_engine(
     null_audio: bool,
     // Whether to start the process that answers the keyboard's media keys.
     media_keys: bool,
+    // Whether to come back where it was, and keep saying where it is.
+    resume: bool,
     // **What device to open, and to reopen** — #241. The engine hardcoded
     // `PlayerConfig::default`-shaped values, so `--device` could not reach it at all
     // and "honour the intent that opened the first stream" had no intent to honour.
@@ -4713,6 +4726,17 @@ fn run_engine(
     mark("listening");
     eprintln!("gmuse engine: listening on {}", engine.path().display());
 
+    // **Where it was, before anything is told the engine is up.** Asked rather than
+    // done: the control thread queues it for the librarian like a play gesture, so the
+    // socket is not held shut while a track is found.
+    let left_at = resume.then(gmuse::session::left_path);
+    if let Some(left) = left_at.as_deref().and_then(gmuse::session::load_left) {
+        control.ask(gmuse::engine::control::Ask::Resume {
+            recording: left.recording,
+            at: left.position(),
+        });
+    }
+
     // **After the socket is bound, so the adapter connects once and does not poll.**
     if media_keys && !null_audio && cfg!(target_os = "macos") {
         spawn_media_keys();
@@ -4742,8 +4766,26 @@ fn run_engine(
     // owns the work. Polling rather than a condvar because the only waker is a
     // flag set from a connection thread and a second of latency on shutdown
     // costs nothing.
+    //
+    // **It also says where the engine is, every few seconds and once more on the way
+    // out.** The last one is exact; the others are for the exit nobody asked for — a
+    // crash, a flat battery — which loses at most `REMEMBER_EVERY` of position instead
+    // of the place. Here rather than on the control thread because §4.4 keeps file I/O
+    // off that one, and this thread was already waking up to do nothing.
+    const REMEMBER_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+    let mut remembered = None;
+    let mut asked = std::time::Instant::now();
     while !stopping.load(std::sync::atomic::Ordering::Acquire) {
         std::thread::sleep(std::time::Duration::from_millis(200));
+        if asked.elapsed() >= REMEMBER_EVERY {
+            asked = std::time::Instant::now();
+            if let Some(path) = left_at.as_deref() {
+                remember_where(&control, path, &mut remembered);
+            }
+        }
+    }
+    if let Some(path) = left_at.as_deref() {
+        remember_where(&control, path, &mut remembered);
     }
     eprintln!("gmuse engine: stopping");
     // Let the `stopping` notice reach the views that asked for it before the
@@ -4755,6 +4797,56 @@ fn run_engine(
 }
 
 /// Connect to a running engine, or say plainly that there is none.
+/// Write down what the engine is playing and where, if that has changed.
+///
+/// **Asked of the control thread, the way `playback.get` asks** — the same snapshot a
+/// client gets, so what is saved is what a view would have been shown.
+///
+/// **Nothing loaded writes nothing.** An engine that has only just started, or whose
+/// track could not be found today because a drive is not mounted, has no place of its
+/// own yet — and the one already written is still the best answer for next time.
+fn remember_where(
+    control: &gmuse::engine::control::Control,
+    path: &std::path::Path,
+    remembered: &mut Option<gmuse::session::Left>,
+) {
+    let (reply, sounded) = crossbeam_channel::bounded(1);
+    if !control.ask(gmuse::engine::control::Ask::Playing { reply }) {
+        return;
+    }
+    // Bounded: the control thread ticks every 50 ms, and one that has stopped ticking
+    // must not hold a shutdown open.
+    let Ok(sounded) = sounded.recv_timeout(std::time::Duration::from_secs(1)) else {
+        return;
+    };
+    let Some(recording) = sounded
+        .recording
+        .as_deref()
+        .and_then(|r| r.parse::<uuid::Uuid>().ok())
+        .map(gmuse::model::id::Id::from_uuid)
+    else {
+        return;
+    };
+    let position = match (sounded.state, sounded.pos_frames, sounded.sample_rate) {
+        // **Stopped is the top of the track** — D-9. A track that played out leaves its
+        // playhead at the end, and coming back paused on the last sample is nowhere.
+        (gmuse::audio::State::Stopped, _, _) | (_, None, _) | (_, _, 0) => {
+            std::time::Duration::ZERO
+        }
+        (_, Some(frames), rate) => {
+            std::time::Duration::from_secs_f64(frames as f64 / f64::from(rate))
+        }
+    };
+    let left = gmuse::session::Left::new(recording, position);
+    if remembered.as_ref() == Some(&left) {
+        return;
+    }
+    match gmuse::session::save_left(path, &left) {
+        Ok(()) => *remembered = Some(left),
+        Err(e) => eprintln!("gmuse engine: where it was is not saved: {e}"),
+    }
+}
+
 /// Start `gmuse media-keys` beside the engine — `gmuse-engine-architecture.md` §13.
 ///
 /// **A child process and not a thread**, because what it needs is this process's

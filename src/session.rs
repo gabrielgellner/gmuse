@@ -130,6 +130,12 @@ pub fn save(path: &Path, session: &Session) -> Result<(), SessionError> {
     session.version = VERSION;
     let text = toml::to_string_pretty(&session)?;
 
+    write_whole(path, &text)
+}
+
+/// Temp file then rename, so a reader sees the old file or the new one and never half of
+/// either. Shared by the view's session and the engine's.
+fn write_whole(path: &Path, text: &str) -> Result<(), SessionError> {
     let write = |path: &Path| -> Result<(), std::io::Error> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -144,9 +150,108 @@ pub fn save(path: &Path, session: &Session) -> Result<(), SessionError> {
     })
 }
 
+/// Bumped when [`Left`]'s shape changes, for the reason [`VERSION`] is.
+const LEFT_VERSION: u32 = 1;
+
+/// **Where the engine was, so it can come back there with no view open.**
+///
+/// [`Session`] is a view's: which tab, which playlist, and — for a view that owns its
+/// player — what was playing. An attached view restores nothing about playback (#219),
+/// because playback is the engine's, and until this existed the engine remembered none
+/// of it: one that was restarted came up with nothing loaded and waited for a view to
+/// tell it what to play. That is the wrong way round for the case the engine exists
+/// for, which is music with no view open — a media key pressed on a laptop that has
+/// just woken has nothing to act on.
+///
+/// **The recording and the position, and nothing else.** Not the programme: #321
+/// decided a queue is for now, and that stands — the engine opens a fresh programme
+/// around this track exactly as a play gesture would. Not the modes: the librarian
+/// already keeps those beside the log. Not the copy: which file plays is the
+/// librarian's to choose on the day, and a drive that is unmounted today is not a
+/// reason to forget the track.
+///
+/// **In the state directory, beside the view's session**, because it is the same kind
+/// of thing: it cannot be rebuilt by scanning, and it belongs to this machine. The
+/// data directory may be synced, and where one machine stopped listening is not
+/// something to hand another.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Left {
+    pub version: u32,
+    pub recording: Id<Recording>,
+    /// Into the track. Zero for one that had stopped: D-9, stopped is paused at the top.
+    pub position_secs: f64,
+}
+
+impl Left {
+    pub fn new(recording: Id<Recording>, position: std::time::Duration) -> Self {
+        Self {
+            version: LEFT_VERSION,
+            recording,
+            position_secs: position.as_secs_f64(),
+        }
+    }
+
+    /// Where to seek to. A file is hand-editable, so a negative or non-finite number
+    /// is read as the top of the track rather than passed to a seek.
+    pub fn position(&self) -> std::time::Duration {
+        std::time::Duration::try_from_secs_f64(self.position_secs).unwrap_or_default()
+    }
+}
+
+/// `$XDG_STATE_HOME/gmuse/engine.toml`, beside [`default_path`]'s `session.toml`.
+pub fn left_path() -> PathBuf {
+    default_path().with_file_name("engine.toml")
+}
+
+/// Read where the engine was. `None` for anything unreadable or from another version,
+/// which means "start with nothing loaded" — what every engine did before this.
+pub fn load_left(path: &Path) -> Option<Left> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let left: Left = toml::from_str(&text).ok()?;
+    (left.version == LEFT_VERSION).then_some(left)
+}
+
+/// Write where the engine is, atomically.
+pub fn save_left(path: &Path, left: &Left) -> Result<(), SessionError> {
+    write_whole(path, &toml::to_string_pretty(left)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **What the engine wrote is what it reads**, and a file it cannot trust is no file.
+    #[test]
+    fn where_the_engine_was_survives_the_file() {
+        let dir = std::env::temp_dir().join(format!("gmuse-left-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state").join("engine.toml");
+        assert_eq!(load_left(&path), None, "nothing written yet");
+
+        let recording = Id::from_uuid(uuid::Uuid::from_u128(0x1234));
+        let left = Left::new(recording, std::time::Duration::from_millis(90_500));
+        save_left(&path, &left).expect("the directory is made on the way");
+        let read = load_left(&path).expect("it was just written");
+        assert_eq!(read.recording, recording);
+        assert_eq!(read.position(), std::time::Duration::from_millis(90_500));
+
+        // Another version is refused rather than half-read.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("version = 1"),
+            "the fixture below edits this: {text}"
+        );
+        std::fs::write(&path, text.replace("version = 1", "version = 99")).unwrap();
+        assert_eq!(load_left(&path), None);
+
+        // And a position nobody could seek to is the top of the track, not a panic.
+        let mut odd = left.clone();
+        odd.position_secs = -3.0;
+        assert_eq!(odd.position(), std::time::Duration::ZERO);
+        odd.position_secs = f64::NAN;
+        assert_eq!(odd.position(), std::time::Duration::ZERO);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// **A session written by an older gmuse is discarded, not half-read.**
     ///
