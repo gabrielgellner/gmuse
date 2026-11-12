@@ -1,0 +1,12 @@
+# **One compiler for this machine, every other clone and CI.**
+#
+# Nothing named a version, so `verify` installed whatever `stable` was that day
+# and a clone kept whatever it had. On 2026-11-12 those were 1.100.0 and 1.99.1:
+# `just ci` passed here and `verify` failed twice, on a clippy lint and on where
+# cargo puts a test executable, neither on a line the pull request touched.
+#
+# Moving to a new Rust is now a change to this file, made on purpose and tried
+# by the same gate as any other.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]

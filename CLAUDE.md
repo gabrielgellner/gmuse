@@ -154,6 +154,10 @@ just plex [write]    # render the library for Plex onto the NAS, then push ratin
 pull request, as a second look on a clean machine. On GitLab it ran only by hand, to save shared-runner minutes; a
 public GitHub repository's minutes are free.
 
+**The compiler is pinned in `rust-toolchain.toml`**, and `verify` installs what that file names. It was not, and on
+2026-11-12 CI's `stable` was one release ahead of this machine: `just ci` passed and `verify` failed twice on lines no
+pull request had touched (#386). Upgrading Rust is a one-line pull request to that file.
+
 ### Git hooks
 
 `just hooks-install` points `core.hooksPath` at `.githooks/`:
