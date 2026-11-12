@@ -558,7 +558,12 @@ archive write="":
     #
     # The accented-name false alarm is gone with the mount (#328): the share
     # decomposed names, and ssh stores what it is sent.
-    RSYNC=(rsync -a --no-perms --delete)
+    # **Not whichever rsync is first on `PATH`**: macOS's own is openrsync, and
+    # this is the command that deletes. The one `render` sends with, so there
+    # is one choice (`destination.py`); no rsync 3 stops the recipe here.
+    # Its own assignment, because `set -e` does not see a failure inside `( … )`.
+    RSYNC_BIN="$(cd tools && uv run gmuse-tools rsync)"
+    RSYNC=("$RSYNC_BIN" -a --no-perms --delete)
 
     if [ "{{write}}" != "write" ]; then
         echo "dry run — pass 'write' to copy"

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from gmuse_tools import render as render_module
-from gmuse_tools.destination import LocalDir, Remote, Unreachable, parse
+from gmuse_tools.destination import LocalDir, NoRsync, Remote, Unreachable, find_rsync, parse, rsync_major
 from gmuse_tools.render import ENCODES, MANIFEST, Encode, Refused, Transcoding, check_length, ffmpeg, probe_ms, render
 
 if TYPE_CHECKING:
@@ -662,6 +662,37 @@ def far(tmp_path: Path, rsync: tuple[str, ...] | None = None) -> Remote:
     """A remote target that is really a directory here, optionally with another rsync."""
     target = Remote(None, str(tmp_path / FAR))
     return dataclasses.replace(target, rsync=rsync) if rsync else target
+
+
+def an_rsync(where: Path, says: str) -> str:
+    """A directory holding an `rsync` that answers `--version` with this."""
+    where.mkdir()
+    binary = where / "rsync"
+    binary.write_text(f"#!/bin/sh\ncat <<'SAID'\n{says}\nSAID\n")
+    binary.chmod(0o755)
+    return str(where)
+
+
+#: What macOS's `/usr/bin/rsync` says of itself (27.2.1), and what Homebrew's does.
+OPENRSYNC = "openrsync: protocol version 29\nrsync version 2.6.9 compatible"
+RSYNC_3 = "rsync  version 3.5.2  protocol version 33"
+
+
+def test_the_rsync_sent_with_is_one_that_is_rsync_not_the_first_found(tmp_path: Path) -> None:
+    """Apple's openrsync has no `--protect-args`; first on `PATH`, it failed every file of every batch."""
+    apple, brew = an_rsync(tmp_path / "usr", OPENRSYNC), an_rsync(tmp_path / "brew", RSYNC_3)
+    # Instrument: both answer when asked, so the first is passed over for what it says, not for being unreadable.
+    assert rsync_major(f"{apple}/rsync") is None
+    assert rsync_major(f"{brew}/rsync") == 3
+    assert find_rsync([str(tmp_path / "nothing here"), "", apple, brew]) == f"{brew}/rsync"
+
+
+def test_no_rsync_that_can_send_is_refused_not_sent_with_the_other(tmp_path: Path) -> None:
+    """Named, with what to install — not a usage text per file."""
+    apple, old = an_rsync(tmp_path / "usr", OPENRSYNC), an_rsync(tmp_path / "old", "rsync  version 2.6.9  protocol 29")
+    assert (Path(apple) / "rsync").is_file(), "instrument: there was one to refuse"
+    with pytest.raises(NoRsync, match="brew install rsync"):
+        find_rsync([apple, old])
 
 
 def test_a_remote_rendering_lands_then_has_nothing_to_do(lib: FakeLibrary, tmp_path: Path) -> None:
