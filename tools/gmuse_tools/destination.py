@@ -35,15 +35,27 @@ is the check that would notice.
 The NAS's `find` and `xargs` are BusyBox (measured), so the commands here use
 only what it has: `find -print0`, `xargs -0`, `rm -f --`, `rmdir --`. Names
 cross as the UTF-8 the layout wrote, NFC, untouched.
+
+## This side's rsync is chosen, not found
+
+macOS's `/usr/bin/rsync` is `openrsync`, which has no `--protect-args` and
+answers it with its usage text — so every file of a batch failed, with
+`source ... directory` as the reason (measured, 2026-11-11, on a shell whose
+`PATH` had `/usr/bin` ahead of Homebrew's). `rsync()` takes the first rsync
+that says it is version 3 or later, on `PATH` and then where Homebrew puts
+one, and refuses when there is none rather than send with the other.
 """
 
 from __future__ import annotations
 
+import functools
+import os
+import re
 import shlex
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final
 
@@ -61,8 +73,49 @@ STAGING: Final = ".gmuse-staging"
 NO_MANIFEST: Final = 3
 
 
+#: Where Homebrew puts an rsync, looked in after `PATH`: Apple silicon's prefix, then Intel's.
+HOMEBREW: Final = ("/opt/homebrew/bin", "/usr/local/bin")
+
+#: The first rsync with `--protect-args`, which every send here passes.
+RSYNC_MAJOR: Final = 3
+
+
 class Unreachable(RuntimeError):  # noqa: N818 — a state of the target, read as one
     """A target that could not be read or written at all."""
+
+
+class NoRsync(RuntimeError):  # noqa: N818 — a state of this machine, read as one
+    """This machine has no rsync that can do what a send asks of it."""
+
+
+def rsync_major(binary: str) -> int | None:
+    """An rsync's major version, by its own account — `None` for what is not one.
+
+    `openrsync` is not one: its first line is `openrsync: protocol version 29`,
+    and the `rsync version 2.6.9 compatible` under it is a claim, not a version.
+    """
+    try:
+        said = subprocess.run([binary, "--version"], capture_output=True, check=False, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    found = re.match(r"rsync\s+version (\d+)\.", said.decode(errors="replace"))
+    return int(found.group(1)) if found else None
+
+
+def find_rsync(dirs: Iterable[str]) -> str:
+    """The first rsync in these directories that is version 3 or later."""
+    for d in dirs:
+        candidate = Path(d) / "rsync"
+        if d and candidate.is_file() and (rsync_major(str(candidate)) or 0) >= RSYNC_MAJOR:
+            return str(candidate)
+    msg = f"no rsync {RSYNC_MAJOR} here — macOS's own is openrsync, which cannot send a rendering: brew install rsync"
+    raise NoRsync(msg)
+
+
+@functools.cache
+def rsync() -> str:
+    """This machine's rsync, chosen once: `PATH` first, then Homebrew's."""
+    return find_rsync([*os.environ.get("PATH", "").split(os.pathsep), *HOMEBREW])
 
 
 def parents(paths: Iterable[str]) -> list[str]:
@@ -154,7 +207,7 @@ class Remote:
     host: str | None
     root: str
     ssh: tuple[str, ...] = ("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
-    rsync: tuple[str, ...] = ("rsync", "-a", "--no-perms", "--protect-args")
+    rsync: tuple[str, ...] = field(default_factory=lambda: (rsync(), "-a", "--no-perms", "--protect-args"))
 
     @property
     def name(self) -> str:

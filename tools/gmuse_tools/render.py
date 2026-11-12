@@ -61,7 +61,7 @@ from mutagen import MutagenError
 
 from gmuse_tools import album_art, stated
 from gmuse_tools.bronze import cache_dir
-from gmuse_tools.destination import MANIFEST, Destination, LocalDir, Unreachable, parse
+from gmuse_tools.destination import MANIFEST, Destination, LocalDir, NoRsync, Unreachable, parse, rsync
 from gmuse_tools.library import open_library
 
 if TYPE_CHECKING:
@@ -719,6 +719,15 @@ def render(  # noqa: PLR0913 — the command's options, one for one
 
 def register(app: typer.Typer) -> None:
     """Attach the renderer."""
+
+    @app.command("rsync")
+    def rsync_cmd() -> None:
+        """Print the rsync a rendering is sent with — what `just archive` sends with too, so there is one choice."""
+        try:
+            print(rsync())
+        except NoRsync as err:
+            typer.echo(err, err=True)
+            raise typer.Exit(1) from err
 
     @app.command("render")
     def render_cmd(
