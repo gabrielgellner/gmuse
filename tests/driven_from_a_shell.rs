@@ -33,13 +33,14 @@ impl Drop for Engine {
 }
 
 fn binary() -> PathBuf {
-    // The test binary lives beside the one under test.
-    let mut path = std::env::current_exe().expect("current exe");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.join("gmuse")
+    // **Asked of cargo, not worked out from where this test happens to be.**
+    //
+    // It was: take the test executable's own path, drop `deps/`, and expect `gmuse`
+    // beside it. That is a guess about cargo's output layout, and Rust 1.100 on CI's
+    // clean machine stopped honouring it — 74 of this file's 75 tests failed to spawn
+    // with `NotFound`. Cargo builds the binary for an integration test and says where
+    // it put it; this is that.
+    PathBuf::from(env!("CARGO_BIN_EXE_gmuse"))
 }
 
 fn start(name: &str) -> Engine {
