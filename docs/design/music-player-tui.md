@@ -6690,6 +6690,22 @@ Append here as decisions are made. Format: date, decision, rationale.
   adapter logged `invalid type: null` twice on its first start beside a fresh engine. The test now holds the reply as it
   was sent.
 
+- **2026-11-12** **The media-keys adapter says `Playing` once before it says anything else.** The entry above was tried
+  against an engine that was already playing, and the first engine started with nothing loaded left the play key opening
+  Music.app — the one case the keys are for, a running engine and no view. Publishing a stopped engine as `Paused` was
+  the first guess and it changed nothing.
+
+  So it was measured instead, by asking MediaRemote which process the system held as its now-playing application while a
+  throwaway program published each state in turn. `Paused` alone: nobody, with or without a title. `Playing`: that
+  process. `Playing` followed at once by `Paused`: still that process. macOS gives the keys to a process only once it
+  has claimed to be playing, and lets it keep them afterwards. The adapter therefore sends one `Playing` ahead of its
+  first real state, and beside an idle engine the system now names the adapter's pid where it named none.
+
+  **Said once, not on every update**: if another application takes the keys later they are its until gmuse next plays,
+  which is the system's rule for every player. A stopped engine is still published as `Paused`, for D-9's reason and
+  because it leaves one fewer state whose effect on the keys is unmeasured. What a key press _does_ beside an empty
+  engine is a different question — nothing, today, because the engine starts with no programme.
+
 ## 14. Prior art worth reading
 
 Read these for the audio plumbing. None of them implement cmus's library model — that part is ours.
