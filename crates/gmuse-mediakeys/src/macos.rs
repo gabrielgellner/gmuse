@@ -96,12 +96,13 @@ fn key_of(event: MediaControlEvent) -> Option<Key> {
 /// track at most, and `playback.get` is the one reply that has the names in it.
 fn follow(client: &Client, mut controls: MediaControls, keys: &Receiver<Key>) -> ! {
     let mut shown: Option<NowPlaying> = None;
+    let mut claimed = false;
     loop {
         // Before waiting, so the system knows what is playing from the start: a
         // key pressed before the first event still has somewhere to go.
         match now_playing(client, shown.as_ref()) {
             Ok(now) => {
-                show(&mut controls, &now);
+                show(&mut controls, &now, &mut claimed);
                 shown = Some(now);
             }
             Err(e) => gone_or(&e, "could not ask what is playing"),
@@ -151,7 +152,21 @@ fn now_playing(client: &Client, shown: Option<&NowPlaying>) -> Result<NowPlaying
     Ok(now)
 }
 
-fn show(controls: &mut MediaControls, now: &NowPlaying) {
+/// Tell the system what is playing. `claimed` is whether it has ever been told
+/// this process was playing.
+///
+/// **A process is given the keys only once it has said `Playing`.** Measured on
+/// 2026-11-12 by asking the system who its now-playing application was: a
+/// process that published `Paused` was not it, with or without a title; one that
+/// published `Playing` was; and one that said `Playing` and then `Paused` at
+/// once still was. Without that, an engine started with nothing loaded left the
+/// play key opening Music.app — which is the case the keys exist for, since a
+/// running engine and a closed player is the whole of the laptop use.
+///
+/// So the first state shown is preceded by `Playing` when it is not already
+/// that. It is said once: if another application takes the keys afterwards,
+/// they are that application's until gmuse next plays, as for any player.
+fn show(controls: &mut MediaControls, now: &NowPlaying, claimed: &mut bool) {
     // **Names first, then the state.** Setting the metadata replaces the whole
     // now-playing record, elapsed time included; the playback call writes the
     // position back into it.
@@ -162,11 +177,18 @@ fn show(controls: &mut MediaControls, now: &NowPlaying) {
         duration: now.length,
         cover_url: None,
     });
+    if !*claimed {
+        let _ = controls.set_playback(MediaPlayback::Playing { progress: None });
+        *claimed = true;
+    }
     let progress = Some(MediaPosition(now.position));
     let _ = controls.set_playback(match now.state {
         State::Playing => MediaPlayback::Playing { progress },
         State::Paused => MediaPlayback::Paused { progress },
-        State::Stopped => MediaPlayback::Stopped,
+        // **Stopped is told to the system as paused** — D-9: a deck has no third
+        // state, and stopped is paused somewhere. It also keeps one fewer state
+        // whose effect on who holds the keys would have to be measured.
+        State::Stopped => MediaPlayback::Paused { progress: None },
     });
 }
 
