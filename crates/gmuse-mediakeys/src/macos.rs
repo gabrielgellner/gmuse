@@ -24,9 +24,12 @@ use souvlaki::{
     SeekDirection,
 };
 
-use crate::{CLIENT_NAME, Error, FORMAT, Key, NowPlaying, State, length_of};
+use crate::{
+    CLIENT_NAME, Error, FORMAT, Key, NowPlaying, State, cover_among, file_url, length_of,
+    locator_of,
+};
 
-pub(crate) fn run(socket: &Path, version: &str) -> Result<(), Error> {
+pub(crate) fn run(socket: &Path, version: &str, here: &str) -> Result<(), Error> {
     let client = Client::connect(socket, CLIENT_NAME, version)?;
     // `engine` as well as `playback`: a resync says events were dropped, and the
     // answer to that is the same re-read a `playback` event gets.
@@ -52,7 +55,10 @@ pub(crate) fn run(socket: &Path, version: &str) -> Result<(), Error> {
 
     std::thread::Builder::new()
         .name("gmuse-mediakeys".into())
-        .spawn(move || follow(&client, controls, &keys))?;
+        .spawn({
+            let here = here.to_owned();
+            move || follow(&client, controls, &keys, &here)
+        })?;
 
     // `CFRunLoopRun` returns when the loop has nothing attached. The main
     // thread's always has the main dispatch queue, so it should not — and if it
@@ -94,13 +100,13 @@ fn key_of(event: MediaControlEvent) -> Option<Key> {
 /// **Every event is answered by asking again**, rather than by reading the event.
 /// `playback` reports discontinuities only (§7.8), so this runs a few times a
 /// track at most, and `playback.get` is the one reply that has the names in it.
-fn follow(client: &Client, mut controls: MediaControls, keys: &Receiver<Key>) -> ! {
+fn follow(client: &Client, mut controls: MediaControls, keys: &Receiver<Key>, here: &str) -> ! {
     let mut shown: Option<NowPlaying> = None;
     let mut claimed = false;
     loop {
         // Before waiting, so the system knows what is playing from the start: a
         // key pressed before the first event still has somewhere to go.
-        match now_playing(client, shown.as_ref()) {
+        match now_playing(client, shown.as_ref(), here) {
             Ok(now) => {
                 show(&mut controls, &now, &mut claimed);
                 shown = Some(now);
@@ -127,29 +133,51 @@ fn follow(client: &Client, mut controls: MediaControls, keys: &Receiver<Key>) ->
     }
 }
 
-/// What the engine says is playing, with the length carried over or looked up.
-fn now_playing(client: &Client, shown: Option<&NowPlaying>) -> Result<NowPlaying, ClientError> {
+/// What the engine says is playing, with the length and cover carried over or looked up.
+fn now_playing(
+    client: &Client,
+    shown: Option<&NowPlaying>,
+    here: &str,
+) -> Result<NowPlaying, ClientError> {
     let reply = client.call(
         method::PLAYBACK_GET,
         Some(serde_json::json!({ "format": FORMAT })),
     )?;
     let mut now = NowPlaying::read(&reply)?;
 
-    now.length = match (&now.recording, shown) {
-        // The same track as before: its length has not changed.
+    (now.length, now.cover) = match (&now.recording, shown) {
+        // The same track as before: its length and its folder have not changed.
         (Some(recording), Some(shown)) if shown.recording.as_ref() == Some(recording) => {
-            shown.length
+            (shown.length, shown.cover.clone())
         }
         (Some(recording), _) => {
             let row = client.call(
                 method::QUERY_RECORDING,
-                Some(serde_json::json!({ "recording": recording })),
+                Some(serde_json::json!({ "recording": recording, "here": [here] })),
             )?;
-            length_of(&row)
+            (
+                length_of(&row),
+                locator_of(&row).and_then(|file| cover_beside(&file)),
+            )
         }
-        (None, _) => None,
+        (None, _) => (None, None),
     };
     Ok(now)
+}
+
+/// The cover in the folder a file is in, by [`cover_among`]'s names.
+///
+/// **Read here and not asked of the engine.** The engine answers which file it would
+/// play; what else is in that folder is a question about the disk, and this process
+/// is on the same one. Once a track, not once an event.
+fn cover_beside(file: &Path) -> Option<std::path::PathBuf> {
+    let folder = file.parent()?;
+    let names: Vec<String> = std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    cover_among(names.iter().map(String::as_str)).map(|name| folder.join(name))
 }
 
 /// Tell the system what is playing. `claimed` is whether it has ever been told
@@ -170,12 +198,15 @@ fn show(controls: &mut MediaControls, now: &NowPlaying, claimed: &mut bool) {
     // **Names first, then the state.** Setting the metadata replaces the whole
     // now-playing record, elapsed time included; the playback call writes the
     // position back into it.
+    let cover = now.cover.as_deref().map(file_url);
     let _ = controls.set_metadata(MediaMetadata {
         title: now.title.as_deref(),
         artist: now.artist.as_deref(),
         album: now.album.as_deref(),
         duration: now.length,
-        cover_url: None,
+        // Loaded off this thread by the system's own image reader, and dropped if
+        // a newer track has been shown by the time it is ready.
+        cover_url: cover.as_deref(),
     });
     if !*claimed {
         let _ = controls.set_playback(MediaPlayback::Playing { progress: None });

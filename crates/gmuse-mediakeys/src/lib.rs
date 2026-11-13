@@ -52,14 +52,18 @@ pub enum Error {
 /// **Must be called on the main thread**, which is where macOS delivers a key.
 /// Returns only to say why it could not start; once running it ends by exiting
 /// the process when the engine closes the connection.
-pub fn run(socket: &Path, version: &str) -> Result<(), Error> {
+///
+/// `here` is this machine's device, as the library names it. It is what lets the
+/// engine say which file it would play, and so which folder the cover is in; the
+/// caller derives it, because this crate cannot name the library that defines it.
+pub fn run(socket: &Path, version: &str, here: &str) -> Result<(), Error> {
     #[cfg(target_os = "macos")]
     {
-        macos::run(socket, version)
+        macos::run(socket, version, here)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (socket, version);
+        let _ = (socket, version, here);
         Err(Error::Unsupported)
     }
 }
@@ -143,6 +147,8 @@ pub struct NowPlaying {
     pub position: Duration,
     /// How long the track is. Not in `playback.get`'s reply — see [`length_of`].
     pub length: Option<Duration>,
+    /// The picture beside the file that is playing — see [`cover_among`].
+    pub cover: Option<std::path::PathBuf>,
 }
 
 impl NowPlaying {
@@ -188,6 +194,7 @@ impl NowPlaying {
                 _ => Duration::ZERO,
             },
             length: None,
+            cover: None,
         })
     }
 }
@@ -207,6 +214,62 @@ pub fn length_of(reply: &serde_json::Value) -> Option<Duration> {
         length: Duration,
     }
     Reply::deserialize(reply).ok().map(|reply| reply.row.length)
+}
+
+/// Which file the engine would play, from a `query.recording` reply asked with this
+/// device as `here`.
+///
+/// `chosen` is `[locator, encoding, levels]`, and `null` when this device holds no
+/// copy it can reach — a drive not mounted, or a recording held only elsewhere.
+pub fn locator_of(reply: &serde_json::Value) -> Option<std::path::PathBuf> {
+    reply["chosen"][0].as_str().map(std::path::PathBuf::from)
+}
+
+/// **The cover, by name, from what is in the album's folder.**
+///
+/// `cover` before `folder` before `front`, each as `jpg`, `jpeg` or `png`, in any
+/// case. Measured on the live library on 2026-11-13: of 1,201 album folders, 1,162
+/// hold a `cover.jpg` and 15 a `cover.png`, and `covers fetch-apply` writes
+/// `cover.jpg` (`renderings.md` §5), so the first name is the library's own
+/// convention and the other two are what other software left before it.
+///
+/// **A name and not a guess.** `cover-small.jpg` is the copy an upgrade kept, and
+/// `side a.jpg`, `cd.jpeg` and `back.bmp` are pictures of something else; any image
+/// in the folder would show the back of a record whenever its name sorted first.
+/// A folder with none of these shows no picture, which is honest.
+pub fn cover_among<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    const STEMS: [&str; 3] = ["cover", "folder", "front"];
+    const EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
+    let rank = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        let (stem, extension) = lower.rsplit_once('.')?;
+        let stem = STEMS.iter().position(|s| *s == stem)?;
+        let extension = EXTENSIONS.iter().position(|e| *e == extension)?;
+        Some((stem, extension))
+    };
+    names
+        .into_iter()
+        .filter_map(|name| Some((rank(name)?, name)))
+        .min()
+        .map(|(_, name)| name)
+}
+
+/// A path as a `file://` URL, which is what the system's artwork loader reads.
+///
+/// **Percent-encoded byte by byte**, because a URL is parsed and a path is not: a
+/// space, a `#` or a `?` in an album name would otherwise end the path or start a
+/// fragment, and `NSURL` answers a string it cannot parse with nothing at all.
+pub fn file_url(path: &Path) -> String {
+    let mut url = String::from("file://");
+    for byte in path.to_string_lossy().bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                url.push(char::from(byte));
+            }
+            other => url.push_str(&format!("%{other:02X}")),
+        }
+    }
+    url
 }
 
 #[cfg(test)]
@@ -317,6 +380,71 @@ mod tests {
             assert_eq!(now.title, None);
             assert_eq!(now.position, Duration::ZERO);
         }
+    }
+
+    /// **The library's own name wins, and nothing that is merely an image is taken.**
+    ///
+    /// The list is the shapes the live library holds, so a rule that took the first
+    /// image would be caught on the back of a record rather than on a made-up name.
+    #[test]
+    fn the_cover_is_chosen_by_name_and_never_by_being_a_picture() {
+        let folder = [
+            "01 A Track.mp3",
+            "back.bmp",
+            "cd.jpeg",
+            "cover-small.jpg",
+            "Folder.JPG",
+            "side a.jpg",
+            "cover.jpg",
+        ];
+        assert_eq!(cover_among(folder), Some("cover.jpg"));
+
+        // Without it, the next name down, whatever its case.
+        assert_eq!(
+            cover_among(folder.iter().copied().filter(|n| *n != "cover.jpg")),
+            Some("Folder.JPG")
+        );
+        // A `jpg` before a `png` of the same name.
+        assert_eq!(cover_among(["cover.png", "cover.jpg"]), Some("cover.jpg"));
+        // And only pictures of something else: none.
+        assert_eq!(
+            cover_among(["back.bmp", "cd.jpeg", "cover-small.jpg", "side a.jpg"]),
+            None
+        );
+    }
+
+    /// The path a real album has, which is what broke `NSURL` without the encoding.
+    #[test]
+    fn a_path_becomes_a_url_the_system_can_parse() {
+        assert_eq!(
+            file_url(Path::new(
+                "/Users/me/MusicLibrary/Kimbra/Primal Heart/cover.jpg"
+            )),
+            "file:///Users/me/MusicLibrary/Kimbra/Primal%20Heart/cover.jpg"
+        );
+        assert_eq!(
+            file_url(Path::new("/m/Sigur Rós/( )/#1?.jpg")),
+            "file:///m/Sigur%20R%C3%B3s/%28%20%29/%231%3F.jpg"
+        );
+    }
+
+    #[test]
+    fn the_file_is_read_from_what_the_engine_chose() {
+        let reply = serde_json::json!({
+            "chosen": ["/m/Kimbra/Primal Heart/04 Like They Do on the TV.mp3", "72bf8312-70dc-5849-9f6c-17a90788369f", {}],
+            "row": { "length": { "secs": 259, "nanos": 0 } },
+        });
+        assert_eq!(
+            locator_of(&reply),
+            Some(std::path::PathBuf::from(
+                "/m/Kimbra/Primal Heart/04 Like They Do on the TV.mp3"
+            ))
+        );
+        // Held nowhere this device can reach: no file, and so no cover.
+        assert_eq!(
+            locator_of(&serde_json::json!({ "chosen": null, "row": {} })),
+            None
+        );
     }
 
     #[test]

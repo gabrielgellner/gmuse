@@ -142,12 +142,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(gmuse::cli::Command::MediaKeys) = &args.command {
         // **On this thread, which is the main one**: it is where macOS delivers a key.
         let path = gmuse::engine::socket::default_path();
-        return gmuse_mediakeys::run(&path, env!("CARGO_PKG_VERSION")).map_err(|e| match e {
-            gmuse_mediakeys::Error::Client(e) => {
-                die(format!("{e}\n\nStart one with: gmuse engine --foreground"))
-            }
-            other => die(other),
-        });
+        // **This machine's device, derived the way every writer here derives it**, so
+        // the engine can say which file it would play here — the cover is beside it.
+        let machine = gmuse::events::machine_id(&gmuse::config::default_state_dir());
+        let here: gmuse::model::id::Id<gmuse::model::entity::Device> =
+            gmuse::model::id::Id::derived(machine.as_bytes());
+        return gmuse_mediakeys::run(&path, env!("CARGO_PKG_VERSION"), &here.to_string()).map_err(
+            |e| match e {
+                gmuse_mediakeys::Error::Client(e) => {
+                    die(format!("{e}\n\nStart one with: gmuse engine --foreground"))
+                }
+                other => die(other),
+            },
+        );
     }
 
     if let Some(gmuse::cli::Command::Engine {

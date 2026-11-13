@@ -1382,7 +1382,8 @@ A control-plane `param.set` counts as a touch for precedence purposes.
   **Built** as `gmuse-mediakeys` and `gmuse media-keys`, which the engine starts beside itself once its socket is bound.
   It asks `playback.get` on every `playback` event rather than reading the event, because that reply is the one with the
   names in it, and it sends `next` and `prev` through `cmd.exec_line` until the programme has a typed method for them.
-  MPRIS on Linux would be a second platform file in the same crate.
+  MPRIS on Linux would be a second platform file in the same crate. It shows the album's `cover.jpg` (or `folder`,
+  `front`) from the folder of the file the engine would play — `music-player-tui.md` §13, 2026-11-13.
 
 ---
 
