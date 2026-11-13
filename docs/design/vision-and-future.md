@@ -32,8 +32,8 @@ socket. Spotify is not.
 
 **Played from the keyboard.** The brief already says it: gmuse is a way to interact with music, not a thing to look at.
 It is off screen most of the time, and an arguable feature is judged by whether it makes the next action cheaper or only
-makes the screen nicer. That rule is why there is no album art and no spectrum display, and it is equally why the remote
-socket and session resumption matter more than their size suggests.
+makes the screen nicer. That rule is why there is no album art in the terminal and no spectrum display, and it is
+equally why the remote socket and session resumption matter more than their size suggests.
 
 Everything below is an elaboration of those two sentences. When something in this document conflicts with them, they
 win.
@@ -243,8 +243,9 @@ representation of "where am I in this track and what is coming" would be. If tha
 does not grow an embedded programming language; past a certain complexity the work moves to §5's editor and comes back
 as data.
 
-**Streaming services, album art, lyrics, podcasts** — unchanged, permanently. The line drawn in 2026-08-29 was between
-_my files_ and _somebody's service_, and none of these cross it in the right direction.
+**Streaming services, album art in the terminal, lyrics, podcasts** — unchanged, permanently. (The system's Now Playing
+shows the cover beside the file — `music-player-tui.md` §13, 2026-11-13.) The line drawn in 2026-08-29 was between _my
+files_ and _somebody's service_, and none of these cross it in the right direction.
 
 ---
 

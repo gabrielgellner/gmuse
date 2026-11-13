@@ -23,9 +23,10 @@ structured."
 **gmuse is a way to interact with music, not a thing to look at.** It is driven from the keyboard, it is off screen most
 of the time, and its job is to make the next action cheap — not to fill a terminal with something worth watching.
 
-This is a scope rule, not a mood. It is why there are no visualizers and no album art, and it is also why a remote
-socket, media keys and session resumption matter more than they look: the interface has to be usable when it is not in
-front of you. When a feature is arguable, the question is whether it makes acting faster or only makes looking nicer.
+This is a scope rule, not a mood. It is why there are no visualizers and no album art in the terminal (the system's Now
+Playing shows the cover — §13, 2026-11-13), and it is also why a remote socket, media keys and session resumption matter
+more than they look: the interface has to be usable when it is not in front of you. When a feature is arguable, the
+question is whether it makes acting faster or only makes looking nicer.
 
 ### In scope
 
@@ -6744,6 +6745,32 @@ Append here as decisions are made. Format: date, decision, rationale.
   short enough that it is already inside the next file, and a seek goes where the decoder is. On a real track that is
   the last fraction of a second before a gapless join, where a seek back would land in the next track instead. Not fixed
   here and not yet reproduced outside the fixture.
+
+- **2026-11-13** **The system's Now Playing shows the album's cover; the terminal still does not.** §1 puts album art
+  out, and says why: gmuse is off screen most of the time, and a feature that only makes the screen nicer is not one.
+  The media-keys adapter is the off-screen part. Control Centre's tile is what a person looks at instead of opening the
+  player, and a cover there is how the track is recognised at a glance. So the rule is narrowed rather than dropped:
+  **no album art in the terminal**, and the OS surface shows the picture beside the file. Asked for by name; the TUI
+  gains nothing.
+
+  **Which picture.** The adapter asks `query.recording` with this device as `here`, which answers the file the engine
+  would play, and looks in that file's folder for `cover`, then `folder`, then `front`, each as `jpg`, `jpeg` or `png`,
+  in any case. Measured on the live library: 1,162 of 1,201 album folders hold a `cover.jpg` and 15 a `cover.png`, and
+  `covers fetch-apply` writes `cover.jpg`. **A name and never "an image"**: `cover-small.jpg` is what an upgrade kept,
+  and `side a.jpg`, `cd.jpeg` and `back.bmp` are pictures of something else, so a rule that took any image would show
+  the back of a record whenever its name sorted first. A folder with none of the three shows no picture. Embedded art is
+  not read; the master's convention is the file beside it (`storage-layout.md` §9).
+
+  The folder is read by the adapter, not the engine: what else is in a folder is a question about a disk this process
+  shares, and the engine already answers the only library question in it. Once a track. The device id is derived by the
+  binary and handed in, because the adapter's crate may not name the library that defines it.
+
+  **The path is sent as a percent-encoded `file://` URL**, because `NSURL` parses a string and answers one it cannot
+  parse with nothing: a space or `#` in an album name would otherwise lose the picture silently.
+
+  **Not verified by an instrument.** The MediaRemote query that measured who holds the keys reports no artwork even for
+  a native Swift program setting it, so it cannot see this; the cover was confirmed by looking at Control Centre. The
+  unit tests cover the name rule and the encoding, and each fails under a one-line sabotage.
 
 ## 14. Prior art worth reading
 
